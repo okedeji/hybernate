@@ -62,10 +62,11 @@ spec:
               idlePolicy:
                 properties:
                   action:
-                    default: pause
+                    default: auto
                     enum:
-                    - pause
+                    - auto
                     - scaleDown
+                    - pause
                     - destroy
                     type: string
                   detectAfter:
@@ -103,11 +104,9 @@ spec:
                     format: duration
                     type: string
                   snapshotStorage:
+                    default: internal
                     enum:
-                    - s3
-                    - gcs
-                    - azure
-                    - minio
+                    - internal
                     type: string
                 required:
                 - snapshotStorage

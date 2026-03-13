@@ -119,12 +119,13 @@ type WarmPoolSpec struct {
 	Override *int `json:"override,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=pause;scaleDown;destroy
+// +kubebuilder:validation:Enum=auto;scaleDown;pause;destroy
 type IdleAction string
 
 const (
-	IdleActionPause     IdleAction = "pause"
+	IdleActionAuto      IdleAction = "auto"
 	IdleActionScaleDown IdleAction = "scaleDown"
+	IdleActionPause     IdleAction = "pause"
 	IdleActionDestroy   IdleAction = "destroy"
 )
 
@@ -132,7 +133,7 @@ type IdlePolicySpec struct {
 	// +kubebuilder:validation:Format=duration
 	DetectAfter metav1.Duration `json:"detectAfter"`
 
-	// +kubebuilder:default=pause
+	// +kubebuilder:default=auto
 	Action IdleAction `json:"action"`
 
 	// +optional
@@ -163,17 +164,15 @@ type SignalSpec struct {
 	URL string `json:"url,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=s3;gcs;azure;minio
+// +kubebuilder:validation:Enum=internal
 type StorageBackendType string
 
 const (
-	StorageBackendS3    StorageBackendType = "s3"
-	StorageBackendGCS   StorageBackendType = "gcs"
-	StorageBackendAzure StorageBackendType = "azure"
-	StorageBackendMinIO StorageBackendType = "minio"
+	StorageBackendInternal StorageBackendType = "internal"
 )
 
 type PausePolicySpec struct {
+	// +kubebuilder:default=internal
 	SnapshotStorage StorageBackendType `json:"snapshotStorage"`
 
 	// +optional

@@ -34,4 +34,4 @@ go.work
 *.claude
 
 # Internal planning docs
-hybernate-project.md
+.docs
