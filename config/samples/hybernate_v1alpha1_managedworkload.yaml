@@ -1,0 +1,9 @@
+apiVersion: hybernate.hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata:
+  labels:
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+  name: managedworkload-sample
+spec:
+  # TODO(user): Add fields here
