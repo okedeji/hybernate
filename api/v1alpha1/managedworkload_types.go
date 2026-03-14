@@ -19,7 +19,6 @@ package v1alpha1
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // +kubebuilder:object:root=true
@@ -55,23 +54,23 @@ func init() {
 // --- Spec ---
 
 type ManagedWorkloadSpec struct {
-	// Template identifies the workload to manage.
-	Template WorkloadTemplate `json:"template"`
-
-	// +optional
-	WarmPool *WarmPoolSpec `json:"warmPool,omitempty"`
+	// Target identifies the workload to manage.
+	Target WorkloadRef `json:"target"`
 
 	// +optional
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
 	// +optional
-	PausePolicy *PausePolicySpec `json:"pausePolicy,omitempty"`
+	Pause *PauseSpec `json:"pause,omitempty"`
 
 	// +optional
-	ScaleDown *ScalingSpec `json:"scaleDown,omitempty"`
+	Scale *ScaleSpec `json:"scale,omitempty"`
 
 	// +optional
-	ScaleUp *ScalingSpec `json:"scaleUp,omitempty"`
+	Destroy *DestroySpec `json:"destroy,omitempty"`
+
+	// +optional
+	WarmPool *WarmPoolSpec `json:"warmPool,omitempty"`
 
 	// +optional
 	CostTracking *CostTrackingSpec `json:"costTracking,omitempty"`
@@ -80,15 +79,15 @@ type ManagedWorkloadSpec struct {
 	DryRun bool `json:"dryRun,omitempty"`
 }
 
-type WorkloadTemplate struct {
+type WorkloadRef struct {
 	// +kubebuilder:validation:MinLength=1
 	APIVersion string `json:"apiVersion"`
 
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
 
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Spec runtime.RawExtension `json:"spec"`
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 type WarmPoolSpec struct {
@@ -164,27 +163,47 @@ type SignalSpec struct {
 	URL string `json:"url,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=internal
-type StorageBackendType string
+// +kubebuilder:validation:Enum=destroy;resume
+type ExpireAction string
 
 const (
-	StorageBackendInternal StorageBackendType = "internal"
+	ExpireActionDestroy ExpireAction = "destroy"
+	ExpireActionResume  ExpireAction = "resume"
 )
 
-type PausePolicySpec struct {
-	// +kubebuilder:default=internal
-	SnapshotStorage StorageBackendType `json:"snapshotStorage"`
+type PauseSpec struct {
+	// +optional
+	VolumeSnapshotClass *string `json:"volumeSnapshotClass,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:Format=duration
 	MaxPauseDuration *metav1.Duration `json:"maxPauseDuration,omitempty"`
+
+	// +kubebuilder:default=destroy
+	// +optional
+	ExpireAction ExpireAction `json:"expireAction,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:Format=duration
 	ResumeTime *metav1.Duration `json:"resumeTime,omitempty"`
 }
 
-type ScalingSpec struct {
+type ScaleSpec struct {
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=1
+	MinReplicas int `json:"minReplicas"`
+
+	// +kubebuilder:validation:Minimum=1
+	MaxReplicas int `json:"maxReplicas"`
+
+	// +optional
+	Down *ScaleDirectionSpec `json:"down,omitempty"`
+
+	// +optional
+	Up *ScaleDirectionSpec `json:"up,omitempty"`
+}
+
+type ScaleDirectionSpec struct {
 	// +optional
 	// +kubebuilder:validation:Format=duration
 	Stabilization *metav1.Duration `json:"stabilization,omitempty"`
@@ -192,6 +211,19 @@ type ScalingSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxStep *int `json:"maxStep,omitempty"`
+}
+
+type DestroySpec struct {
+	// +kubebuilder:default=true
+	// +optional
+	FinalSnapshot bool `json:"finalSnapshot,omitempty"`
+
+	// +optional
+	VolumeSnapshotClass *string `json:"volumeSnapshotClass,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Format=duration
+	SnapshotRetention *metav1.Duration `json:"snapshotRetention,omitempty"`
 }
 
 type CostTrackingSpec struct {

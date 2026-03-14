@@ -57,6 +57,17 @@ spec:
                 required:
                 - enabled
                 type: object
+              destroy:
+                properties:
+                  finalSnapshot:
+                    default: true
+                    type: boolean
+                  snapshotRetention:
+                    format: duration
+                    type: string
+                  volumeSnapshotClass:
+                    type: string
+                type: object
               dryRun:
                 type: boolean
               idlePolicy:
@@ -95,42 +106,56 @@ spec:
                 - action
                 - detectAfter
                 type: object
-              pausePolicy:
+              pause:
                 properties:
+                  expireAction:
+                    default: destroy
+                    enum:
+                    - destroy
+                    - resume
+                    type: string
                   maxPauseDuration:
                     format: duration
                     type: string
                   resumeTime:
                     format: duration
                     type: string
-                  snapshotStorage:
-                    default: internal
-                    enum:
-                    - internal
+                  volumeSnapshotClass:
                     type: string
+                type: object
+              scale:
+                properties:
+                  down:
+                    properties:
+                      maxStep:
+                        minimum: 1
+                        type: integer
+                      stabilization:
+                        format: duration
+                        type: string
+                    type: object
+                  maxReplicas:
+                    minimum: 1
+                    type: integer
+                  minReplicas:
+                    default: 1
+                    minimum: 0
+                    type: integer
+                  up:
+                    properties:
+                      maxStep:
+                        minimum: 1
+                        type: integer
+                      stabilization:
+                        format: duration
+                        type: string
+                    type: object
                 required:
-                - snapshotStorage
+                - maxReplicas
+                - minReplicas
                 type: object
-              scaleDown:
-                properties:
-                  maxStep:
-                    minimum: 1
-                    type: integer
-                  stabilization:
-                    format: duration
-                    type: string
-                type: object
-              scaleUp:
-                properties:
-                  maxStep:
-                    minimum: 1
-                    type: integer
-                  stabilization:
-                    format: duration
-                    type: string
-                type: object
-              template:
-                description: Template identifies the workload to manage.
+              target:
+                description: Target identifies the workload to manage.
                 properties:
                   apiVersion:
                     minLength: 1
@@ -138,13 +163,13 @@ spec:
                   kind:
                     minLength: 1
                     type: string
-                  spec:
-                    type: object
-                    x-kubernetes-preserve-unknown-fields: true
+                  name:
+                    minLength: 1
+                    type: string
                 required:
                 - apiVersion
                 - kind
-                - spec
+                - name
                 type: object
               warmPool:
                 properties:
@@ -178,7 +203,7 @@ spec:
                 - minReady
                 type: object
             required:
-            - template
+            - target
             type: object
           status:
             properties:

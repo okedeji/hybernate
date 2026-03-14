@@ -23,7 +23,6 @@ import (
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -52,10 +51,10 @@ var _ = Describe("ManagedWorkload Controller", func() {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.ManagedWorkloadSpec{
-						Template: v1alpha1.WorkloadTemplate{
+						Target: v1alpha1.WorkloadRef{
 							APIVersion: "apps/v1",
 							Kind:       "StatefulSet",
-							Spec:       runtime.RawExtension{Raw: []byte(`{}`)},
+							Name:       resourceName,
 						},
 					},
 				}
