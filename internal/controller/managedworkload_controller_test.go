@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -74,7 +74,7 @@ var _ = Describe("ManagedWorkload Controller", func() {
 			r := &Reconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 			}
 
 			_, err := r.Reconcile(ctx, reconcile.Request{

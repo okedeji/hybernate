@@ -120,7 +120,7 @@ func main() {
 	if err := (&controller.Reconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("hybernate"),
+		Recorder: mgr.GetEventRecorder("hybernate"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ManagedWorkload")
 		os.Exit(1)
