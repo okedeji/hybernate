@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package idle
+package policy
 
 import (
 	"context"
@@ -22,71 +22,67 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/okedeji/hybernate/internal/signal"
 )
 
-type Status int
+type IdleStatus int
 
 const (
-	Active Status = iota
-	Idle
+	IdleStatusActive IdleStatus = iota
+	IdleStatusIdle
 )
 
-func (s Status) String() string {
+func (s IdleStatus) String() string {
 	switch s {
-	case Active:
+	case IdleStatusActive:
 		return "Active"
-	case Idle:
+	case IdleStatusIdle:
 		return "Idle"
 	default:
 		return "Unknown"
 	}
 }
 
-type Evaluation struct {
-	Status  Status
+type IdleEvaluation struct {
+	Status  IdleStatus
 	IdleFor time.Duration
 	Reasons []string
 }
 
-type Detector struct {
+type IdleDetector struct {
 	Clock func() time.Time
 
 	mu        sync.Mutex
 	idleSince map[string]time.Time
 }
 
-func NewDetector() *Detector {
-	return &Detector{
+func NewIdleDetector() *IdleDetector {
+	return &IdleDetector{
 		Clock:     time.Now,
 		idleSince: make(map[string]time.Time),
 	}
 }
 
-func workloadKey(namespace, name string) string {
-	return namespace + "/" + name
-}
-
 // Evaluate checks all signals and determines whether the workload has been
-// idle long enough to act on. Every signal must report idle; if any signal
-// reports active, the idle timer resets.
-func (d *Detector) Evaluate(ctx context.Context, namespace, name string, signals []Signal, timeout time.Duration) (Evaluation, error) {
+// idle long enough to act on. Every signal must confirm idleness; if any
+// signal denies, the idle timer resets.
+func (d *IdleDetector) Evaluate(ctx context.Context, namespace, name string, signals []signal.Checker, timeout time.Duration) (IdleEvaluation, error) {
 	if len(signals) == 0 {
-		return Evaluation{Status: Active, Reasons: []string{"no signals configured"}}, nil
+		return IdleEvaluation{Status: IdleStatusActive, Reasons: []string{"no signals configured"}}, nil
 	}
 
 	key := workloadKey(namespace, name)
 
-	for _, sig := range signals {
-		res, err := sig.Check(ctx, namespace, name)
-		if err != nil {
-			return Evaluation{}, fmt.Errorf("checking signal for %s/%s: %w", namespace, name, err)
-		}
-		if res.Active {
-			d.mu.Lock()
-			delete(d.idleSince, key)
-			d.mu.Unlock()
-			return Evaluation{Status: Active, Reasons: []string{res.Reason}}, nil
-		}
+	res, err := signal.CheckAll(ctx, namespace, name, signals)
+	if err != nil {
+		return IdleEvaluation{}, err
+	}
+	if !res.Confirm {
+		d.mu.Lock()
+		delete(d.idleSince, key)
+		d.mu.Unlock()
+		return IdleEvaluation{Status: IdleStatusActive, Reasons: []string{res.Reason}}, nil
 	}
 
 	now := d.Clock()
@@ -97,23 +93,23 @@ func (d *Detector) Evaluate(ctx context.Context, namespace, name string, signals
 	since, tracked := d.idleSince[key]
 	if !tracked {
 		d.idleSince[key] = now
-		return Evaluation{
-			Status:  Active,
-			Reasons: []string{"all signals report idle, starting idle timer"},
+		return IdleEvaluation{
+			Status:  IdleStatusActive,
+			Reasons: []string{"all signals confirm idle, starting idle timer"},
 		}, nil
 	}
 
 	idleFor := now.Sub(since)
 	if idleFor >= timeout {
-		return Evaluation{
-			Status:  Idle,
+		return IdleEvaluation{
+			Status:  IdleStatusIdle,
 			IdleFor: idleFor,
 			Reasons: []string{fmt.Sprintf("idle for %s, exceeds timeout %s", idleFor, timeout)},
 		}, nil
 	}
 
-	return Evaluation{
-		Status:  Active,
+	return IdleEvaluation{
+		Status:  IdleStatusActive,
 		IdleFor: idleFor,
 		Reasons: []string{fmt.Sprintf("idle for %s, waiting for timeout %s", idleFor, timeout)},
 	}, nil
@@ -121,16 +117,20 @@ func (d *Detector) Evaluate(ctx context.Context, namespace, name string, signals
 
 // Reset clears the idle timer for a workload. Call when a workload
 // transitions out of idle (resumed, scaled up, etc).
-func (d *Detector) Reset(namespace, name string) {
+func (d *IdleDetector) Reset(namespace, name string) {
 	key := workloadKey(namespace, name)
 	d.mu.Lock()
 	delete(d.idleSince, key)
 	d.mu.Unlock()
 }
 
-func (e Evaluation) String() string {
-	if e.Status == Active {
+func (e IdleEvaluation) String() string {
+	if e.Status == IdleStatusActive {
 		return fmt.Sprintf("Active (%s)", strings.Join(e.Reasons, "; "))
 	}
 	return fmt.Sprintf("Idle for %s (%s)", e.IdleFor, strings.Join(e.Reasons, "; "))
+}
+
+func workloadKey(namespace, name string) string {
+	return namespace + "/" + name
 }

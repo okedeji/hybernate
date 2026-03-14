@@ -53,9 +53,21 @@ func init() {
 
 // --- Spec ---
 
+// +kubebuilder:validation:Enum=Running;Paused;Destroyed
+type DesiredState string
+
+const (
+	DesiredStateRunning   DesiredState = "Running"
+	DesiredStatePaused    DesiredState = "Paused"
+	DesiredStateDestroyed DesiredState = "Destroyed"
+)
+
 type ManagedWorkloadSpec struct {
 	// Target identifies the workload to manage.
 	Target WorkloadRef `json:"target"`
+
+	// +optional
+	DesiredState *DesiredState `json:"desiredState,omitempty"`
 
 	// +optional
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
@@ -64,13 +76,13 @@ type ManagedWorkloadSpec struct {
 	Pause *PauseSpec `json:"pause,omitempty"`
 
 	// +optional
-	Scale *ScaleSpec `json:"scale,omitempty"`
+	ScalePolicy *ScalePolicySpec `json:"scalePolicy,omitempty"`
 
 	// +optional
 	Destroy *DestroySpec `json:"destroy,omitempty"`
 
 	// +optional
-	WarmPool *WarmPoolSpec `json:"warmPool,omitempty"`
+	Prediction *PredictionSpec `json:"prediction,omitempty"`
 
 	// +optional
 	CostTracking *CostTrackingSpec `json:"costTracking,omitempty"`
@@ -90,42 +102,20 @@ type WorkloadRef struct {
 	Name string `json:"name"`
 }
 
-type WarmPoolSpec struct {
-	Enabled bool `json:"enabled"`
-
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=1
-	MinReady int `json:"minReady"`
-
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=100
-	MaxReady int `json:"maxReady"`
-
-	// Confidence threshold as a percentage (0-100). The prediction engine
-	// must exceed this before driving real pool sizing.
+type PredictionSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=85
-	// +optional
-	Confidence int `json:"confidence,omitempty"`
-
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=168
-	// +optional
-	MinDataPoints int `json:"minDataPoints,omitempty"`
-
-	// +optional
-	Override *int `json:"override,omitempty"`
+	Confidence int `json:"confidence"`
 }
 
-// +kubebuilder:validation:Enum=auto;scaleDown;pause;destroy
+// +kubebuilder:validation:Enum=auto;pause;destroy
 type IdleAction string
 
 const (
-	IdleActionAuto      IdleAction = "auto"
-	IdleActionScaleDown IdleAction = "scaleDown"
-	IdleActionPause     IdleAction = "pause"
-	IdleActionDestroy   IdleAction = "destroy"
+	IdleActionAuto    IdleAction = "auto"
+	IdleActionPause   IdleAction = "pause"
+	IdleActionDestroy IdleAction = "destroy"
 )
 
 type IdlePolicySpec struct {
@@ -136,20 +126,22 @@ type IdlePolicySpec struct {
 	Action IdleAction `json:"action"`
 
 	// +optional
-	Signal *SignalSpec `json:"signal,omitempty"`
+	Signals []SignalSpec `json:"signals,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:Format=duration
 	GracePeriod *metav1.Duration `json:"gracePeriod,omitempty"`
+
+	// +optional
+	AutoResume bool `json:"autoResume,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=internal;prometheus;webhook
+// +kubebuilder:validation:Enum=internal;prometheus
 type SignalSource string
 
 const (
 	SignalSourceInternal   SignalSource = "internal"
 	SignalSourcePrometheus SignalSource = "prometheus"
-	SignalSourceWebhook    SignalSource = "webhook"
 )
 
 type SignalSpec struct {
@@ -157,10 +149,7 @@ type SignalSpec struct {
 	Source SignalSource `json:"source"`
 
 	// +optional
-	Query string `json:"query,omitempty"`
-
-	// +optional
-	URL string `json:"url,omitempty"`
+	PromQL string `json:"promQL,omitempty"`
 }
 
 // +kubebuilder:validation:Enum=destroy;resume
@@ -173,28 +162,24 @@ const (
 
 type PauseSpec struct {
 	// +optional
-	VolumeSnapshotClass *string `json:"volumeSnapshotClass,omitempty"`
-
-	// +optional
 	// +kubebuilder:validation:Format=duration
-	MaxPauseDuration *metav1.Duration `json:"maxPauseDuration,omitempty"`
+	ExpireAfter *metav1.Duration `json:"expireAfter,omitempty"`
 
 	// +kubebuilder:default=destroy
 	// +optional
 	ExpireAction ExpireAction `json:"expireAction,omitempty"`
-
-	// +optional
-	// +kubebuilder:validation:Format=duration
-	ResumeTime *metav1.Duration `json:"resumeTime,omitempty"`
 }
 
-type ScaleSpec struct {
+type ScalePolicySpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
 	MinReplicas int `json:"minReplicas"`
 
 	// +kubebuilder:validation:Minimum=1
 	MaxReplicas int `json:"maxReplicas"`
+
+	// +optional
+	Signals []SignalSpec `json:"signals,omitempty"`
 
 	// +optional
 	Down *ScaleDirectionSpec `json:"down,omitempty"`
@@ -214,16 +199,13 @@ type ScaleDirectionSpec struct {
 }
 
 type DestroySpec struct {
-	// +kubebuilder:default=true
 	// +optional
-	FinalSnapshot bool `json:"finalSnapshot,omitempty"`
-
-	// +optional
-	VolumeSnapshotClass *string `json:"volumeSnapshotClass,omitempty"`
+	// +kubebuilder:validation:Format=duration
+	PVCRetention *metav1.Duration `json:"pvcRetention,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:Format=duration
-	SnapshotRetention *metav1.Duration `json:"snapshotRetention,omitempty"`
+	PVCRetentionWarning *metav1.Duration `json:"pvcRetentionWarning,omitempty"`
 }
 
 type CostTrackingSpec struct {
@@ -235,17 +217,19 @@ type CostTrackingSpec struct {
 
 // --- Status ---
 
-// +kubebuilder:validation:Enum=Creating;Running;Idle;Pausing;Paused;Resuming;Destroyed
+// +kubebuilder:validation:Enum=Creating;Running;Idle;Scaling;Pausing;Paused;Resuming;Destroying;Destroyed
 type WorkloadPhase string
 
 const (
-	PhaseCreating  WorkloadPhase = "Creating"
-	PhaseRunning   WorkloadPhase = "Running"
-	PhaseIdle      WorkloadPhase = "Idle"
-	PhasePausing   WorkloadPhase = "Pausing"
-	PhasePaused    WorkloadPhase = "Paused"
-	PhaseResuming  WorkloadPhase = "Resuming"
-	PhaseDestroyed WorkloadPhase = "Destroyed"
+	PhaseCreating   WorkloadPhase = "Creating"
+	PhaseRunning    WorkloadPhase = "Running"
+	PhaseIdle       WorkloadPhase = "Idle"
+	PhaseScaling    WorkloadPhase = "Scaling"
+	PhasePausing    WorkloadPhase = "Pausing"
+	PhasePaused     WorkloadPhase = "Paused"
+	PhaseResuming   WorkloadPhase = "Resuming"
+	PhaseDestroying WorkloadPhase = "Destroying"
+	PhaseDestroyed  WorkloadPhase = "Destroyed"
 )
 
 type ManagedWorkloadStatus struct {
@@ -258,7 +242,13 @@ type ManagedWorkloadStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// +optional
-	Pool *PoolStatus `json:"pool,omitempty"`
+	Pause *PauseStatus `json:"pause,omitempty"`
+
+	// +optional
+	Scale *ScaleStatus `json:"scale,omitempty"`
+
+	// +optional
+	Destroy *DestroyStatus `json:"destroy,omitempty"`
 
 	// +optional
 	Prediction *PredictionStatus `json:"prediction,omitempty"`
@@ -270,10 +260,22 @@ type ManagedWorkloadStatus struct {
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 }
 
-type PoolStatus struct {
-	Ready  int `json:"ready"`
-	InUse  int `json:"inUse"`
-	Target int `json:"target"`
+type PauseStatus struct {
+	PreviousReplicas int32        `json:"previousReplicas"`
+	PausedAt         *metav1.Time `json:"pausedAt,omitempty"`
+}
+
+type ScaleStatus struct {
+	PreviousReplicas int32        `json:"previousReplicas"`
+	CurrentReplicas  int32        `json:"currentReplicas"`
+	ScaledAt         *metav1.Time `json:"scaledAt,omitempty"`
+}
+
+type DestroyStatus struct {
+	DestroyedAt *metav1.Time `json:"destroyedAt,omitempty"`
+
+	// +optional
+	PVCRetentionExpiresAt *metav1.Time `json:"pvcRetentionExpiresAt,omitempty"`
 }
 
 type PredictionStatus struct {

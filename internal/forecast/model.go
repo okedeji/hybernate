@@ -37,7 +37,7 @@ limitations under the License.
 //   - α, β, γ₁, γ₂ = smoothing parameters in (0, 1)
 
 
-package predict
+package forecast
 
 const (
 	DailySeason  = 24

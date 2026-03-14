@@ -57,15 +57,19 @@ spec:
                 required:
                 - enabled
                 type: object
+              desiredState:
+                enum:
+                - Running
+                - Paused
+                - Destroyed
+                type: string
               destroy:
                 properties:
-                  finalSnapshot:
-                    default: true
-                    type: boolean
-                  snapshotRetention:
+                  pvcRetention:
                     format: duration
                     type: string
-                  volumeSnapshotClass:
+                  pvcRetentionWarning:
+                    format: duration
                     type: string
                 type: object
               dryRun:
@@ -76,32 +80,32 @@ spec:
                     default: auto
                     enum:
                     - auto
-                    - scaleDown
                     - pause
                     - destroy
                     type: string
+                  autoResume:
+                    type: boolean
                   detectAfter:
                     format: duration
                     type: string
                   gracePeriod:
                     format: duration
                     type: string
-                  signal:
-                    properties:
-                      query:
-                        type: string
-                      source:
-                        default: internal
-                        enum:
-                        - internal
-                        - prometheus
-                        - webhook
-                        type: string
-                      url:
-                        type: string
-                    required:
-                    - source
-                    type: object
+                  signals:
+                    items:
+                      properties:
+                        promQL:
+                          type: string
+                        source:
+                          default: internal
+                          enum:
+                          - internal
+                          - prometheus
+                          type: string
+                      required:
+                      - source
+                      type: object
+                    type: array
                 required:
                 - action
                 - detectAfter
@@ -114,16 +118,21 @@ spec:
                     - destroy
                     - resume
                     type: string
-                  maxPauseDuration:
+                  expireAfter:
                     format: duration
-                    type: string
-                  resumeTime:
-                    format: duration
-                    type: string
-                  volumeSnapshotClass:
                     type: string
                 type: object
-              scale:
+              prediction:
+                properties:
+                  confidence:
+                    default: 85
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                required:
+                - confidence
+                type: object
+              scalePolicy:
                 properties:
                   down:
                     properties:
@@ -141,6 +150,21 @@ spec:
                     default: 1
                     minimum: 0
                     type: integer
+                  signals:
+                    items:
+                      properties:
+                        promQL:
+                          type: string
+                        source:
+                          default: internal
+                          enum:
+                          - internal
+                          - prometheus
+                          type: string
+                      required:
+                      - source
+                      type: object
+                    type: array
                   up:
                     properties:
                       maxStep:
@@ -170,37 +194,6 @@ spec:
                 - apiVersion
                 - kind
                 - name
-                type: object
-              warmPool:
-                properties:
-                  confidence:
-                    default: 85
-                    description: |-
-                      Confidence threshold as a percentage (0-100). The prediction engine
-                      must exceed this before driving real pool sizing.
-                    maximum: 100
-                    minimum: 0
-                    type: integer
-                  enabled:
-                    type: boolean
-                  maxReady:
-                    default: 100
-                    minimum: 1
-                    type: integer
-                  minDataPoints:
-                    default: 168
-                    minimum: 1
-                    type: integer
-                  minReady:
-                    default: 1
-                    minimum: 0
-                    type: integer
-                  override:
-                    type: integer
-                required:
-                - enabled
-                - maxReady
-                - minReady
                 type: object
             required:
             - target
@@ -287,32 +280,41 @@ spec:
                 - currentMonthMemoryHours
                 - estimatedMonthlyCost
                 type: object
+              destroy:
+                properties:
+                  destroyedAt:
+                    format: date-time
+                    type: string
+                  pvcRetentionExpiresAt:
+                    format: date-time
+                    type: string
+                type: object
               lastTransitionTime:
                 format: date-time
                 type: string
+              pause:
+                properties:
+                  pausedAt:
+                    format: date-time
+                    type: string
+                  previousReplicas:
+                    format: int32
+                    type: integer
+                required:
+                - previousReplicas
+                type: object
               phase:
                 enum:
                 - Creating
                 - Running
                 - Idle
+                - Scaling
                 - Pausing
                 - Paused
                 - Resuming
+                - Destroying
                 - Destroyed
                 type: string
-              pool:
-                properties:
-                  inUse:
-                    type: integer
-                  ready:
-                    type: integer
-                  target:
-                    type: integer
-                required:
-                - inUse
-                - ready
-                - target
-                type: object
               prediction:
                 properties:
                   confidence:
@@ -325,6 +327,21 @@ spec:
                 - confidence
                 - dataPoints
                 - phase
+                type: object
+              scale:
+                properties:
+                  currentReplicas:
+                    format: int32
+                    type: integer
+                  previousReplicas:
+                    format: int32
+                    type: integer
+                  scaledAt:
+                    format: date-time
+                    type: string
+                required:
+                - currentReplicas
+                - previousReplicas
                 type: object
             type: object
         required:
