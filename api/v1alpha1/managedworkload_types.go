@@ -73,10 +73,10 @@ type ManagedWorkloadSpec struct {
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
 	// +optional
-	Pause *PauseSpec `json:"pause,omitempty"`
+	ScalePolicy *ScalePolicySpec `json:"scalePolicy,omitempty"`
 
 	// +optional
-	ScalePolicy *ScalePolicySpec `json:"scalePolicy,omitempty"`
+	Pause *PauseSpec `json:"pause,omitempty"`
 
 	// +optional
 	Destroy *DestroySpec `json:"destroy,omitempty"`
