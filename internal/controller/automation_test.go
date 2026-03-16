@@ -60,6 +60,8 @@ func (f *stubForecaster) GetDataPoints() int           { return f.dataPoints }
 type stubMetrics struct {
 	cpuMillis      float64
 	cpuPerReplica  float64
+	memoryBytes    float64
+	pvcBytes       float64
 	err            error
 }
 
@@ -76,6 +78,14 @@ func (m *stubMetrics) TotalCPUMillis(_ context.Context, _ *v1alpha1.ManagedWorkl
 
 func (m *stubMetrics) CPURequestPerReplica(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
 	return m.cpuPerReplica, m.err
+}
+
+func (m *stubMetrics) TotalMemoryBytes(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
+	return m.memoryBytes, m.err
+}
+
+func (m *stubMetrics) TotalPVCBytes(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
+	return m.pvcBytes, m.err
 }
 
 type stubIdleEvaluator struct {
@@ -151,9 +161,11 @@ func newAutomationReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, e
 		lifecycleScaler: opts.lifecycleScaler,
 		idle:            opts.idle,
 		scale:           opts.scale,
-		metrics:         opts.metrics,
 		engines:         reg,
 		clock:           func() time.Time { return fixedTime },
+	}
+	if opts.metrics != nil {
+		r.metrics = opts.metrics
 	}
 	if r.pauser == nil {
 		r.pauser = &stubPauser{}

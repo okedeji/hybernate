@@ -1,0 +1,108 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: hybernatereports.hybernate.io
+spec:
+  group: hybernate.io
+  names:
+    kind: HybernateReport
+    listKind: HybernateReportList
+    plural: hybernatereports
+    singular: hybernatereport
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.totalManagedWorkloads
+      name: Managed
+      type: integer
+    - jsonPath: .status.estimatedMonthlyCost
+      name: Cost
+      type: string
+    - jsonPath: .status.totalMonthlySavings
+      name: Savings
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          HybernateReport is a cluster-scoped singleton that aggregates cost and
+          lifecycle data across all ManagedWorkloads.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          status:
+            description: HybernateReportStatus aggregates cost and workload data across
+              the cluster.
+            properties:
+              activeWorkloads:
+                type: integer
+              costWithoutManagement:
+                type: string
+              destroyedWorkloads:
+                type: integer
+              estimatedMonthlyCost:
+                type: string
+              lastUpdated:
+                format: date-time
+                type: string
+              pausedWorkloads:
+                type: integer
+              totalCPUHours:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              totalManagedWorkloads:
+                type: integer
+              totalMemoryHours:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              totalMonthlySavings:
+                type: string
+              totalStorageHours:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+            required:
+            - activeWorkloads
+            - costWithoutManagement
+            - destroyedWorkloads
+            - estimatedMonthlyCost
+            - pausedWorkloads
+            - totalCPUHours
+            - totalManagedWorkloads
+            - totalMemoryHours
+            - totalMonthlySavings
+            - totalStorageHours
+            type: object
+        required:
+        - metadata
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

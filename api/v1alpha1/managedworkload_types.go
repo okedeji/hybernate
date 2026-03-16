@@ -310,6 +310,27 @@ type CostTrackingSpec struct {
 	// (e.g. "tenant_id", "team", "environment").
 	// +optional
 	Labels []string `json:"labels,omitempty"`
+
+	// Rates overrides the default cost rates. Omit to use AWS on-demand defaults.
+	// +optional
+	Rates *CostRates `json:"rates,omitempty"`
+}
+
+// CostRates holds per-unit cost rates. Users set these to match their
+// cloud provider pricing. All values are in USD.
+type CostRates struct {
+	// CPUPerHour is the cost per vCPU-hour (default: $0.031, AWS on-demand).
+	// +optional
+	CPUPerHour *resource.Quantity `json:"cpuPerHour,omitempty"`
+
+	// MemoryPerHour is the cost per GiB-hour (default: $0.004, AWS on-demand).
+	// +optional
+	MemoryPerHour *resource.Quantity `json:"memoryPerHour,omitempty"`
+
+	// StoragePerMonth is the cost per GiB-month for PVC storage
+	// (default: $0.08, AWS EBS gp3).
+	// +optional
+	StoragePerMonth *resource.Quantity `json:"storagePerMonth,omitempty"`
 }
 
 // --- Status ---
@@ -372,6 +393,22 @@ type ManagedWorkloadStatus struct {
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 }
 
+// ResourceSnapshot captures the workload's resource profile at the moment of a
+// lifecycle action so savings can be calculated without querying the target.
+type ResourceSnapshot struct {
+	// Replicas is the replica count at the time of the snapshot.
+	Replicas int32 `json:"replicas"`
+
+	// CPUMillis is total CPU request in millicores per replica.
+	CPUMillis int64 `json:"cpuMillis"`
+
+	// MemoryBytes is total memory request in bytes per replica.
+	MemoryBytes int64 `json:"memoryBytes"`
+
+	// StorageBytes is total PVC provisioned capacity in bytes.
+	StorageBytes int64 `json:"storageBytes"`
+}
+
 // PauseStatus records state while the workload is paused.
 type PauseStatus struct {
 	// PreviousReplicas is the replica count before pausing, used to
@@ -380,6 +417,11 @@ type PauseStatus struct {
 
 	// PausedAt is when the workload was paused.
 	PausedAt *metav1.Time `json:"pausedAt,omitempty"`
+
+	// Resources captures the workload's resource profile at pause time
+	// for cost savings calculation.
+	// +optional
+	Resources *ResourceSnapshot `json:"resources,omitempty"`
 }
 
 // ScaleStatus records state from the most recent scaling event.
@@ -398,6 +440,11 @@ type ScaleStatus struct {
 type DestroyStatus struct {
 	// DestroyedAt is when the workload was destroyed.
 	DestroyedAt *metav1.Time `json:"destroyedAt,omitempty"`
+
+	// Resources captures the workload's resource profile at destroy time
+	// for cost savings calculation.
+	// +optional
+	Resources *ResourceSnapshot `json:"resources,omitempty"`
 
 	// PVCRetentionExpiresAt is when remaining PVCs will be cleaned up.
 	// Only set when DestroySpec.PVCRetention is configured.
@@ -431,13 +478,28 @@ type PredictionStatus struct {
 
 // CostStatus holds accumulated resource cost data for the current billing period.
 type CostStatus struct {
-	// CurrentMonthCPUHours is total CPU-hours consumed this month.
+	// CurrentMonthCPUHours is total vCPU-hours consumed this month.
 	CurrentMonthCPUHours resource.Quantity `json:"currentMonthCPUHours"`
 
-	// CurrentMonthMemoryHours is total memory-hours consumed this month.
+	// CurrentMonthMemoryHours is total GiB-hours of memory consumed this month.
 	CurrentMonthMemoryHours resource.Quantity `json:"currentMonthMemoryHours"`
 
+	// CurrentMonthStorageHours is total GiB-hours of PVC storage provisioned this month.
+	CurrentMonthStorageHours resource.Quantity `json:"currentMonthStorageHours"`
+
 	// EstimatedMonthlyCost is the projected cost for the full month based
-	// on current usage patterns.
+	// on current usage patterns. Set to "pending" on day 1 of the month.
 	EstimatedMonthlyCost string `json:"estimatedMonthlyCost"`
+
+	// MonthlySavings is the dollar amount saved by Hybernate actions
+	// (pause, scale-down, destroy) this month.
+	MonthlySavings string `json:"monthlySavings"`
+
+	// CostWithoutManagement is what this workload would have cost without
+	// Hybernate — the sum of estimated cost and savings.
+	CostWithoutManagement string `json:"costWithoutManagement"`
+
+	// LastAccumulatedAt is when costs were last accumulated.
+	// +optional
+	LastAccumulatedAt *metav1.Time `json:"lastAccumulatedAt,omitempty"`
 }

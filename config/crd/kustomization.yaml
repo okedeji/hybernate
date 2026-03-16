@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/hybernate.hybernate.io_managedworkloads.yaml
+- bases/hybernate.io_hybernatereports.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -124,6 +125,72 @@ func (r *Reader) CPURequestPerReplica(ctx context.Context, workload *v1alpha1.Ma
 		return 0, fmt.Errorf("no cpu requests found in pod template for %s %s", workload.Spec.Target.Kind, workload.Spec.Target.Name)
 	}
 
+	return total, nil
+}
+
+// TotalMemoryBytes returns aggregate memory usage in bytes across all pods
+// for the workload.
+func (r *Reader) TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	target, err := r.getTarget(ctx, workload)
+	if err != nil {
+		return 0, err
+	}
+
+	selector, err := selectorFromTarget(target)
+	if err != nil {
+		return 0, err
+	}
+
+	var podMetrics metricsv1beta1.PodMetricsList
+	err = r.client.List(ctx, &podMetrics,
+		client.InNamespace(workload.Namespace),
+		client.MatchingLabelsSelector{Selector: selector},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("listing pod metrics for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
+	}
+
+	if len(podMetrics.Items) == 0 {
+		return 0, fmt.Errorf("no pod metrics found for %s/%s", workload.Namespace, workload.Spec.Target.Name)
+	}
+
+	var total float64
+	for _, pod := range podMetrics.Items {
+		for _, container := range pod.Containers {
+			total += float64(container.Usage.Memory().Value())
+		}
+	}
+	return total, nil
+}
+
+// TotalPVCBytes returns the total provisioned PVC capacity in bytes for
+// the workload by listing PVCs matching the target's selector labels.
+func (r *Reader) TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	target, err := r.getTarget(ctx, workload)
+	if err != nil {
+		return 0, err
+	}
+
+	selector, err := selectorFromTarget(target)
+	if err != nil {
+		return 0, err
+	}
+
+	var pvcList corev1.PersistentVolumeClaimList
+	err = r.client.List(ctx, &pvcList,
+		client.InNamespace(workload.Namespace),
+		client.MatchingLabelsSelector{Selector: selector},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("listing pvcs for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
+	}
+
+	var total float64
+	for _, pvc := range pvcList.Items {
+		if cap, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
+			total += float64(cap.Value())
+		}
+	}
 	return total, nil
 }
 

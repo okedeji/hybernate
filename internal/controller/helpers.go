@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/forecast"
 	"github.com/okedeji/hybernate/internal/signal"
 )
@@ -184,4 +185,31 @@ func demandToReplicas(demand, cpuPerReplica float64, min, max int) int32 {
 		return int32(max)
 	}
 	return replicas
+}
+
+func resolveCostRates(workload *v1alpha1.ManagedWorkload) cost.Rates {
+	rates := cost.DefaultRates
+	if workload.Spec.CostTracking == nil || workload.Spec.CostTracking.Rates == nil {
+		return rates
+	}
+	r := workload.Spec.CostTracking.Rates
+	if r.CPUPerHour != nil {
+		rates.CPUPerHour = r.CPUPerHour.AsApproximateFloat64()
+	}
+	if r.MemoryPerHour != nil {
+		rates.MemoryPerHour = r.MemoryPerHour.AsApproximateFloat64()
+	}
+	if r.StoragePerMonth != nil {
+		rates.StoragePerMonth = r.StoragePerMonth.AsApproximateFloat64()
+	}
+	return rates
+}
+
+func parseDollarAmount(s string) float64 {
+	if len(s) < 2 || s[0] != '$' {
+		return 0
+	}
+	var v float64
+	fmt.Sscanf(s[1:], "%f", &v)
+	return v
 }

@@ -75,6 +75,36 @@ spec:
                     items:
                       type: string
                     type: array
+                  rates:
+                    description: Rates overrides the default cost rates. Omit to use
+                      AWS on-demand defaults.
+                    properties:
+                      cpuPerHour:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: 'CPUPerHour is the cost per vCPU-hour (default:
+                          $0.031, AWS on-demand).'
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memoryPerHour:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: 'MemoryPerHour is the cost per GiB-hour (default:
+                          $0.004, AWS on-demand).'
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storagePerMonth:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          StoragePerMonth is the cost per GiB-month for PVC storage
+                          (default: $0.08, AWS EBS gp3).
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
                 required:
                 - enabled
                 type: object
@@ -425,11 +455,16 @@ spec:
                 description: Cost holds accumulated resource cost data for the current
                   month.
                 properties:
+                  costWithoutManagement:
+                    description: |-
+                      CostWithoutManagement is what this workload would have cost without
+                      Hybernate — the sum of estimated cost and savings.
+                    type: string
                   currentMonthCPUHours:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: CurrentMonthCPUHours is total CPU-hours consumed
+                    description: CurrentMonthCPUHours is total vCPU-hours consumed
                       this month.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
@@ -437,19 +472,39 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: CurrentMonthMemoryHours is total memory-hours consumed
-                      this month.
+                    description: CurrentMonthMemoryHours is total GiB-hours of memory
+                      consumed this month.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  currentMonthStorageHours:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: CurrentMonthStorageHours is total GiB-hours of PVC
+                      storage provisioned this month.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   estimatedMonthlyCost:
                     description: |-
                       EstimatedMonthlyCost is the projected cost for the full month based
-                      on current usage patterns.
+                      on current usage patterns. Set to "pending" on day 1 of the month.
+                    type: string
+                  lastAccumulatedAt:
+                    description: LastAccumulatedAt is when costs were last accumulated.
+                    format: date-time
+                    type: string
+                  monthlySavings:
+                    description: |-
+                      MonthlySavings is the dollar amount saved by Hybernate actions
+                      (pause, scale-down, destroy) this month.
                     type: string
                 required:
+                - costWithoutManagement
                 - currentMonthCPUHours
                 - currentMonthMemoryHours
+                - currentMonthStorageHours
                 - estimatedMonthlyCost
+                - monthlySavings
                 type: object
               destroy:
                 description: Destroy holds state after the workload is destroyed.
@@ -464,6 +519,37 @@ spec:
                       Only set when DestroySpec.PVCRetention is configured.
                     format: date-time
                     type: string
+                  resources:
+                    description: |-
+                      Resources captures the workload's resource profile at destroy time
+                      for cost savings calculation.
+                    properties:
+                      cpuMillis:
+                        description: CPUMillis is total CPU request in millicores
+                          per replica.
+                        format: int64
+                        type: integer
+                      memoryBytes:
+                        description: MemoryBytes is total memory request in bytes
+                          per replica.
+                        format: int64
+                        type: integer
+                      replicas:
+                        description: Replicas is the replica count at the time of
+                          the snapshot.
+                        format: int32
+                        type: integer
+                      storageBytes:
+                        description: StorageBytes is total PVC provisioned capacity
+                          in bytes.
+                        format: int64
+                        type: integer
+                    required:
+                    - cpuMillis
+                    - memoryBytes
+                    - replicas
+                    - storageBytes
+                    type: object
                 type: object
               lastActedAt:
                 description: |-
@@ -489,6 +575,37 @@ spec:
                       restore on resume.
                     format: int32
                     type: integer
+                  resources:
+                    description: |-
+                      Resources captures the workload's resource profile at pause time
+                      for cost savings calculation.
+                    properties:
+                      cpuMillis:
+                        description: CPUMillis is total CPU request in millicores
+                          per replica.
+                        format: int64
+                        type: integer
+                      memoryBytes:
+                        description: MemoryBytes is total memory request in bytes
+                          per replica.
+                        format: int64
+                        type: integer
+                      replicas:
+                        description: Replicas is the replica count at the time of
+                          the snapshot.
+                        format: int32
+                        type: integer
+                      storageBytes:
+                        description: StorageBytes is total PVC provisioned capacity
+                          in bytes.
+                        format: int64
+                        type: integer
+                    required:
+                    - cpuMillis
+                    - memoryBytes
+                    - replicas
+                    - storageBytes
+                    type: object
                 required:
                 - previousReplicas
                 type: object

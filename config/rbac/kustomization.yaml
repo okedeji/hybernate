@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the hybernate itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- hybernatereport_admin_role.yaml
+- hybernatereport_editor_role.yaml
+- hybernatereport_viewer_role.yaml
 - managedworkload_admin_role.yaml
 - managedworkload_editor_role.yaml
 - managedworkload_viewer_role.yaml

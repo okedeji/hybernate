@@ -151,6 +151,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return *result, nil
 	}
 
+	// --- Cost tracking ---
+	r.accumulateCost(ctx, &workload)
+
 	log.Info("reconciled", "phase", workload.Status.Phase)
 	return ctrl.Result{}, nil
 }
@@ -184,6 +187,14 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 	if phase != v1alpha1.PhasePausing {
 		if _, err := r.transition(ctx, workload, v1alpha1.PhasePausing, "PauseRequested"); err != nil {
 			return nil, err
+		}
+	}
+
+	// Capture resource profile before scaling to zero for cost savings tracking.
+	if workload.Status.Pause == nil || workload.Status.Pause.Resources == nil {
+		snap := r.captureResourceSnapshot(ctx, workload)
+		if workload.Status.Pause != nil {
+			workload.Status.Pause.Resources = snap
 		}
 	}
 
@@ -247,6 +258,9 @@ func (r *Reconciler) handleDestroy(ctx context.Context, workload *v1alpha1.Manag
 		return nil, nil
 	}
 
+	// Capture resource profile before deletion for cost savings tracking.
+	snap := r.captureResourceSnapshot(ctx, workload)
+
 	if _, err := r.transition(ctx, workload, v1alpha1.PhaseDestroying, "DestroyRequested"); err != nil {
 		return nil, err
 	}
@@ -261,6 +275,10 @@ func (r *Reconciler) handleDestroy(ctx context.Context, workload *v1alpha1.Manag
 	}
 
 	r.stampLastActed(workload)
+	if workload.Status.Destroy == nil {
+		workload.Status.Destroy = &v1alpha1.DestroyStatus{}
+	}
+	workload.Status.Destroy.Resources = snap
 	result, err := r.transition(ctx, workload, v1alpha1.PhaseDestroyed, "Destroyed")
 	if err != nil {
 		return nil, err

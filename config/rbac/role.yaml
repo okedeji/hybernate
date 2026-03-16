@@ -42,6 +42,7 @@ rules:
 - apiGroups:
   - hybernate.io
   resources:
+  - hybernatereports
   - managedworkloads
   verbs:
   - create
@@ -54,12 +55,14 @@ rules:
 - apiGroups:
   - hybernate.io
   resources:
+  - hybernatereports/finalizers
   - managedworkloads/finalizers
   verbs:
   - update
 - apiGroups:
   - hybernate.io
   resources:
+  - hybernatereports/status
   - managedworkloads/status
   verbs:
   - get

@@ -14,8 +14,14 @@ resources:
     namespaced: true
   controller: true
   domain: hybernate.io
-  group: ""
   kind: ManagedWorkload
+  path: github.com/okedeji/hybernate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+  controller: true
+  domain: hybernate.io
+  kind: HybernateReport
   path: github.com/okedeji/hybernate/api/v1alpha1
   version: v1alpha1
 version: "3"
