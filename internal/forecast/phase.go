@@ -60,8 +60,9 @@ type Engine struct {
 	Phase        Phase
 	Threshold    int // confidence threshold as percentage (0-100)
 
-	dailyDemoted  bool
-	weeklyDemoted bool
+	dailyDemoted     bool
+	weeklyDemoted    bool
+	lastRegimeChange bool
 }
 
 func NewEngine(params Params, threshold int) *Engine {
@@ -117,6 +118,7 @@ func (e *Engine) WeeklyConfidence() int {
 }
 
 func (e *Engine) advancePhase() {
+	e.lastRegimeChange = false
 	n := e.Model.DataPoints()
 
 	if e.Anomaly.RegimeChange() {
@@ -168,7 +170,10 @@ func (e *Engine) GetPhase() Phase        { return e.Phase }
 func (e *Engine) GetDataPoints() int      { return e.Model.DataPoints() }
 func (e *Engine) GetThreshold() int       { return e.Threshold }
 
+func (e *Engine) RegimeChanged() bool { return e.lastRegimeChange }
+
 func (e *Engine) handleRegimeChange() {
+	e.lastRegimeChange = true
 	switch e.Phase {
 	case FullyActive:
 		e.Phase = WeeklySuggesting

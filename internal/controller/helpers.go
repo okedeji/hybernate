@@ -26,6 +26,7 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/forecast"
+	opmetrics "github.com/okedeji/hybernate/internal/metrics"
 	"github.com/okedeji/hybernate/internal/signal"
 )
 
@@ -110,6 +111,12 @@ func (r *Reconciler) updatePredictionStatus(workload *v1alpha1.ManagedWorkload, 
 		s := string(data)
 		workload.Status.Prediction.State = &s
 	}
+
+	ns, name := workload.Namespace, workload.Name
+	opmetrics.PredictionConfidence.WithLabelValues("daily", ns, name).Set(float64(engine.DailyConfidence()))
+	opmetrics.PredictionConfidence.WithLabelValues("weekly", ns, name).Set(float64(engine.WeeklyConfidence()))
+	opmetrics.PredictionPhase.WithLabelValues(ns, name).Set(float64(phase))
+	opmetrics.PredictionDataPoints.WithLabelValues(ns, name).Set(float64(engine.GetDataPoints()))
 }
 
 func seasonPhases(phase forecast.Phase) (daily, weekly string) {

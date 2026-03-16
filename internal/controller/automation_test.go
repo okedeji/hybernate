@@ -56,6 +56,7 @@ func (f *stubForecaster) GetPhase() forecast.Phase             { return f.phase 
 func (f *stubForecaster) DailyConfidence() int         { return f.dailyConfidence }
 func (f *stubForecaster) WeeklyConfidence() int        { return f.weeklyConfidence }
 func (f *stubForecaster) GetDataPoints() int           { return f.dataPoints }
+func (f *stubForecaster) RegimeChanged() bool          { return false }
 
 type stubMetrics struct {
 	cpuMillis      float64

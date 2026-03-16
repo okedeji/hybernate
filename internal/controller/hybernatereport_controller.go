@@ -29,6 +29,7 @@ import (
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
+	opmetrics "github.com/okedeji/hybernate/internal/metrics"
 )
 
 const reportSingletonName = "hybernate-report"
@@ -81,6 +82,25 @@ func (r *HybernateReportReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	totalEstimated := totalCostWithout - totalSavings
+
+	// Emit Prometheus metrics.
+	phaseCounts := map[v1alpha1.WorkloadPhase]int{}
+	for i := range workloads.Items {
+		phaseCounts[workloads.Items[i].Status.Phase]++
+	}
+	opmetrics.WorkloadsTotal.Reset()
+	for phase, count := range phaseCounts {
+		opmetrics.WorkloadsTotal.WithLabelValues(string(phase)).Set(float64(count))
+	}
+	opmetrics.ActiveWorkloads.Set(float64(active))
+	opmetrics.PausedWorkloads.Set(float64(paused))
+	opmetrics.DestroyedWorkloads.Set(float64(destroyed))
+	opmetrics.CostSavingsDollars.Set(totalSavings)
+	opmetrics.CostEstimatedDollars.Set(totalEstimated)
+	opmetrics.CostWithoutManagementDollars.Set(totalCostWithout)
+	opmetrics.CostCPUHours.Set(totalCPU)
+	opmetrics.CostMemoryHours.Set(totalMem)
+	opmetrics.CostStorageHours.Set(totalStorage)
 
 	report := &v1alpha1.HybernateReport{}
 	err := r.Get(ctx, client.ObjectKey{Name: reportSingletonName}, report)

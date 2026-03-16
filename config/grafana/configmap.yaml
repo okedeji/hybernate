@@ -1,0 +1,354 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hybernate-grafana-dashboard
+  labels:
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/component: observability
+    grafana_dashboard: "1"
+data:
+  hybernate.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "description": "Hybernate operator — workload lifecycle, prediction, scaling, and cost metrics.",
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 100,
+          "title": "Executive Summary",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }] } }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+          "id": 1,
+          "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Total Workloads",
+          "targets": [
+            { "expr": "sum(hybernate_workloads_total)", "legendFormat": "" }
+          ],
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "currencyUSD", "thresholds": { "steps": [{ "color": "green", "value": null }] } }
+          },
+          "gridPos": { "h": 4, "w": 5, "x": 4, "y": 1 },
+          "id": 2,
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Monthly Savings",
+          "targets": [
+            { "expr": "hybernate_cost_savings_dollars", "legendFormat": "" }
+          ],
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "currencyUSD", "thresholds": { "steps": [{ "color": "orange", "value": null }] } }
+          },
+          "gridPos": { "h": 4, "w": 5, "x": 9, "y": 1 },
+          "id": 3,
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Estimated Monthly Cost",
+          "targets": [
+            { "expr": "hybernate_cost_estimated_dollars", "legendFormat": "" }
+          ],
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "currencyUSD", "thresholds": { "steps": [{ "color": "red", "value": null }] } }
+          },
+          "gridPos": { "h": 4, "w": 5, "x": 14, "y": 1 },
+          "id": 4,
+          "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Cost Without Management",
+          "targets": [
+            { "expr": "hybernate_cost_without_management_dollars", "legendFormat": "" }
+          ],
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" } }
+          },
+          "gridPos": { "h": 4, "w": 5, "x": 19, "y": 1 },
+          "id": 5,
+          "options": { "legend": { "displayMode": "list", "placement": "right" }, "pieType": "donut", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Workloads by Phase",
+          "targets": [
+            { "expr": "hybernate_workloads_total", "legendFormat": "{{ phase }}" }
+          ],
+          "type": "piechart"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "id": 101,
+          "title": "Lifecycle Activity",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } } }
+          },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 6 },
+          "id": 6,
+          "title": "Phase Transitions / hr",
+          "targets": [
+            { "expr": "sum by (from, to) (increase(hybernate_lifecycle_transitions_total[1h]))", "legendFormat": "{{ from }} → {{ to }}" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "custom": { "drawStyle": "line" } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 8, "y": 6 },
+          "id": 7,
+          "title": "Action Duration p95",
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (action, le) (rate(hybernate_lifecycle_action_duration_seconds_bucket[5m])))", "legendFormat": "{{ action }}" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line" }, "color": { "mode": "fixed", "fixedColor": "red" } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 14, "y": 6 },
+          "id": 8,
+          "title": "Reconcile Errors / min",
+          "targets": [
+            { "expr": "sum by (controller) (rate(hybernate_reconcile_errors_total[1m]))", "legendFormat": "{{ controller }}" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 3 }, { "color": "red", "value": 10 }] } }
+          },
+          "gridPos": { "h": 7, "w": 4, "x": 20, "y": 6 },
+          "id": 9,
+          "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Drift Detections (24h)",
+          "targets": [
+            { "expr": "sum(increase(hybernate_drift_detections_total[24h]))", "legendFormat": "" }
+          ],
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+          "id": 102,
+          "title": "Prediction Health",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line" } }
+          },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 14 },
+          "id": 10,
+          "title": "Prediction Confidence",
+          "targets": [
+            { "expr": "hybernate_prediction_confidence_percent", "legendFormat": "{{ season }} {{ namespace }}/{{ workload }}" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 6, "x": 8, "y": 14 },
+          "id": 11,
+          "title": "Prediction Phase per Workload",
+          "targets": [
+            { "expr": "hybernate_prediction_phase", "legendFormat": "{{ namespace }}/{{ workload }}", "format": "table", "instant": true }
+          ],
+          "transformations": [
+            { "id": "organize", "options": { "renameByName": { "Value": "Phase (0=Obs 1=DSug 2=DAct 3=WSug 4=Full)" } } }
+          ],
+          "type": "table"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line" } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 14, "y": 14 },
+          "id": 12,
+          "title": "Anomalies & Regime Changes / hr",
+          "targets": [
+            { "expr": "sum(increase(hybernate_prediction_anomalies_total[1h]))", "legendFormat": "Anomalies" },
+            { "expr": "sum(increase(hybernate_prediction_regime_changes_total[1h]))", "legendFormat": "Regime Changes" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "steps": [{ "color": "blue", "value": null }] } }
+          },
+          "gridPos": { "h": 7, "w": 4, "x": 20, "y": 14 },
+          "id": 13,
+          "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Total Data Points",
+          "targets": [
+            { "expr": "sum(hybernate_prediction_data_points)", "legendFormat": "" }
+          ],
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
+          "id": 103,
+          "title": "Scaling & Idle",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 0, "y": 22 },
+          "id": 14,
+          "title": "Scale Events / hr",
+          "targets": [
+            { "expr": "sum by (direction) (increase(hybernate_scale_events_total[1h]))", "legendFormat": "{{ direction }}" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line" } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 6, "y": 22 },
+          "id": 15,
+          "title": "Replicas per Workload",
+          "targets": [
+            { "expr": "hybernate_scale_replicas", "legendFormat": "{{ namespace }}/{{ workload }}" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } } }
+          },
+          "gridPos": { "h": 7, "w": 8, "x": 12, "y": 22 },
+          "id": 16,
+          "title": "Idle Detections / hr",
+          "targets": [
+            { "expr": "sum by (action) (increase(hybernate_idle_detections_total[1h]))", "legendFormat": "{{ action }}" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 5 }] } }
+          },
+          "gridPos": { "h": 7, "w": 4, "x": 20, "y": 22 },
+          "id": 17,
+          "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Guards Blocked (24h)",
+          "targets": [
+            { "expr": "sum(increase(hybernate_scale_guard_blocked_total[24h]))", "legendFormat": "" }
+          ],
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+          "id": 104,
+          "title": "Cost Breakdown",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line", "stacking": { "mode": "normal" } } }
+          },
+          "gridPos": { "h": 7, "w": 10, "x": 0, "y": 30 },
+          "id": 18,
+          "title": "Resource Hours (CPU / Memory / Storage)",
+          "targets": [
+            { "expr": "hybernate_cost_cpu_hours", "legendFormat": "CPU hours" },
+            { "expr": "hybernate_cost_memory_hours", "legendFormat": "Memory hours" },
+            { "expr": "hybernate_cost_storage_hours", "legendFormat": "Storage hours" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "currencyUSD", "custom": { "drawStyle": "line" } }
+          },
+          "gridPos": { "h": 7, "w": 10, "x": 10, "y": 30 },
+          "id": 19,
+          "title": "Savings Trend",
+          "targets": [
+            { "expr": "hybernate_cost_savings_dollars", "legendFormat": "Savings" },
+            { "expr": "hybernate_cost_estimated_dollars", "legendFormat": "Estimated" },
+            { "expr": "hybernate_cost_without_management_dollars", "legendFormat": "Without Mgmt" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "steps": [{ "color": "purple", "value": null }] } }
+          },
+          "gridPos": { "h": 7, "w": 4, "x": 20, "y": 30 },
+          "id": 20,
+          "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Dry-Run Actions (24h)",
+          "targets": [
+            { "expr": "sum(increase(hybernate_dryrun_actions_total[24h]))", "legendFormat": "" }
+          ],
+          "type": "stat"
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["hybernate", "kubernetes", "operator"],
+      "templating": {
+        "list": [
+          {
+            "current": { "selected": false, "text": "default", "value": "default" },
+            "hide": 0,
+            "includeAll": false,
+            "label": "Datasource",
+            "multi": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "type": "datasource"
+          }
+        ]
+      },
+      "time": { "from": "now-6h", "to": "now" },
+      "title": "Hybernate Operator",
+      "uid": "hybernate-operator",
+      "version": 1
+    }

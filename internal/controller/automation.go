@@ -27,6 +27,7 @@ import (
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/forecast"
+	opmetrics "github.com/okedeji/hybernate/internal/metrics"
 	"github.com/okedeji/hybernate/internal/policy"
 	"github.com/okedeji/hybernate/internal/signal"
 
@@ -43,6 +44,7 @@ type forecaster interface {
 	DailyConfidence() int
 	WeeklyConfidence() int
 	GetDataPoints() int
+	RegimeChanged() bool
 }
 
 type metricsReader interface {
@@ -150,6 +152,10 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 		r.engines.markFed(key, r.now())
 		r.emitEvent(workload, false, "Normal", ReasonPredictionFed,
 			"fed %.0fm CPU, forecast %.0fm, phase %s", metric, forecast, engine.GetPhase())
+
+		if engine.RegimeChanged() {
+			opmetrics.PredictionRegimeChanges.WithLabelValues(workload.Namespace, workload.Name).Inc()
+		}
 	}
 
 	// Always update prediction status so the user sees progress.
@@ -158,6 +164,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	// If manual desiredState is set, prediction still learns but
 	// automation does not act. Status is updated above.
 	if workload.Spec.DesiredState != nil {
+		opmetrics.AutomationSkipped.WithLabelValues(workload.Namespace, workload.Name).Inc()
 		r.emitEvent(workload, false, "Normal", ReasonAutomationSkipped,
 			"automation skipped, desiredState is manually set to %s", *workload.Spec.DesiredState)
 		if err := r.Status().Update(ctx, workload); err != nil {
@@ -264,10 +271,14 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 		return nil, fmt.Errorf("evaluating idle: %w", err)
 	}
 
+	ns, name := workload.Namespace, workload.Name
+
 	switch {
 	case eval.SignalsConfirm():
+		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(2)
 		predicted := engine.Predict(0, r.now())
 		if predicted >= idleThresholdFor(workload) {
+			opmetrics.IdleFlukes.WithLabelValues(ns, name).Inc()
 			r.emitEvent(workload, dryRun, "Normal", ReasonIdleFluke,
 				"signals confirm idle but prediction disagrees (predicted demand %.0fm, threshold %.0fm), rechecking",
 				predicted, idleThresholdFor(workload))
@@ -282,16 +293,21 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 		return &result, nil
 
 	case eval.InGracePeriod():
+		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(3)
 		r.emitEvent(workload, dryRun, "Normal", ReasonIdleGracePeriod,
 			"in grace period, idle for %s", eval.IdleDuration())
 		result := ctrl.Result{RequeueAfter: 30 * time.Second}
 		return &result, nil
 
 	case eval.IsIdle():
+		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(4)
+		action := resolveIdleAction(workload)
+		opmetrics.IdleDetections.WithLabelValues(string(action), ns, name).Inc()
 		r.emitEvent(workload, dryRun, "Normal", ReasonIdleDetected,
-			"idle for %s, executing %s", eval.IdleDuration(), resolveIdleAction(workload))
+			"idle for %s, executing %s", eval.IdleDuration(), action)
 
 		if dryRun {
+			opmetrics.DryrunActions.WithLabelValues("idle_" + string(action)).Inc()
 			return nil, nil
 		}
 
@@ -301,7 +317,7 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 			}
 		}
 
-		switch resolveIdleAction(workload) {
+		switch action {
 		case v1alpha1.IdleActionDestroy:
 			return r.handleDestroy(ctx, workload)
 		default:
@@ -309,6 +325,7 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 		}
 
 	default:
+		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(1)
 		return nil, nil
 	}
 }
@@ -362,6 +379,7 @@ func (r *Reconciler) reconcileScaleAction(ctx context.Context, workload *v1alpha
 	}
 
 	target := decision.GetTarget()
+	ns, name := workload.Namespace, workload.Name
 
 	if decision.Direction == policy.ScaleDown {
 		guards := r.buildScaleDownGuards(workload, float64(target)*cpuPerReplica)
@@ -370,6 +388,7 @@ func (r *Reconciler) reconcileScaleAction(ctx context.Context, workload *v1alpha
 			return nil, fmt.Errorf("checking scale-down guards: %w", err)
 		}
 		if !res.Confirm {
+			opmetrics.ScaleGuardBlocked.WithLabelValues(ns, name).Inc()
 			r.emitEvent(workload, dryRun, "Normal", ReasonScaleDownGuarded,
 				"scale-down to %d blocked: %s", target, res.Reason)
 			result := ctrl.Result{RequeueAfter: 1 * time.Minute}
@@ -378,6 +397,7 @@ func (r *Reconciler) reconcileScaleAction(ctx context.Context, workload *v1alpha
 	}
 
 	if dryRun {
+		opmetrics.DryrunActions.WithLabelValues("scale_" + decision.Direction.String()).Inc()
 		r.emitEvent(workload, dryRun, "Normal", ReasonScaled,
 			"would scale to %d replicas (predicted demand %.0fm, cpu/replica %.0fm)",
 			target, predicted, cpuPerReplica)
@@ -399,6 +419,8 @@ func (r *Reconciler) reconcileScaleAction(ctx context.Context, workload *v1alpha
 	}
 
 	r.stampLastActed(workload)
+	opmetrics.ScaleEvents.WithLabelValues(decision.Direction.String(), ns, name).Inc()
+	opmetrics.ScaleReplicas.WithLabelValues(ns, name).Set(float64(target))
 	r.emitEvent(workload, false, "Normal", ReasonScaled,
 		"scaled to %d replicas", target)
 

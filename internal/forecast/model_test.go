@@ -301,3 +301,31 @@ func TestEngine_ImportRejectsCorruptJSON(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unmarshaling")
 }
+
+func TestEngine_RegimeChangedSignal(t *testing.T) {
+	e := NewEngine(DefaultParams(), 0)
+	h := 0
+
+	// Advance to DailyActive.
+	for i := 0; i < DailySeason+defaultWindow+1; i++ {
+		e.Observe(50, hourAt(h))
+		h++
+	}
+	require.Equal(t, DailyActive, e.Phase)
+	assert.False(t, e.RegimeChanged(), "no regime change yet")
+
+	// Build up anomaly detector baseline.
+	for i := 0; i < 100; i++ {
+		e.Observe(50, hourAt(h))
+		h++
+	}
+	assert.False(t, e.RegimeChanged())
+
+	// Inject anomalies to trigger regime change.
+	for i := 0; i < anomalyWindow; i++ {
+		e.Observe(500, hourAt(h))
+		h++
+	}
+	assert.True(t, e.RegimeChanged(), "regime change should be signaled")
+	assert.NotEqual(t, DailyActive, e.Phase, "phase should have demoted")
+}

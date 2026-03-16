@@ -81,8 +81,14 @@ type lifecycleDestroyer interface {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile evaluates the current state of a ManagedWorkload and acts on it.
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, retErr error) {
 	log := log.FromContext(ctx)
+
+	defer func() {
+		if retErr != nil {
+			metrics.ReconcileErrors.WithLabelValues("managedworkload").Inc()
+		}
+	}()
 
 	var workload v1alpha1.ManagedWorkload
 	if err := r.Get(ctx, req.NamespacedName, &workload); err != nil {
@@ -208,6 +214,7 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 	}
 
 	r.stampLastActed(workload)
+	r.observeActionDuration(workload, "pause")
 	result, err := r.transition(ctx, workload, v1alpha1.PhasePaused, "Paused")
 	if err != nil {
 		return nil, err
@@ -241,6 +248,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 	}
 
 	r.stampLastActed(workload)
+	r.observeActionDuration(workload, "resume")
 	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed")
 	if err != nil {
 		return nil, err
@@ -275,6 +283,7 @@ func (r *Reconciler) handleDestroy(ctx context.Context, workload *v1alpha1.Manag
 	}
 
 	r.stampLastActed(workload)
+	r.observeActionDuration(workload, "destroy")
 	if workload.Status.Destroy == nil {
 		workload.Status.Destroy = &v1alpha1.DestroyStatus{}
 	}
@@ -330,8 +339,10 @@ func (r *Reconciler) checkPauseExpiry(ctx context.Context, workload *v1alpha1.Ma
 
 	switch workload.Spec.Pause.ExpireAction {
 	case v1alpha1.ExpireActionResume:
+		metrics.PauseExpiryActions.WithLabelValues("resume").Inc()
 		return r.handleResume(ctx, workload)
 	default:
+		metrics.PauseExpiryActions.WithLabelValues("destroy").Inc()
 		return r.handleDestroy(ctx, workload)
 	}
 }
@@ -348,10 +359,12 @@ func (r *Reconciler) checkPVCRetention(ctx context.Context, workload *v1alpha1.M
 	expiry := workload.Status.Destroy.PVCRetentionExpiresAt.Time
 	if now.Before(expiry) {
 		remaining := expiry.Sub(now)
+		metrics.PVCRetentionRemaining.WithLabelValues(workload.Namespace, workload.Spec.Target.Name).Set(remaining.Seconds())
 		result := ctrl.Result{RequeueAfter: remaining}
 		return &result, nil
 	}
 
+	metrics.PVCRetentionRemaining.WithLabelValues(workload.Namespace, workload.Spec.Target.Name).Set(0)
 	done, err := r.destroyer.CleanupPVCs(ctx, workload)
 	if err != nil {
 		return nil, fmt.Errorf("cleaning up pvcs: %w", err)
@@ -462,6 +475,7 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 		}
 		r.emitEvent(workload, false, "Warning", "TargetNotFound",
 			"%s %s not found", ref.Kind, ref.Name)
+		metrics.TargetUnavailable.WithLabelValues(workload.Namespace, workload.Spec.Target.Name).Inc()
 		return nil, nil
 	}
 	if err != nil {
@@ -493,6 +507,7 @@ func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedW
 	log.Info("replica drift detected", "expected", expected, "actual", actual)
 
 	policy := resolveConflictAction(workload)
+	metrics.DriftDetections.WithLabelValues(string(policy)).Inc()
 	r.emitEvent(workload, false, "Warning", ReasonDriftDetected,
 		"replicas changed externally from %d to %d, policy: %s", expected, actual, policy)
 
@@ -612,6 +627,7 @@ func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedW
 	if err := r.Status().Update(ctx, workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating phase to %s: %w", phase, err)
 	}
+	metrics.LifecycleTransitions.WithLabelValues(string(old), string(phase)).Inc()
 	log.Info("phase transition", "from", old, "to", phase, "reason", reason)
 	return ctrl.Result{}, nil
 }
@@ -625,6 +641,14 @@ func (r *Reconciler) now() time.Time {
 
 func (r *Reconciler) clockTime() metav1.Time {
 	return metav1.NewTime(r.now())
+}
+
+func (r *Reconciler) observeActionDuration(workload *v1alpha1.ManagedWorkload, action string) {
+	if workload.Status.LastTransitionTime == nil {
+		return
+	}
+	duration := r.now().Sub(workload.Status.LastTransitionTime.Time).Seconds()
+	metrics.LifecycleActionDuration.WithLabelValues(action).Observe(duration)
 }
 
 func (r *Reconciler) initDefaults() {
