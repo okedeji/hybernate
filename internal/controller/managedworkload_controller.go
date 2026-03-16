@@ -21,16 +21,25 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/forecast"
 	"github.com/okedeji/hybernate/internal/lifecycle"
+	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 const finalizerName = "hybernate.io/cleanup"
@@ -38,12 +47,19 @@ const finalizerName = "hybernate.io/cleanup"
 // Reconciler drives ManagedWorkload objects through their lifecycle.
 type Reconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Scheme        *runtime.Scheme
+	Recorder      record.EventRecorder
+	PrometheusURL string
 
-	pauser    lifecyclePauser
-	destroyer lifecycleDestroyer
-	clock     func() time.Time
+	pauser          lifecyclePauser
+	destroyer       lifecycleDestroyer
+	lifecycleScaler lifecycleScaler
+	idle            idleEvaluator
+	scale           scaleEvaluator
+	metrics         metricsReader
+	engines         *engineRegistry
+	prometheusURL   string
+	clock           func() time.Time
 }
 
 type lifecyclePauser interface {
@@ -87,7 +103,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.transition(ctx, &workload, v1alpha1.PhaseRunning, "Created")
 	}
 
-	// --- Pass 1: Manual lifecycle ---
+	// --- Target check + drift detection ---
+
+	if workload.Status.Phase != v1alpha1.PhaseDestroyed && workload.Status.Phase != v1alpha1.PhaseDestroying {
+		target, err := r.checkTarget(ctx, &workload)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if target == nil {
+			return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+		}
+		if result, err := r.checkDrift(ctx, &workload, target); result != nil || err != nil {
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			return *result, nil
+		}
+	}
+
+	// --- Manual lifecycle ---
 
 	result, err := r.reconcileDesiredState(ctx, &workload)
 	if err != nil {
@@ -100,6 +134,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// --- Housekeeping ---
 
 	result, err = r.reconcileHousekeeping(ctx, &workload)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if result != nil {
+		return *result, nil
+	}
+
+	// --- Automation ---
+
+	result, err = r.reconcileAutomation(ctx, &workload)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -152,11 +196,12 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 		return &result, nil
 	}
 
+	r.stampLastActed(workload)
 	result, err := r.transition(ctx, workload, v1alpha1.PhasePaused, "Paused")
 	if err != nil {
 		return nil, err
 	}
-	r.Recorder.Eventf(workload, "Normal", "Paused", "Workload %s paused", workload.Spec.Target.Name)
+	r.emitEvent(workload, false, "Normal", ReasonPaused, "paused")
 	return &result, nil
 }
 
@@ -184,11 +229,12 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 		return &result, nil
 	}
 
+	r.stampLastActed(workload)
 	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed")
 	if err != nil {
 		return nil, err
 	}
-	r.Recorder.Eventf(workload, "Normal", "Resumed", "Workload %s resumed", workload.Spec.Target.Name)
+	r.emitEvent(workload, false, "Normal", ReasonResumed, "resumed")
 	return &result, nil
 }
 
@@ -214,11 +260,12 @@ func (r *Reconciler) handleDestroy(ctx context.Context, workload *v1alpha1.Manag
 		return &result, nil
 	}
 
+	r.stampLastActed(workload)
 	result, err := r.transition(ctx, workload, v1alpha1.PhaseDestroyed, "Destroyed")
 	if err != nil {
 		return nil, err
 	}
-	r.Recorder.Eventf(workload, "Normal", "Destroyed", "Workload %s destroyed", workload.Spec.Target.Name)
+	r.emitEvent(workload, false, "Normal", ReasonDestroyed, "destroyed")
 	return &result, nil
 }
 
@@ -260,8 +307,8 @@ func (r *Reconciler) checkPauseExpiry(ctx context.Context, workload *v1alpha1.Ma
 		return &result, nil
 	}
 
-	r.Recorder.Eventf(workload, "Normal", "PauseExpired",
-		"Pause expired after %s, executing %s", workload.Spec.Pause.ExpireAfter.Duration, workload.Spec.Pause.ExpireAction)
+	r.emitEvent(workload, false, "Normal", ReasonPauseExpired,
+		"pause expired after %s, executing %s", workload.Spec.Pause.ExpireAfter.Duration, workload.Spec.Pause.ExpireAction)
 
 	switch workload.Spec.Pause.ExpireAction {
 	case v1alpha1.ExpireActionResume:
@@ -300,7 +347,7 @@ func (r *Reconciler) checkPVCRetention(ctx context.Context, workload *v1alpha1.M
 		return nil, fmt.Errorf("updating status after pvc cleanup: %w", err)
 	}
 
-	r.Recorder.Eventf(workload, "Normal", "PVCsCleaned", "PVCs for %s cleaned up after retention period", workload.Spec.Target.Name)
+	r.emitEvent(workload, false, "Normal", ReasonPVCsCleaned, "PVCs cleaned up after retention period")
 	result := ctrl.Result{}
 	return &result, nil
 }
@@ -326,8 +373,8 @@ func (r *Reconciler) checkPVCRetentionWarning(_ context.Context, workload *v1alp
 	}
 
 	remaining := expiry.Sub(now).Round(time.Minute)
-	r.Recorder.Eventf(workload, "Warning", "PVCRetentionExpiring",
-		"PVCs for %s will be deleted in %s", workload.Spec.Target.Name, remaining)
+	r.emitEvent(workload, false, "Warning", ReasonPVCRetentionExpiring,
+		"PVCs will be deleted in %s", remaining)
 
 	return nil, nil
 }
@@ -372,6 +419,168 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 	return ctrl.Result{}, nil
 }
 
+// --- Target ---
+
+const conditionTargetAvailable = "TargetAvailable"
+
+// checkTarget verifies the target workload exists. Returns the target object
+// on success, nil when not found (condition set, status updated), or an error.
+func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*unstructured.Unstructured, error) {
+	ref := workload.Spec.Target
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, fmt.Errorf("parsing api version %q: %w", ref.APIVersion, err)
+	}
+
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gv.WithKind(ref.Kind))
+
+	err = r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: workload.Namespace}, obj)
+	if apierrors.IsNotFound(err) {
+		r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetNotFound",
+			fmt.Sprintf("%s %s not found", ref.Kind, ref.Name))
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return nil, fmt.Errorf("updating target condition: %w", err)
+		}
+		r.emitEvent(workload, false, "Warning", "TargetNotFound",
+			"%s %s not found", ref.Kind, ref.Name)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("checking target %s %s: %w", ref.Kind, ref.Name, err)
+	}
+
+	r.setCondition(workload, conditionTargetAvailable, metav1.ConditionTrue, "TargetExists", "")
+	return obj, nil
+}
+
+// checkDrift compares actual replicas on the target against what the operator
+// last set. When they differ, the conflict policy decides the response.
+func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedWorkload, target *unstructured.Unstructured) (*ctrl.Result, error) {
+	expected, ok := r.expectedReplicas(workload)
+	if !ok {
+		return nil, nil
+	}
+
+	actual, err := replicasFromUnstructured(target)
+	if err != nil {
+		return nil, fmt.Errorf("reading target replicas: %w", err)
+	}
+
+	if actual == expected {
+		return nil, nil
+	}
+
+	log := log.FromContext(ctx)
+	log.Info("replica drift detected", "expected", expected, "actual", actual)
+
+	policy := resolveConflictAction(workload)
+	r.emitEvent(workload, false, "Warning", ReasonDriftDetected,
+		"replicas changed externally from %d to %d, policy: %s", expected, actual, policy)
+
+	switch policy {
+	case v1alpha1.ConflictActionEnforce:
+		if err := r.enforceReplicas(ctx, target, expected); err != nil {
+			return nil, fmt.Errorf("enforcing replicas: %w", err)
+		}
+		r.stampLastActed(workload)
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return nil, fmt.Errorf("updating status after drift correction: %w", err)
+		}
+		r.emitEvent(workload, false, "Normal", ReasonDriftCorrected,
+			"replicas corrected from %d back to %d", actual, expected)
+
+	case v1alpha1.ConflictActionDefer:
+		r.acceptDrift(workload, actual)
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return nil, fmt.Errorf("updating status after accepting drift: %w", err)
+		}
+	}
+
+	return nil, nil
+}
+
+func (r *Reconciler) expectedReplicas(workload *v1alpha1.ManagedWorkload) (int32, bool) {
+	switch workload.Status.Phase {
+	case v1alpha1.PhasePaused:
+		return 0, true
+	case v1alpha1.PhaseRunning, v1alpha1.PhaseIdle, v1alpha1.PhaseScaling:
+		if workload.Status.Scale != nil {
+			return workload.Status.Scale.CurrentReplicas, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+func replicasFromUnstructured(obj *unstructured.Unstructured) (int32, error) {
+	replicas, found, err := unstructured.NestedInt64(obj.Object, "spec", "replicas")
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 1, nil
+	}
+	return int32(replicas), nil
+}
+
+func (r *Reconciler) enforceReplicas(ctx context.Context, target *unstructured.Unstructured, desired int32) error {
+	if err := unstructured.SetNestedField(target.Object, int64(desired), "spec", "replicas"); err != nil {
+		return fmt.Errorf("setting replicas field: %w", err)
+	}
+	return r.Update(ctx, target)
+}
+
+func (r *Reconciler) acceptDrift(workload *v1alpha1.ManagedWorkload, actual int32) {
+	if workload.Status.Scale != nil {
+		workload.Status.Scale.CurrentReplicas = actual
+	}
+	if workload.Status.Phase == v1alpha1.PhasePaused && actual > 0 {
+		workload.Status.Pause = nil
+		workload.Status.Phase = v1alpha1.PhaseRunning
+	}
+}
+
+func (r *Reconciler) setCondition(workload *v1alpha1.ManagedWorkload, condType string, status metav1.ConditionStatus, reason, message string) {
+	now := r.clockTime()
+	for i, c := range workload.Status.Conditions {
+		if c.Type == condType {
+			if c.Status != status {
+				workload.Status.Conditions[i].Status = status
+				workload.Status.Conditions[i].Reason = reason
+				workload.Status.Conditions[i].Message = message
+				workload.Status.Conditions[i].LastTransitionTime = now
+			}
+			return
+		}
+	}
+	workload.Status.Conditions = append(workload.Status.Conditions, metav1.Condition{
+		Type:               condType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: now,
+	})
+}
+
+func (r *Reconciler) findWorkloadsForTarget(ctx context.Context, obj client.Object) []reconcile.Request {
+	var workloads v1alpha1.ManagedWorkloadList
+	if err := r.List(ctx, &workloads, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, w := range workloads.Items {
+		if w.Spec.Target.Name == obj.GetName() {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: w.Name, Namespace: w.Namespace},
+			})
+		}
+	}
+	return requests
+}
+
 // --- Helpers ---
 
 func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) (ctrl.Result, error) {
@@ -407,13 +616,28 @@ func (r *Reconciler) initDefaults() {
 	if r.destroyer == nil {
 		r.destroyer = lifecycle.NewDestroyer(r.Client)
 	}
+	if r.lifecycleScaler == nil {
+		r.lifecycleScaler = lifecycle.NewScaler(r.Client)
+	}
+	if r.metrics == nil {
+		r.metrics = metrics.NewReader(r.Client)
+	}
+	if r.engines == nil {
+		r.engines = newEngineRegistry(func(threshold int) forecaster {
+			return forecast.NewEngine(forecast.DefaultParams(), threshold)
+		})
+	}
+	r.prometheusURL = r.PrometheusURL
 }
 
 // SetupWithManager registers the reconciler with the controller manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.initDefaults()
+	targetHandler := handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForTarget)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ManagedWorkload{}).
+		Watches(&appsv1.Deployment{}, targetHandler).
+		Watches(&appsv1.StatefulSet{}, targetHandler).
 		Named("managedworkload").
 		Complete(r)
 }

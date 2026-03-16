@@ -90,3 +90,39 @@ func (a *AnomalyDetector) RegimeChange() bool {
 	}
 	return count >= regimeChangeThreshold
 }
+
+func (a *AnomalyDetector) export() AnomalyState {
+	errs := make([]float64, len(a.errors))
+	copy(errs, a.errors)
+	recent := make([]bool, len(a.recent))
+	copy(recent, a.recent)
+	return AnomalyState{
+		Errors: errs,
+		Pos:    a.pos,
+		Full:   a.full,
+		Mean:   a.mean,
+		M2:     a.m2,
+		Count:  a.count,
+		Recent: recent,
+		RPos:   a.rPos,
+		RFull:  a.rFull,
+	}
+}
+
+func importAnomalyDetector(st AnomalyState) *AnomalyDetector {
+	errs := make([]float64, len(st.Errors))
+	copy(errs, st.Errors)
+	recent := make([]bool, len(st.Recent))
+	copy(recent, st.Recent)
+	return &AnomalyDetector{
+		errors: errs,
+		pos:    st.Pos,
+		full:   st.Full,
+		mean:   st.Mean,
+		m2:     st.M2,
+		count:  st.Count,
+		recent: recent,
+		rPos:   st.RPos,
+		rFull:  st.RFull,
+	}
+}

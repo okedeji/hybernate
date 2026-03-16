@@ -39,10 +39,26 @@ limitations under the License.
 
 package forecast
 
+import "time"
+
 const (
 	DailySeason  = 24
 	WeeklySeason = 168
 )
+
+// dailyIndex maps a wall-clock time to the daily season slot (0-23).
+func dailyIndex(t time.Time) int {
+	return t.UTC().Hour()
+}
+
+// weeklyIndex maps a wall-clock time to the weekly season slot (0-167).
+// Each slot represents one hour-of-week: Monday 0:00 = slot 0, Sunday 23:00 = slot 167.
+func weeklyIndex(t time.Time) int {
+	// time.Weekday: Sunday=0 .. Saturday=6
+	// We want Monday=0 .. Sunday=6
+	wd := (int(t.UTC().Weekday()) + 6) % 7
+	return wd*DailySeason + t.UTC().Hour()
+}
 
 // Params controls how quickly the model adapts to new data.
 // Higher values = more reactive. Lower values = more stable.
@@ -93,7 +109,10 @@ func NewModel(params Params) *Model {
 // Update feeds a new hourly data point into the model and returns the
 // forecast that was made for this hour (before seeing the actual value).
 // The caller can compare forecast vs actual to score accuracy.
-func (m *Model) Update(value float64) float64 {
+// Seasonal slot indices are derived from wall-clock time so that slots
+// always align to real hours-of-day and hours-of-week, surviving pause
+// gaps and operator restarts.
+func (m *Model) Update(value float64, now time.Time) float64 {
 	m.n++
 
 	if m.n == 1 {
@@ -101,15 +120,14 @@ func (m *Model) Update(value float64) float64 {
 		return value
 	}
 
-	di := (m.n - 1) % DailySeason
-	wi := (m.n - 1) % WeeklySeason
+	di := dailyIndex(now)
+	wi := weeklyIndex(now)
 
-	prevForecast := m.Forecast(1)
+	prevForecast := m.Forecast(0, now)
 
 	ds := m.daily[di]
 	ws := m.weekly[wi]
 
-	// Protect against division by zero when seasonal factors are zero
 	seasonProduct := ds * ws
 	if seasonProduct == 0 {
 		seasonProduct = 1.0
@@ -118,15 +136,12 @@ func (m *Model) Update(value float64) float64 {
 	prevLevel := m.level
 	prevTrend := m.trend
 
-	// Level: baseline demand stripped of seasonal effects
 	m.level = m.params.Alpha*(value/seasonProduct) +
 		(1-m.params.Alpha)*(prevLevel+prevTrend)
 
-	// Trend: direction demand is moving
 	m.trend = m.params.Beta*(m.level-prevLevel) +
 		(1-m.params.Beta)*prevTrend
 
-	// Daily seasonality: only update after first full day
 	if m.n > DailySeason {
 		levelWeekly := m.level * ws
 		if levelWeekly == 0 {
@@ -136,7 +151,6 @@ func (m *Model) Update(value float64) float64 {
 			(1-m.params.Gamma1)*ds
 	}
 
-	// Weekly seasonality: only update after first full week
 	if m.n > WeeklySeason {
 		levelDaily := m.level * ds
 		if levelDaily == 0 {
@@ -150,9 +164,11 @@ func (m *Model) Update(value float64) float64 {
 }
 
 // Forecast predicts demand h hours ahead based on current state.
-func (m *Model) Forecast(h int) float64 {
-	di := (m.n - 1 + h) % DailySeason
-	wi := (m.n - 1 + h) % WeeklySeason
+// The target slot is derived from now + h hours using wall-clock time.
+func (m *Model) Forecast(h int, now time.Time) float64 {
+	target := now.Add(time.Duration(h) * time.Hour)
+	di := dailyIndex(target)
+	wi := weeklyIndex(target)
 
 	f := (m.level + float64(h)*m.trend) * m.daily[di] * m.weekly[wi]
 	if f < 0 {
@@ -164,4 +180,34 @@ func (m *Model) Forecast(h int) float64 {
 // DataPoints returns the total number of data points the model has observed.
 func (m *Model) DataPoints() int {
 	return m.n
+}
+
+func (m *Model) export() ModelState {
+	return ModelState{
+		Alpha:  m.params.Alpha,
+		Beta:   m.params.Beta,
+		Gamma1: m.params.Gamma1,
+		Gamma2: m.params.Gamma2,
+		Level:  m.level,
+		Trend:  m.trend,
+		Daily:  m.daily,
+		Weekly: m.weekly,
+		N:      m.n,
+	}
+}
+
+func importModel(s ModelState) *Model {
+	return &Model{
+		params: Params{
+			Alpha:  s.Alpha,
+			Beta:   s.Beta,
+			Gamma1: s.Gamma1,
+			Gamma2: s.Gamma2,
+		},
+		level:  s.Level,
+		trend:  s.Trend,
+		daily:  s.Daily,
+		weekly: s.Weekly,
+		n:      s.N,
+	}
 }

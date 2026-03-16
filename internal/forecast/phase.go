@@ -16,6 +16,12 @@ limitations under the License.
 
 package forecast
 
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
 type Phase int
 
 const (
@@ -71,8 +77,8 @@ func NewEngine(params Params, threshold int) *Engine {
 
 // Observe feeds a new hourly data point and advances the phase lifecycle.
 // Returns the forecast that was made before seeing the actual value.
-func (e *Engine) Observe(actual float64) float64 {
-	forecast := e.Model.Update(actual)
+func (e *Engine) Observe(actual float64, now time.Time) float64 {
+	forecast := e.Model.Update(actual, now)
 	n := e.Model.DataPoints()
 
 	if n > DailySeason {
@@ -91,10 +97,10 @@ func (e *Engine) Observe(actual float64) float64 {
 
 // Predict returns the demand forecast h hours ahead. Only returns a non-zero
 // value when the phase is DailyActive or beyond.
-func (e *Engine) Predict(h int) float64 {
+func (e *Engine) Predict(h int, now time.Time) float64 {
 	switch e.Phase {
 	case DailyActive, WeeklySuggesting, FullyActive:
-		return e.Model.Forecast(h)
+		return e.Model.Forecast(h, now)
 	default:
 		return 0
 	}
@@ -158,6 +164,10 @@ func (e *Engine) advancePhase() {
 	}
 }
 
+func (e *Engine) GetPhase() Phase        { return e.Phase }
+func (e *Engine) GetDataPoints() int      { return e.Model.DataPoints() }
+func (e *Engine) GetThreshold() int       { return e.Threshold }
+
 func (e *Engine) handleRegimeChange() {
 	switch e.Phase {
 	case FullyActive:
@@ -169,4 +179,42 @@ func (e *Engine) handleRegimeChange() {
 	case DailySuggesting:
 		e.Phase = Observing
 	}
+}
+
+// Export serializes the full engine state to JSON for persistence in the CR status.
+func (e *Engine) Export() ([]byte, error) {
+	st := EngineState{
+		Version: stateVersion,
+		Model:   e.Model.export(),
+		Daily:   e.DailyScorer.export(),
+		Weekly:  e.WeeklyScorer.export(),
+		Anomaly: e.Anomaly.export(),
+		Phase:   int(e.Phase),
+		Thresh:  e.Threshold,
+		DDemote: e.dailyDemoted,
+		WDemote: e.weeklyDemoted,
+	}
+	return json.Marshal(st)
+}
+
+// ImportEngine restores an engine from JSON produced by Export.
+// Returns an error if the data is corrupt or the version is unsupported.
+func ImportEngine(data []byte) (*Engine, error) {
+	var st EngineState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("unmarshaling engine state: %w", err)
+	}
+	if st.Version != stateVersion {
+		return nil, fmt.Errorf("unsupported state version %d (expected %d)", st.Version, stateVersion)
+	}
+	return &Engine{
+		Model:         importModel(st.Model),
+		DailyScorer:   importScorer(st.Daily),
+		WeeklyScorer:  importScorer(st.Weekly),
+		Anomaly:       importAnomalyDetector(st.Anomaly),
+		Phase:         Phase(st.Phase),
+		Threshold:     st.Thresh,
+		dailyDemoted:  st.DDemote,
+		weeklyDemoted: st.WDemote,
+	}, nil
 }

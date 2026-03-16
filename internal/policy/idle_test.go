@@ -64,7 +64,7 @@ func TestIdleEvaluate_DeniedSignalShortCircuits(t *testing.T) {
 	assert.Contains(t, eval.Reasons[0], "CPU at 200m")
 }
 
-func TestIdleEvaluate_TimerStartsThenExpires(t *testing.T) {
+func TestIdleEvaluate_GracePeriodFlow(t *testing.T) {
 	fakeTime := time.Date(2026, 3, 13, 14, 0, 0, 0, time.UTC)
 	d := NewIdleDetector()
 	d.Clock = func() time.Time { return fakeTime }
@@ -72,59 +72,56 @@ func TestIdleEvaluate_TimerStartsThenExpires(t *testing.T) {
 	signals := []signal.Checker{
 		&fakeChecker{confirm: true, reason: "CPU at 3m"},
 	}
-	timeout := 30 * time.Minute
+	gracePeriod := 30 * time.Minute
 
-	eval, err := d.Evaluate(context.Background(), "default", "api", signals, timeout)
+	eval, err := d.Evaluate(context.Background(), "default", "api", signals, gracePeriod)
 	require.NoError(t, err)
-	assert.Equal(t, IdleStatusActive, eval.Status)
-	assert.Contains(t, eval.Reasons[0], "starting idle timer")
+	assert.Equal(t, IdleStatusSignalsConfirm, eval.Status)
+
+	d.StartGracePeriod("default", "api")
 
 	fakeTime = fakeTime.Add(10 * time.Minute)
-	eval, err = d.Evaluate(context.Background(), "default", "api", signals, timeout)
+	eval, err = d.Evaluate(context.Background(), "default", "api", signals, gracePeriod)
 	require.NoError(t, err)
-	assert.Equal(t, IdleStatusActive, eval.Status)
+	assert.Equal(t, IdleStatusInGracePeriod, eval.Status)
 	assert.Equal(t, 10*time.Minute, eval.IdleFor)
-	assert.Contains(t, eval.Reasons[0], "waiting for timeout")
 
 	fakeTime = fakeTime.Add(20 * time.Minute)
-	eval, err = d.Evaluate(context.Background(), "default", "api", signals, timeout)
+	eval, err = d.Evaluate(context.Background(), "default", "api", signals, gracePeriod)
 	require.NoError(t, err)
 	assert.Equal(t, IdleStatusIdle, eval.Status)
 	assert.Equal(t, 30*time.Minute, eval.IdleFor)
-	assert.Contains(t, eval.Reasons[0], "exceeds timeout")
 }
 
-func TestIdleEvaluate_DeniedSignalResetsTimer(t *testing.T) {
+func TestIdleEvaluate_DeniedSignalResetsGracePeriod(t *testing.T) {
 	fakeTime := time.Date(2026, 3, 13, 14, 0, 0, 0, time.UTC)
 	d := NewIdleDetector()
 	d.Clock = func() time.Time { return fakeTime }
 
 	idleSignal := &fakeChecker{confirm: true, reason: "CPU at 3m"}
-	timeout := 30 * time.Minute
+	gracePeriod := 30 * time.Minute
 
-	d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, timeout)
+	d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
+	d.StartGracePeriod("default", "api")
 
 	fakeTime = fakeTime.Add(15 * time.Minute)
-	eval, _ := d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, timeout)
-	assert.Equal(t, IdleStatusActive, eval.Status)
+	eval, _ := d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
+	assert.Equal(t, IdleStatusInGracePeriod, eval.Status)
 	assert.Equal(t, 15*time.Minute, eval.IdleFor)
 
 	activeSignal := &fakeChecker{confirm: false, reason: "CPU at 500m"}
-	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{activeSignal}, timeout)
+	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{activeSignal}, gracePeriod)
 	assert.Equal(t, IdleStatusActive, eval.Status)
 	assert.Equal(t, time.Duration(0), eval.IdleFor)
 
 	fakeTime = fakeTime.Add(1 * time.Minute)
-	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, timeout)
-	assert.Equal(t, IdleStatusActive, eval.Status)
-	assert.Contains(t, eval.Reasons[0], "starting idle timer")
+	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
+	assert.Equal(t, IdleStatusSignalsConfirm, eval.Status)
 
-	fakeTime = fakeTime.Add(29 * time.Minute)
-	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, timeout)
-	assert.Equal(t, IdleStatusActive, eval.Status)
+	d.StartGracePeriod("default", "api")
 
-	fakeTime = fakeTime.Add(1 * time.Minute)
-	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, timeout)
+	fakeTime = fakeTime.Add(30 * time.Minute)
+	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
 	assert.Equal(t, IdleStatusIdle, eval.Status)
 }
 
@@ -147,15 +144,17 @@ func TestIdleEvaluate_MultipleWorkloadsIndependent(t *testing.T) {
 	d.Clock = func() time.Time { return fakeTime }
 
 	idleSignal := &fakeChecker{confirm: true, reason: "idle"}
-	timeout := 10 * time.Minute
+	gracePeriod := 10 * time.Minute
 
-	d.Evaluate(context.Background(), "staging", "api", []signal.Checker{idleSignal}, timeout)
-	d.Evaluate(context.Background(), "staging", "db", []signal.Checker{idleSignal}, timeout)
+	d.Evaluate(context.Background(), "staging", "api", []signal.Checker{idleSignal}, gracePeriod)
+	d.Evaluate(context.Background(), "staging", "db", []signal.Checker{idleSignal}, gracePeriod)
+	d.StartGracePeriod("staging", "api")
+	d.StartGracePeriod("staging", "db")
 
 	fakeTime = fakeTime.Add(10 * time.Minute)
 
-	evalAPI, _ := d.Evaluate(context.Background(), "staging", "api", []signal.Checker{idleSignal}, timeout)
-	evalDB, _ := d.Evaluate(context.Background(), "staging", "db", []signal.Checker{idleSignal}, timeout)
+	evalAPI, _ := d.Evaluate(context.Background(), "staging", "api", []signal.Checker{idleSignal}, gracePeriod)
+	evalDB, _ := d.Evaluate(context.Background(), "staging", "db", []signal.Checker{idleSignal}, gracePeriod)
 
 	assert.Equal(t, IdleStatusIdle, evalAPI.Status)
 	assert.Equal(t, IdleStatusIdle, evalDB.Status)
@@ -163,11 +162,10 @@ func TestIdleEvaluate_MultipleWorkloadsIndependent(t *testing.T) {
 	d.Reset("staging", "api")
 
 	fakeTime = fakeTime.Add(1 * time.Minute)
-	evalAPI, _ = d.Evaluate(context.Background(), "staging", "api", []signal.Checker{idleSignal}, timeout)
-	evalDB, _ = d.Evaluate(context.Background(), "staging", "db", []signal.Checker{idleSignal}, timeout)
+	evalAPI, _ = d.Evaluate(context.Background(), "staging", "api", []signal.Checker{idleSignal}, gracePeriod)
+	evalDB, _ = d.Evaluate(context.Background(), "staging", "db", []signal.Checker{idleSignal}, gracePeriod)
 
-	assert.Equal(t, IdleStatusActive, evalAPI.Status)
-	assert.Contains(t, evalAPI.Reasons[0], "starting idle timer")
+	assert.Equal(t, IdleStatusSignalsConfirm, evalAPI.Status)
 	assert.Equal(t, IdleStatusIdle, evalDB.Status)
 }
 
@@ -177,17 +175,17 @@ func TestIdleReset(t *testing.T) {
 	d.Clock = func() time.Time { return fakeTime }
 
 	idleSignal := &fakeChecker{confirm: true, reason: "idle"}
-	timeout := 5 * time.Minute
+	gracePeriod := 5 * time.Minute
 
-	d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, timeout)
+	d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
+	d.StartGracePeriod("default", "api")
 
 	fakeTime = fakeTime.Add(5 * time.Minute)
-	eval, _ := d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, timeout)
+	eval, _ := d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
 	assert.Equal(t, IdleStatusIdle, eval.Status)
 
 	d.Reset("default", "api")
 
-	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, timeout)
-	assert.Equal(t, IdleStatusActive, eval.Status)
-	assert.Contains(t, eval.Reasons[0], "starting idle timer")
+	eval, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
+	assert.Equal(t, IdleStatusSignalsConfirm, eval.Status)
 }

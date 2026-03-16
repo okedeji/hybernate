@@ -51,6 +51,10 @@ type ScaleDecision struct {
 	Reason    string
 }
 
+func (d ScaleDecision) GetTarget() int32  { return d.Target }
+func (d ScaleDecision) ShouldScale() bool { return d.Direction != ScaleNone }
+func (d ScaleDecision) String() string    { return d.Reason }
+
 type ScaleConstraints struct {
 	MinReplicas       int32
 	MaxReplicas       int32

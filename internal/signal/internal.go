@@ -21,6 +21,8 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
 
 type CompareMode int
@@ -32,7 +34,7 @@ const (
 
 // MetricsReader reads current resource usage for a workload.
 type MetricsReader interface {
-	CPUUsage(ctx context.Context, namespace, name string) (resource.Quantity, error)
+	CPUUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error)
 }
 
 // Internal implements Checker by reading CPU from the K8s Metrics API
@@ -41,20 +43,22 @@ type MetricsReader interface {
 // (CPU above threshold = confirm).
 type Internal struct {
 	Metrics   MetricsReader
+	Workload  *v1alpha1.ManagedWorkload
 	Threshold resource.Quantity
 	Mode      CompareMode
 }
 
-func NewInternal(metrics MetricsReader, threshold resource.Quantity, mode CompareMode) *Internal {
+func NewInternal(metrics MetricsReader, workload *v1alpha1.ManagedWorkload, threshold resource.Quantity, mode CompareMode) *Internal {
 	return &Internal{
 		Metrics:   metrics,
+		Workload:  workload,
 		Threshold: threshold,
 		Mode:      mode,
 	}
 }
 
 func (i *Internal) Check(ctx context.Context, namespace, name string) (Result, error) {
-	cpu, err := i.Metrics.CPUUsage(ctx, namespace, name)
+	cpu, err := i.Metrics.CPUUsage(ctx, i.Workload)
 	if err != nil {
 		return Result{}, fmt.Errorf("reading cpu usage for %s/%s: %w", namespace, name, err)
 	}

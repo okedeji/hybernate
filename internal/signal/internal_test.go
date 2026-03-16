@@ -24,6 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
 
 type fakeMetrics struct {
@@ -31,16 +33,18 @@ type fakeMetrics struct {
 	err error
 }
 
-func (f *fakeMetrics) CPUUsage(_ context.Context, _, _ string) (resource.Quantity, error) {
+func (f *fakeMetrics) CPUUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
 	if f.err != nil {
 		return resource.Quantity{}, f.err
 	}
 	return f.cpu, nil
 }
 
+var testWorkload = &v1alpha1.ManagedWorkload{}
+
 func TestInternal_BelowThresholdConfirms(t *testing.T) {
 	m := &fakeMetrics{cpu: resource.MustParse("3m")}
-	s := NewInternal(m, resource.MustParse("50m"), Below)
+	s := NewInternal(m, testWorkload, resource.MustParse("50m"), Below)
 
 	res, err := s.Check(context.Background(), "staging", "api")
 
@@ -52,7 +56,7 @@ func TestInternal_BelowThresholdConfirms(t *testing.T) {
 
 func TestInternal_AtThresholdConfirmsBelow(t *testing.T) {
 	m := &fakeMetrics{cpu: resource.MustParse("50m")}
-	s := NewInternal(m, resource.MustParse("50m"), Below)
+	s := NewInternal(m, testWorkload, resource.MustParse("50m"), Below)
 
 	res, err := s.Check(context.Background(), "staging", "api")
 
@@ -62,7 +66,7 @@ func TestInternal_AtThresholdConfirmsBelow(t *testing.T) {
 
 func TestInternal_AboveThresholdDeniesBelow(t *testing.T) {
 	m := &fakeMetrics{cpu: resource.MustParse("200m")}
-	s := NewInternal(m, resource.MustParse("50m"), Below)
+	s := NewInternal(m, testWorkload, resource.MustParse("50m"), Below)
 
 	res, err := s.Check(context.Background(), "staging", "api")
 
@@ -73,7 +77,7 @@ func TestInternal_AboveThresholdDeniesBelow(t *testing.T) {
 
 func TestInternal_AboveThresholdConfirmsAbove(t *testing.T) {
 	m := &fakeMetrics{cpu: resource.MustParse("900m")}
-	s := NewInternal(m, resource.MustParse("800m"), Above)
+	s := NewInternal(m, testWorkload, resource.MustParse("800m"), Above)
 
 	res, err := s.Check(context.Background(), "staging", "api")
 
@@ -84,7 +88,7 @@ func TestInternal_AboveThresholdConfirmsAbove(t *testing.T) {
 
 func TestInternal_AtThresholdDeniesAbove(t *testing.T) {
 	m := &fakeMetrics{cpu: resource.MustParse("800m")}
-	s := NewInternal(m, resource.MustParse("800m"), Above)
+	s := NewInternal(m, testWorkload, resource.MustParse("800m"), Above)
 
 	res, err := s.Check(context.Background(), "staging", "api")
 
@@ -94,7 +98,7 @@ func TestInternal_AtThresholdDeniesAbove(t *testing.T) {
 
 func TestInternal_BelowThresholdDeniesAbove(t *testing.T) {
 	m := &fakeMetrics{cpu: resource.MustParse("100m")}
-	s := NewInternal(m, resource.MustParse("800m"), Above)
+	s := NewInternal(m, testWorkload, resource.MustParse("800m"), Above)
 
 	res, err := s.Check(context.Background(), "staging", "api")
 
@@ -104,7 +108,7 @@ func TestInternal_BelowThresholdDeniesAbove(t *testing.T) {
 
 func TestInternal_MetricsErrorPropagates(t *testing.T) {
 	m := &fakeMetrics{err: fmt.Errorf("metrics-server unavailable")}
-	s := NewInternal(m, resource.MustParse("50m"), Below)
+	s := NewInternal(m, testWorkload, resource.MustParse("50m"), Below)
 
 	_, err := s.Check(context.Background(), "staging", "api")
 

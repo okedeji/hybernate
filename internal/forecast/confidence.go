@@ -79,3 +79,25 @@ func (s *Scorer) Confidence() float64 {
 func (s *Scorer) Ready() bool {
 	return s.full
 }
+
+func (s *Scorer) export() ScorerState {
+	errs := make([]float64, len(s.errors))
+	copy(errs, s.errors)
+	return ScorerState{
+		Window: s.window,
+		Errors: errs,
+		Pos:    s.pos,
+		Full:   s.full,
+	}
+}
+
+func importScorer(st ScorerState) *Scorer {
+	errs := make([]float64, len(st.Errors))
+	copy(errs, st.Errors)
+	return &Scorer{
+		window: st.Window,
+		errors: errs,
+		pos:    st.Pos,
+		full:   st.Full,
+	}
+}

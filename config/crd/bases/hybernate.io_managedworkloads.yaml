@@ -45,12 +45,33 @@ spec:
           metadata:
             type: object
           spec:
+            description: ManagedWorkloadSpec defines the desired lifecycle behavior
+              for a workload.
             properties:
+              conflictAction:
+                default: warn
+                description: |-
+                  ConflictAction controls how the operator reacts when someone changes
+                  the target's replicas outside of Hybernate. "enforce" corrects the
+                  drift, "warn" emits an event but leaves the change, "defer" accepts
+                  the external change and updates internal state to match.
+                enum:
+                - enforce
+                - warn
+                - defer
+                type: string
               costTracking:
+                description: |-
+                  CostTracking enables resource cost calculation and attribution for
+                  this workload.
                 properties:
                   enabled:
+                    description: Enabled turns cost tracking on or off.
                     type: boolean
                   labels:
+                    description: |-
+                      Labels are workload label keys used for cost attribution slicing
+                      (e.g. "tenant_id", "team", "environment").
                     items:
                       type: string
                     type: array
@@ -58,48 +79,94 @@ spec:
                 - enabled
                 type: object
               desiredState:
+                description: |-
+                  DesiredState overrides automation and forces the workload into the given
+                  state. When set, the operator stops evaluating idle/scale policies and
+                  drives the workload to this state instead.
                 enum:
                 - Running
                 - Paused
                 - Destroyed
                 type: string
               destroy:
+                description: |-
+                  Destroy configures behavior after the workload is destroyed, including
+                  PVC retention and cleanup.
                 properties:
                   pvcRetention:
+                    description: |-
+                      PVCRetention is how long to keep PVCs after the workload is destroyed.
+                      After this period, PVCs are deleted. Omit to delete PVCs immediately.
                     format: duration
                     type: string
                   pvcRetentionWarning:
+                    description: |-
+                      PVCRetentionWarning triggers a warning event this duration before
+                      PVCs are deleted, giving users time to recover data if needed.
                     format: duration
                     type: string
                 type: object
               dryRun:
+                description: |-
+                  DryRun makes the operator evaluate all policies and emit events but
+                  take no action. Useful for validating configuration before going live.
                 type: boolean
               idlePolicy:
+                description: |-
+                  IdlePolicy configures automatic idle detection. Signals detect ground
+                  truth, the prediction engine confirms the pattern, and after a grace
+                  period the operator executes the configured action (pause or destroy).
                 properties:
                   action:
                     default: auto
+                    description: |-
+                      Action to take when the workload is confirmed idle. "auto" and "pause"
+                      both scale to zero; "destroy" deletes the workload entirely.
                     enum:
                     - auto
                     - pause
                     - destroy
                     type: string
                   autoResume:
+                    description: |-
+                      AutoResume re-enables the workload when idle detection clears
+                      (i.e. signals no longer confirm idle).
                     type: boolean
-                  detectAfter:
-                    format: duration
-                    type: string
                   gracePeriod:
+                    description: |-
+                      GracePeriod is how long signals must continuously confirm idle before
+                      the operator acts. Protects against brief quiet moments triggering
+                      a false idle.
                     format: duration
                     type: string
+                  idleThreshold:
+                    default: 50
+                    description: |-
+                      IdleThreshold is the CPU usage in millicores below which the workload
+                      is considered potentially idle (e.g. 50 means 50m).
+                    type: integer
                   signals:
+                    description: |-
+                      Signals are additional checks that must all confirm before the workload
+                      is considered idle. An internal CPU usage check runs automatically;
+                      these signals are layered on top for application-level confirmation.
                     items:
+                      description: |-
+                        ProbeSpec defines an external check used for idle detection signals or
+                        scale-down guards. For Prometheus probes, the PromQL query must return a
+                        non-zero value to confirm the action. An empty result or zero value denies it.
                       properties:
                         promQL:
+                          description: |-
+                            PromQL is an instant query evaluated against the configured Prometheus
+                            endpoint. The query must return a non-zero scalar to confirm the action.
+                            Examples:
+                              Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
+                              Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
                           type: string
                         source:
-                          default: internal
+                          default: prometheus
                           enum:
-                          - internal
                           - prometheus
                           type: string
                       required:
@@ -108,24 +175,39 @@ spec:
                     type: array
                 required:
                 - action
-                - detectAfter
                 type: object
               pause:
+                description: |-
+                  Pause configures behavior while the workload is paused, including
+                  automatic expiry and what action to take when the pause expires.
                 properties:
                   expireAction:
                     default: destroy
+                    description: |-
+                      ExpireAction determines what happens when ExpireAfter elapses.
+                      "destroy" deletes the workload; "resume" scales it back up.
                     enum:
                     - destroy
                     - resume
                     type: string
                   expireAfter:
+                    description: |-
+                      ExpireAfter is the maximum duration a workload can remain paused.
+                      After this period, the operator executes the ExpireAction.
                     format: duration
                     type: string
                 type: object
               prediction:
+                description: |-
+                  Prediction configures the Holt-Winters forecasting engine that drives
+                  idle detection confirmation and scale decisions.
                 properties:
                   confidence:
                     default: 85
+                    description: |-
+                      Confidence is the minimum accuracy percentage (0-100) required before
+                      the prediction engine transitions from suggesting (shadow mode) to
+                      actively driving decisions.
                     maximum: 100
                     minimum: 0
                     type: integer
@@ -133,44 +215,113 @@ spec:
                 - confidence
                 type: object
               scalePolicy:
+                description: |-
+                  ScalePolicy configures prediction-driven replica scaling with
+                  stabilization windows, step limits, and min/max bounds.
                 properties:
                   down:
+                    description: |-
+                      Down configures scale-down behavior including stabilization, step
+                      limits, and guard probes.
                     properties:
+                      guard:
+                        description: |-
+                          Guard probes that must all confirm before a scale-down proceeds.
+                          An internal CPU capacity check runs automatically; these probes
+                          add application-level safety gates (e.g. active connections, in-flight jobs).
+                        items:
+                          description: |-
+                            ProbeSpec defines an external check used for idle detection signals or
+                            scale-down guards. For Prometheus probes, the PromQL query must return a
+                            non-zero value to confirm the action. An empty result or zero value denies it.
+                          properties:
+                            promQL:
+                              description: |-
+                                PromQL is an instant query evaluated against the configured Prometheus
+                                endpoint. The query must return a non-zero scalar to confirm the action.
+                                Examples:
+                                  Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
+                                  Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
+                              type: string
+                            source:
+                              default: prometheus
+                              enum:
+                              - prometheus
+                              type: string
+                          required:
+                          - source
+                          type: object
+                        type: array
                       maxStep:
+                        description: |-
+                          MaxStep limits how many replicas can be added or removed in a single
+                          reconciliation loop. Enables gradual ramp-up or ramp-down.
                         minimum: 1
                         type: integer
                       stabilization:
+                        description: |-
+                          Stabilization is the cooldown period after a scale event in this
+                          direction. Prevents oscillation by blocking same-direction scaling
+                          until the window elapses.
                         format: duration
                         type: string
                     type: object
                   maxReplicas:
+                    description: |-
+                      MaxReplicas is the ceiling for scaling. The operator will never scale
+                      above this value.
                     minimum: 1
                     type: integer
                   minReplicas:
                     default: 1
+                    description: |-
+                      MinReplicas is the floor for scaling. The operator will never scale
+                      below this value.
                     minimum: 0
                     type: integer
-                  signals:
-                    items:
-                      properties:
-                        promQL:
-                          type: string
-                        source:
-                          default: internal
-                          enum:
-                          - internal
-                          - prometheus
-                          type: string
-                      required:
-                      - source
-                      type: object
-                    type: array
                   up:
+                    description: Up configures scale-up behavior including stabilization
+                      and step limits.
                     properties:
+                      guard:
+                        description: |-
+                          Guard probes that must all confirm before a scale-down proceeds.
+                          An internal CPU capacity check runs automatically; these probes
+                          add application-level safety gates (e.g. active connections, in-flight jobs).
+                        items:
+                          description: |-
+                            ProbeSpec defines an external check used for idle detection signals or
+                            scale-down guards. For Prometheus probes, the PromQL query must return a
+                            non-zero value to confirm the action. An empty result or zero value denies it.
+                          properties:
+                            promQL:
+                              description: |-
+                                PromQL is an instant query evaluated against the configured Prometheus
+                                endpoint. The query must return a non-zero scalar to confirm the action.
+                                Examples:
+                                  Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
+                                  Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
+                              type: string
+                            source:
+                              default: prometheus
+                              enum:
+                              - prometheus
+                              type: string
+                          required:
+                          - source
+                          type: object
+                        type: array
                       maxStep:
+                        description: |-
+                          MaxStep limits how many replicas can be added or removed in a single
+                          reconciliation loop. Enables gradual ramp-up or ramp-down.
                         minimum: 1
                         type: integer
                       stabilization:
+                        description: |-
+                          Stabilization is the cooldown period after a scale event in this
+                          direction. Prevents oscillation by blocking same-direction scaling
+                          until the window elapses.
                         format: duration
                         type: string
                     type: object
@@ -179,15 +330,20 @@ spec:
                 - minReplicas
                 type: object
               target:
-                description: Target identifies the workload to manage.
+                description: Target identifies the workload to manage (e.g. a Deployment
+                  or StatefulSet).
                 properties:
                   apiVersion:
+                    description: APIVersion is the group/version of the target (e.g.
+                      "apps/v1").
                     minLength: 1
                     type: string
                   kind:
+                    description: Kind is the resource kind (e.g. "Deployment", "StatefulSet").
                     minLength: 1
                     type: string
                   name:
+                    description: Name is the target workload's metadata.name.
                     minLength: 1
                     type: string
                 required:
@@ -196,11 +352,17 @@ spec:
                 - name
                 type: object
             required:
+            - prediction
             - target
             type: object
           status:
+            description: ManagedWorkloadStatus reflects the observed state of the
+              workload.
             properties:
               conditions:
+                description: |-
+                  Conditions provide detailed status information following the standard
+                  Kubernetes condition pattern (Type, Status, Reason, Message).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -260,20 +422,29 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               cost:
+                description: Cost holds accumulated resource cost data for the current
+                  month.
                 properties:
                   currentMonthCPUHours:
                     anyOf:
                     - type: integer
                     - type: string
+                    description: CurrentMonthCPUHours is total CPU-hours consumed
+                      this month.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   currentMonthMemoryHours:
                     anyOf:
                     - type: integer
                     - type: string
+                    description: CurrentMonthMemoryHours is total memory-hours consumed
+                      this month.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   estimatedMonthlyCost:
+                    description: |-
+                      EstimatedMonthlyCost is the projected cost for the full month based
+                      on current usage patterns.
                     type: string
                 required:
                 - currentMonthCPUHours
@@ -281,29 +452,48 @@ spec:
                 - estimatedMonthlyCost
                 type: object
               destroy:
+                description: Destroy holds state after the workload is destroyed.
                 properties:
                   destroyedAt:
+                    description: DestroyedAt is when the workload was destroyed.
                     format: date-time
                     type: string
                   pvcRetentionExpiresAt:
+                    description: |-
+                      PVCRetentionExpiresAt is when remaining PVCs will be cleaned up.
+                      Only set when DestroySpec.PVCRetention is configured.
                     format: date-time
                     type: string
                 type: object
+              lastActedAt:
+                description: |-
+                  LastActedAt is when the operator last mutated the target workload
+                  (scale, pause, resume, destroy, or drift correction).
+                format: date-time
+                type: string
               lastTransitionTime:
+                description: LastTransitionTime is when the workload last changed
+                  phases.
                 format: date-time
                 type: string
               pause:
+                description: Pause holds state while the workload is paused.
                 properties:
                   pausedAt:
+                    description: PausedAt is when the workload was paused.
                     format: date-time
                     type: string
                   previousReplicas:
+                    description: |-
+                      PreviousReplicas is the replica count before pausing, used to
+                      restore on resume.
                     format: int32
                     type: integer
                 required:
                 - previousReplicas
                 type: object
               phase:
+                description: Phase is the current lifecycle phase of the workload.
                 enum:
                 - Creating
                 - Running
@@ -316,27 +506,55 @@ spec:
                 - Destroyed
                 type: string
               prediction:
+                description: Prediction reflects the current state of the forecasting
+                  engine.
                 properties:
-                  confidence:
+                  dailyConfidence:
+                    description: DailyConfidence is the daily season's prediction
+                      accuracy percentage.
                     type: integer
-                  dataPoints:
+                  dailyPhase:
+                    description: |-
+                      DailyPhase is the daily season's lifecycle phase
+                      (Observing, Suggesting, or Active).
+                    type: string
+                  state:
+                    description: |-
+                      State is the serialized forecast engine state. The operator persists this
+                      on every status write so the engine survives operator restarts without
+                      losing learned patterns.
+                    type: string
+                  weeklyConfidence:
+                    description: WeeklyConfidence is the weekly season's prediction
+                      accuracy percentage.
                     type: integer
-                  phase:
+                  weeklyPhase:
+                    description: |-
+                      WeeklyPhase is the weekly season's lifecycle phase
+                      (Observing, Suggesting, or Active).
                     type: string
                 required:
-                - confidence
-                - dataPoints
-                - phase
+                - dailyConfidence
+                - dailyPhase
+                - weeklyConfidence
+                - weeklyPhase
                 type: object
               scale:
+                description: Scale holds state related to the most recent scaling
+                  event.
                 properties:
                   currentReplicas:
+                    description: CurrentReplicas is the replica count after the last
+                      scale event.
                     format: int32
                     type: integer
                   previousReplicas:
+                    description: PreviousReplicas is the replica count before the
+                      last scale event.
                     format: int32
                     type: integer
                   scaledAt:
+                    description: ScaledAt is when the last scale event occurred.
                     format: date-time
                     type: string
                 required:

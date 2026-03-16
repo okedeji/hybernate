@@ -30,6 +30,8 @@ type IdleStatus int
 
 const (
 	IdleStatusActive IdleStatus = iota
+	IdleStatusSignalsConfirm
+	IdleStatusInGracePeriod
 	IdleStatusIdle
 )
 
@@ -37,6 +39,10 @@ func (s IdleStatus) String() string {
 	switch s {
 	case IdleStatusActive:
 		return "Active"
+	case IdleStatusSignalsConfirm:
+		return "SignalsConfirm"
+	case IdleStatusInGracePeriod:
+		return "InGracePeriod"
 	case IdleStatusIdle:
 		return "Idle"
 	default:
@@ -53,21 +59,29 @@ type IdleEvaluation struct {
 type IdleDetector struct {
 	Clock func() time.Time
 
-	mu        sync.Mutex
-	idleSince map[string]time.Time
+	mu         sync.Mutex
+	graceStart map[string]time.Time
 }
 
 func NewIdleDetector() *IdleDetector {
 	return &IdleDetector{
-		Clock:     time.Now,
-		idleSince: make(map[string]time.Time),
+		Clock:      time.Now,
+		graceStart: make(map[string]time.Time),
 	}
 }
 
-// Evaluate checks all signals and determines whether the workload has been
-// idle long enough to act on. Every signal must confirm idleness; if any
-// signal denies, the idle timer resets.
-func (d *IdleDetector) Evaluate(ctx context.Context, namespace, name string, signals []signal.Checker, timeout time.Duration) (IdleEvaluation, error) {
+// Evaluate checks signals and manages the grace period.
+//
+// Flow:
+//  1. If signals deny → Active (resets grace timer)
+//  2. If signals confirm and no grace timer → SignalsConfirm (caller should
+//     check prediction, then call StartGracePeriod if confirmed)
+//  3. If signals confirm and grace timer running → InGracePeriod
+//  4. If signals confirm and grace timer elapsed → Idle
+//
+// When gracePeriod is zero, transitions directly from SignalsConfirm to Idle
+// on the next call after the caller starts the grace period.
+func (d *IdleDetector) Evaluate(ctx context.Context, namespace, name string, signals []signal.Checker, gracePeriod time.Duration) (IdleEvaluation, error) {
 	if len(signals) == 0 {
 		return IdleEvaluation{Status: IdleStatusActive, Reasons: []string{"no signals configured"}}, nil
 	}
@@ -80,7 +94,7 @@ func (d *IdleDetector) Evaluate(ctx context.Context, namespace, name string, sig
 	}
 	if !res.Confirm {
 		d.mu.Lock()
-		delete(d.idleSince, key)
+		delete(d.graceStart, key)
 		d.mu.Unlock()
 		return IdleEvaluation{Status: IdleStatusActive, Reasons: []string{res.Reason}}, nil
 	}
@@ -90,45 +104,56 @@ func (d *IdleDetector) Evaluate(ctx context.Context, namespace, name string, sig
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	since, tracked := d.idleSince[key]
-	if !tracked {
-		d.idleSince[key] = now
+	started, hasGrace := d.graceStart[key]
+	if !hasGrace {
 		return IdleEvaluation{
-			Status:  IdleStatusActive,
-			Reasons: []string{"all signals confirm idle, starting idle timer"},
+			Status:  IdleStatusSignalsConfirm,
+			Reasons: []string{"signals confirm idle, awaiting prediction confirmation"},
 		}, nil
 	}
 
-	idleFor := now.Sub(since)
-	if idleFor >= timeout {
+	elapsed := now.Sub(started)
+	if gracePeriod > 0 && elapsed < gracePeriod {
 		return IdleEvaluation{
-			Status:  IdleStatusIdle,
-			IdleFor: idleFor,
-			Reasons: []string{fmt.Sprintf("idle for %s, exceeds timeout %s", idleFor, timeout)},
+			Status:  IdleStatusInGracePeriod,
+			IdleFor: elapsed,
+			Reasons: []string{fmt.Sprintf("in grace period, %s remaining", gracePeriod-elapsed)},
 		}, nil
 	}
 
 	return IdleEvaluation{
-		Status:  IdleStatusActive,
-		IdleFor: idleFor,
-		Reasons: []string{fmt.Sprintf("idle for %s, waiting for timeout %s", idleFor, timeout)},
+		Status:  IdleStatusIdle,
+		IdleFor: elapsed,
+		Reasons: []string{"signals confirm idle, grace period elapsed"},
 	}, nil
 }
 
-// Reset clears the idle timer for a workload. Call when a workload
-// transitions out of idle (resumed, scaled up, etc).
-func (d *IdleDetector) Reset(namespace, name string) {
+// StartGracePeriod begins the grace period timer. Call after prediction
+// confirms the signals' idle detection.
+func (d *IdleDetector) StartGracePeriod(namespace, name string) {
 	key := workloadKey(namespace, name)
 	d.mu.Lock()
-	delete(d.idleSince, key)
+	if _, ok := d.graceStart[key]; !ok {
+		d.graceStart[key] = d.Clock()
+	}
 	d.mu.Unlock()
 }
 
+// Reset clears the grace period timer for a workload.
+func (d *IdleDetector) Reset(namespace, name string) {
+	key := workloadKey(namespace, name)
+	d.mu.Lock()
+	delete(d.graceStart, key)
+	d.mu.Unlock()
+}
+
+func (e IdleEvaluation) IsIdle() bool                { return e.Status == IdleStatusIdle }
+func (e IdleEvaluation) IdleDuration() time.Duration  { return e.IdleFor }
+func (e IdleEvaluation) SignalsConfirm() bool          { return e.Status == IdleStatusSignalsConfirm }
+func (e IdleEvaluation) InGracePeriod() bool           { return e.Status == IdleStatusInGracePeriod }
+
 func (e IdleEvaluation) String() string {
-	if e.Status == IdleStatusActive {
-		return fmt.Sprintf("Active (%s)", strings.Join(e.Reasons, "; "))
-	}
-	return fmt.Sprintf("Idle for %s (%s)", e.IdleFor, strings.Join(e.Reasons, "; "))
+	return fmt.Sprintf("%s (%s)", e.Status, strings.Join(e.Reasons, "; "))
 }
 
 func workloadKey(namespace, name string) string {

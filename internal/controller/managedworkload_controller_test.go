@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -78,16 +79,31 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, appsv1.AddToScheme(s))
 	return s
 }
 
-func newTestReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, destroyer *stubDestroyer) *Reconciler {
+func targetDeployment(name, namespace string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+	}
+}
+
+func targetDeploymentWithReplicas(name, namespace string, replicas int32) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+	}
+}
+
+func newTestReconcilerWithReplicas(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, destroyer *stubDestroyer, replicas int32) *Reconciler {
 	t.Helper()
 	scheme := testScheme(t)
 
 	builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.ManagedWorkload{})
 	if workload != nil {
 		builder = builder.WithObjects(workload)
+		builder = builder.WithObjects(targetDeploymentWithReplicas(workload.Spec.Target.Name, workload.Namespace, replicas))
 	}
 
 	return &Reconciler{
@@ -96,6 +112,35 @@ func newTestReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser 
 		Recorder:  record.NewFakeRecorder(10),
 		pauser:    pauser,
 		destroyer: destroyer,
+		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:     func() time.Time { return fixedTime },
+	}
+}
+
+func newTestReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, destroyer *stubDestroyer) *Reconciler {
+	t.Helper()
+	return newTestReconcilerWithTarget(t, workload, pauser, destroyer, true)
+}
+
+func newTestReconcilerWithTarget(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, destroyer *stubDestroyer, createTarget bool) *Reconciler {
+	t.Helper()
+	scheme := testScheme(t)
+
+	builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.ManagedWorkload{})
+	if workload != nil {
+		builder = builder.WithObjects(workload)
+		if createTarget {
+			builder = builder.WithObjects(targetDeployment(workload.Spec.Target.Name, workload.Namespace))
+		}
+	}
+
+	return &Reconciler{
+		Client:    builder.Build(),
+		Scheme:    scheme,
+		Recorder:  record.NewFakeRecorder(10),
+		pauser:    pauser,
+		destroyer: destroyer,
+		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
 		clock:     func() time.Time { return fixedTime },
 	}
 }
@@ -470,6 +515,162 @@ func TestReconcile_DeletionRemovesFinalizerWhenNoPVCRetention(t *testing.T) {
 	assert.True(t, err != nil, "object should be deleted after finalizer removal")
 }
 
+// --- Target check ---
+
+func TestReconcile_TargetNotFoundSetsConditionAndRequeues(t *testing.T) {
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
+	}
+
+	r := newTestReconcilerWithTarget(t, workload, &stubPauser{}, &stubDestroyer{}, false)
+
+	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+	assert.Equal(t, 1*time.Minute, result.RequeueAfter)
+
+	w := getWorkload(t, r, "api")
+	var found bool
+	for _, c := range w.Status.Conditions {
+		if c.Type == conditionTargetAvailable {
+			assert.Equal(t, metav1.ConditionFalse, c.Status)
+			assert.Equal(t, "TargetNotFound", c.Reason)
+			found = true
+		}
+	}
+	assert.True(t, found, "TargetAvailable condition should be set")
+}
+
+// --- Drift detection ---
+
+func TestReconcile_DriftWarnEmitsEventOnly(t *testing.T) {
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			ConflictAction: v1alpha1.ConflictActionWarn,
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{
+			Phase: v1alpha1.PhaseRunning,
+			Scale: &v1alpha1.ScaleStatus{CurrentReplicas: 3},
+		},
+	}
+
+	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 5)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	// Replicas should NOT be changed — warn only emits an event.
+	var dep appsv1.Deployment
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, &dep))
+	assert.Equal(t, int32(5), *dep.Spec.Replicas)
+}
+
+func TestReconcile_DriftEnforceCorrects(t *testing.T) {
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			ConflictAction: v1alpha1.ConflictActionEnforce,
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{
+			Phase: v1alpha1.PhaseRunning,
+			Scale: &v1alpha1.ScaleStatus{CurrentReplicas: 3},
+		},
+	}
+
+	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 5)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	var dep appsv1.Deployment
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, &dep))
+	assert.Equal(t, int32(3), *dep.Spec.Replicas)
+
+	w := getWorkload(t, r, "api")
+	assert.NotNil(t, w.Status.LastActedAt)
+}
+
+func TestReconcile_DriftDeferAcceptsExternalChange(t *testing.T) {
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			ConflictAction: v1alpha1.ConflictActionDefer,
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{
+			Phase: v1alpha1.PhaseRunning,
+			Scale: &v1alpha1.ScaleStatus{CurrentReplicas: 3},
+		},
+	}
+
+	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 5)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	// Replicas untouched on the target.
+	var dep appsv1.Deployment
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, &dep))
+	assert.Equal(t, int32(5), *dep.Spec.Replicas)
+
+	// Status updated to match actual.
+	w := getWorkload(t, r, "api")
+	assert.Equal(t, int32(5), w.Status.Scale.CurrentReplicas)
+}
+
+func TestReconcile_NoDriftWhenReplicasMatch(t *testing.T) {
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			ConflictAction: v1alpha1.ConflictActionEnforce,
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{
+			Phase: v1alpha1.PhaseRunning,
+			Scale: &v1alpha1.ScaleStatus{CurrentReplicas: 3},
+		},
+	}
+
+	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 3)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	// No LastActedAt stamped since no drift correction happened.
+	w := getWorkload(t, r, "api")
+	assert.Nil(t, w.Status.LastActedAt)
+}
+
+func TestReconcile_NoDriftWithoutBaseline(t *testing.T) {
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			ConflictAction: v1alpha1.ConflictActionEnforce,
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{
+			Phase: v1alpha1.PhaseRunning,
+			// No Scale status — operator never scaled this workload.
+		},
+	}
+
+	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 5)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	// No drift action — no baseline to compare against.
+	var dep appsv1.Deployment
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, &dep))
+	assert.Equal(t, int32(5), *dep.Spec.Replicas)
+}
+
 // --- No desiredState ---
 
 func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
@@ -487,7 +688,8 @@ func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
 
 	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
+	// Automation requeues for prediction learning (Observing phase).
+	assert.Equal(t, 1*time.Hour, result.RequeueAfter)
 	assert.Equal(t, 0, pauser.pauseCalls)
 	assert.Equal(t, 0, pauser.resumeCalls)
 	assert.Equal(t, 0, destroyer.destroyCalls)
