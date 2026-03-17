@@ -45,6 +45,7 @@ type forecaster interface {
 	WeeklyConfidence() int
 	GetDataPoints() int
 	RegimeChanged() bool
+	AnomalyDetected() bool
 }
 
 type metricsReader interface {
@@ -155,6 +156,11 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 
 		if engine.RegimeChanged() {
 			opmetrics.PredictionRegimeChanges.WithLabelValues(workload.Namespace, workload.Name).Inc()
+			r.emitEvent(workload, false, "Warning", ReasonRegimeChange,
+				"regime change detected, prediction engine demoted to %s", engine.GetPhase())
+		}
+		if engine.AnomalyDetected() {
+			opmetrics.PredictionAnomalies.WithLabelValues(workload.Namespace, workload.Name).Inc()
 		}
 	}
 
@@ -308,6 +314,8 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 
 		if dryRun {
 			opmetrics.DryrunActions.WithLabelValues("idle_" + string(action)).Inc()
+			r.emitEvent(workload, dryRun, "Normal", ReasonIdleDetected,
+				"would %s workload (idle for %s)", action, eval.IdleDuration())
 			return nil, nil
 		}
 

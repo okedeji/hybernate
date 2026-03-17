@@ -38,12 +38,14 @@ import (
 // --- Stubs ---
 
 type stubForecaster struct {
-	phase           forecast.Phase
-	dailyConfidence int
+	phase            forecast.Phase
+	dailyConfidence  int
 	weeklyConfidence int
-	dataPoints      int
-	predictValue    float64
-	observeCalls    int
+	dataPoints       int
+	predictValue     float64
+	observeCalls     int
+	regimeChanged    bool
+	anomalyDetected  bool
 }
 
 func (f *stubForecaster) Observe(actual float64, _ time.Time) float64 {
@@ -56,7 +58,8 @@ func (f *stubForecaster) GetPhase() forecast.Phase             { return f.phase 
 func (f *stubForecaster) DailyConfidence() int         { return f.dailyConfidence }
 func (f *stubForecaster) WeeklyConfidence() int        { return f.weeklyConfidence }
 func (f *stubForecaster) GetDataPoints() int           { return f.dataPoints }
-func (f *stubForecaster) RegimeChanged() bool          { return false }
+func (f *stubForecaster) RegimeChanged() bool          { return f.regimeChanged }
+func (f *stubForecaster) AnomalyDetected() bool        { return f.anomalyDetected }
 
 type stubMetrics struct {
 	cpuMillis      float64

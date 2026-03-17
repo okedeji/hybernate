@@ -49,6 +49,7 @@ const (
 	ReasonAutoResume           = "AutoResume"
 	ReasonDriftDetected        = "DriftDetected"
 	ReasonDriftCorrected       = "DriftCorrected"
+	ReasonRegimeChange         = "RegimeChange"
 )
 
 func (r *Reconciler) emitEvent(workload *v1alpha1.ManagedWorkload, dryRun bool, eventType, reason, msgFmt string, args ...interface{}) {

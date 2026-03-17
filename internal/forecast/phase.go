@@ -63,6 +63,7 @@ type Engine struct {
 	dailyDemoted     bool
 	weeklyDemoted    bool
 	lastRegimeChange bool
+	lastAnomaly      bool
 }
 
 func NewEngine(params Params, threshold int) *Engine {
@@ -89,7 +90,7 @@ func (e *Engine) Observe(actual float64, now time.Time) float64 {
 		e.WeeklyScorer.Record(forecast, actual)
 	}
 
-	_ = e.Anomaly.Record(forecast, actual)
+	e.lastAnomaly = e.Anomaly.Record(forecast, actual)
 
 	e.advancePhase()
 
@@ -170,7 +171,8 @@ func (e *Engine) GetPhase() Phase        { return e.Phase }
 func (e *Engine) GetDataPoints() int      { return e.Model.DataPoints() }
 func (e *Engine) GetThreshold() int       { return e.Threshold }
 
-func (e *Engine) RegimeChanged() bool { return e.lastRegimeChange }
+func (e *Engine) RegimeChanged() bool    { return e.lastRegimeChange }
+func (e *Engine) AnomalyDetected() bool  { return e.lastAnomaly }
 
 func (e *Engine) handleRegimeChange() {
 	e.lastRegimeChange = true
