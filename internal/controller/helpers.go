@@ -180,6 +180,16 @@ func (r *Reconciler) stampLastActed(workload *v1alpha1.ManagedWorkload) {
 	workload.Status.LastActedAt = &now
 }
 
+func clampInt32(v, min, max int32) int32 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
 func demandToReplicas(demand, cpuPerReplica float64, min, max int) int32 {
 	if demand <= 0 || cpuPerReplica <= 0 {
 		return int32(min)

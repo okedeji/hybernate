@@ -256,6 +256,14 @@ type ScalePolicySpec struct {
 	// +kubebuilder:validation:Minimum=1
 	MaxReplicas int `json:"maxReplicas"`
 
+	// OverrideReplicas bypasses prediction and forces the operator to scale
+	// to this exact replica count (clamped to [minReplicas, maxReplicas]).
+	// Stabilization and step limits still apply. Remove the field to return
+	// to prediction-driven scaling.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	OverrideReplicas *int32 `json:"overrideReplicas,omitempty"`
+
 	// Down configures scale-down behavior including stabilization, step
 	// limits, and guard probes.
 	// +optional

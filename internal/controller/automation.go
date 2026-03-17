@@ -331,17 +331,23 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 }
 
 func (r *Reconciler) reconcileScaleAction(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, dryRun bool) (*ctrl.Result, error) {
+	sp := workload.Spec.ScalePolicy
 	predicted := engine.Predict(1, r.now())
 
 	cpuPerReplica, err := r.metrics.CPURequestPerReplica(ctx, workload)
-	if err != nil {
+	if err != nil && sp.OverrideReplicas == nil {
 		r.emitEvent(workload, dryRun, "Warning", ReasonScalingUnavailable,
 			"cannot compute replica count, %v", err)
 		return nil, fmt.Errorf("reading cpu request per replica: %w", err)
 	}
 
-	sp := workload.Spec.ScalePolicy
-	proposed := demandToReplicas(predicted, cpuPerReplica, sp.MinReplicas, sp.MaxReplicas)
+	var proposed int32
+	override := sp.OverrideReplicas != nil
+	if override {
+		proposed = clampInt32(*sp.OverrideReplicas, int32(sp.MinReplicas), int32(sp.MaxReplicas))
+	} else {
+		proposed = demandToReplicas(predicted, cpuPerReplica, sp.MinReplicas, sp.MaxReplicas)
+	}
 
 	constraints := policy.ScaleConstraints{
 		MinReplicas: int32(sp.MinReplicas),
@@ -381,7 +387,7 @@ func (r *Reconciler) reconcileScaleAction(ctx context.Context, workload *v1alpha
 	target := decision.GetTarget()
 	ns, name := workload.Namespace, workload.Name
 
-	if decision.Direction == policy.ScaleDown {
+	if decision.Direction == policy.ScaleDown && !override {
 		guards := r.buildScaleDownGuards(workload, float64(target)*cpuPerReplica)
 		res, err := signal.CheckAll(ctx, workload.Namespace, workload.Spec.Target.Name, guards)
 		if err != nil {
@@ -398,9 +404,15 @@ func (r *Reconciler) reconcileScaleAction(ctx context.Context, workload *v1alpha
 
 	if dryRun {
 		opmetrics.DryrunActions.WithLabelValues("scale_" + decision.Direction.String()).Inc()
-		r.emitEvent(workload, dryRun, "Normal", ReasonScaled,
-			"would scale to %d replicas (predicted demand %.0fm, cpu/replica %.0fm)",
-			target, predicted, cpuPerReplica)
+		if override {
+			r.emitEvent(workload, dryRun, "Normal", ReasonScaled,
+				"would scale to %d replicas (manual override, predicted demand %.0fm)",
+				target, predicted)
+		} else {
+			r.emitEvent(workload, dryRun, "Normal", ReasonScaled,
+				"would scale to %d replicas (predicted demand %.0fm, cpu/replica %.0fm)",
+				target, predicted, cpuPerReplica)
+		}
 		return nil, nil
 	}
 

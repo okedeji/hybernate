@@ -350,6 +350,15 @@ spec:
                       below this value.
                     minimum: 0
                     type: integer
+                  overrideReplicas:
+                    description: |-
+                      OverrideReplicas bypasses prediction and forces the operator to scale
+                      to this exact replica count (clamped to [minReplicas, maxReplicas]).
+                      Stabilization and step limits still apply. Remove the field to return
+                      to prediction-driven scaling.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   up:
                     description: Up configures scale-up behavior including stabilization
                       and step limits.

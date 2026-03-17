@@ -111,13 +111,15 @@ func (s *stubIdleEvaluator) Reset(_, _ string) {
 }
 
 type stubScaleEvaluator struct {
-	decision  policy.ScaleDecision
-	err       error
-	evalCalls int
+	decision     policy.ScaleDecision
+	err          error
+	evalCalls    int
+	lastProposed int32
 }
 
-func (s *stubScaleEvaluator) Evaluate(_ context.Context, _, _ string, _, _ int32, _ policy.ScaleConstraints, _ []signal.Checker) (policy.ScaleDecision, error) {
+func (s *stubScaleEvaluator) Evaluate(_ context.Context, _, _ string, proposed, _ int32, _ policy.ScaleConstraints, _ []signal.Checker) (policy.ScaleDecision, error) {
 	s.evalCalls++
+	s.lastProposed = proposed
 	return s.decision, s.err
 }
 
@@ -460,6 +462,75 @@ func TestAutomation_ActiveScaleNotReadyRequeues(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, 5*time.Second, result.RequeueAfter)
+}
+
+func TestAutomation_OverrideReplicasSkipsPrediction(t *testing.T) {
+	override := int32(5)
+	workload := automationWorkload(v1alpha1.PhaseRunning)
+	workload.Spec.ScalePolicy = &v1alpha1.ScalePolicySpec{
+		MinReplicas:      1,
+		MaxReplicas:      10,
+		OverrideReplicas: &override,
+	}
+	workload.Status.Scale = &v1alpha1.ScaleStatus{CurrentReplicas: 3}
+
+	engine := &stubForecaster{
+		phase:        forecast.DailyActive,
+		predictValue: 800.0, // would map to 8 replicas — should be ignored
+	}
+	scaleEval := &stubScaleEvaluator{
+		decision: policy.ScaleDecision{
+			Target:    5,
+			Current:   3,
+			Direction: policy.ScaleUp,
+		},
+	}
+	scaler := &stubLifecycleScaler{done: true}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{
+		scale:           scaleEval,
+		lifecycleScaler: scaler,
+		metrics:         &stubMetrics{cpuPerReplica: 100},
+	})
+
+	_, err := r.reconcileAutomation(context.Background(), workload)
+	require.NoError(t, err)
+
+	// Evaluator should have been called with proposed=5 (override), not 8 (prediction).
+	assert.Equal(t, int32(5), scaleEval.lastProposed)
+	assert.Equal(t, 1, scaler.scaleCalls)
+	assert.Equal(t, int32(5), scaler.lastTarget)
+}
+
+func TestAutomation_OverrideReplicasClampedToBounds(t *testing.T) {
+	override := int32(20) // exceeds maxReplicas
+	workload := automationWorkload(v1alpha1.PhaseRunning)
+	workload.Spec.ScalePolicy = &v1alpha1.ScalePolicySpec{
+		MinReplicas:      2,
+		MaxReplicas:      10,
+		OverrideReplicas: &override,
+	}
+	workload.Status.Scale = &v1alpha1.ScaleStatus{CurrentReplicas: 3}
+
+	engine := &stubForecaster{phase: forecast.DailyActive}
+	scaleEval := &stubScaleEvaluator{
+		decision: policy.ScaleDecision{
+			Target:    10,
+			Current:   3,
+			Direction: policy.ScaleUp,
+		},
+	}
+	scaler := &stubLifecycleScaler{done: true}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{
+		scale:           scaleEval,
+		lifecycleScaler: scaler,
+		metrics:         &stubMetrics{cpuPerReplica: 100},
+	})
+
+	_, err := r.reconcileAutomation(context.Background(), workload)
+	require.NoError(t, err)
+
+	// Should be clamped to maxReplicas=10, not 20.
+	assert.Equal(t, int32(10), scaleEval.lastProposed)
 }
 
 func TestAutomation_FeedsEngineHourly(t *testing.T) {
