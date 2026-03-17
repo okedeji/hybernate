@@ -174,9 +174,7 @@ func (r *Reconciler) captureResourceSnapshot(ctx context.Context, workload *v1al
 	if err != nil {
 		logger.V(1).Info("could not fetch target for resource snapshot", "error", err)
 	} else if target != nil {
-		if replicas, err := replicasFromUnstructured(target); err == nil {
-			snap.Replicas = replicas
-		}
+		snap.Replicas = replicasFromTarget(target)
 	}
 
 	cpuMillis, err := r.metrics.CPURequestPerReplica(ctx, workload)

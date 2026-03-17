@@ -20,11 +20,10 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -95,30 +94,11 @@ func (r *Reader) CPURequestPerReplica(ctx context.Context, workload *v1alpha1.Ma
 		return 0, err
 	}
 
-	containers, found, err := unstructured.NestedSlice(target.Object, "spec", "template", "spec", "containers")
-	if err != nil || !found {
-		return 0, fmt.Errorf("reading containers from %s %s", workload.Spec.Target.Kind, workload.Spec.Target.Name)
-	}
-
 	var total float64
-	for _, c := range containers {
-		container, ok := c.(map[string]interface{})
-		if !ok {
-			continue
+	for _, c := range containersFromTarget(target) {
+		if cpu := c.Resources.Requests.Cpu(); cpu != nil {
+			total += float64(cpu.MilliValue())
 		}
-		resources, found, err := unstructured.NestedMap(container, "resources", "requests")
-		if err != nil || !found {
-			continue
-		}
-		cpuStr, ok := resources["cpu"]
-		if !ok {
-			continue
-		}
-		q, err := resource.ParseQuantity(fmt.Sprintf("%v", cpuStr))
-		if err != nil {
-			continue
-		}
-		total += float64(q.MilliValue())
 	}
 
 	if total == 0 {
@@ -194,28 +174,52 @@ func (r *Reader) TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWo
 	return total, nil
 }
 
-func (r *Reader) getTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*unstructured.Unstructured, error) {
+func (r *Reader) getTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (client.Object, error) {
 	ref := workload.Spec.Target
+	nn := types.NamespacedName{Name: ref.Name, Namespace: workload.Namespace}
 
-	gv, err := schema.ParseGroupVersion(ref.APIVersion)
-	if err != nil {
-		return nil, fmt.Errorf("parsing api version %q: %w", ref.APIVersion, err)
+	var obj client.Object
+	switch ref.Kind {
+	case v1alpha1.TargetKindDeployment:
+		obj = &appsv1.Deployment{}
+	case v1alpha1.TargetKindStatefulSet:
+		obj = &appsv1.StatefulSet{}
+	default:
+		return nil, fmt.Errorf("unsupported kind: %s", ref.Kind)
 	}
 
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gv.WithKind(ref.Kind))
-
-	if err := r.client.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: workload.Namespace}, obj); err != nil {
+	if err := r.client.Get(ctx, nn, obj); err != nil {
 		return nil, fmt.Errorf("getting %s %s: %w", ref.Kind, ref.Name, err)
 	}
 
 	return obj, nil
 }
 
-func selectorFromTarget(target *unstructured.Unstructured) (labels.Selector, error) {
-	matchLabels, found, err := unstructured.NestedStringMap(target.Object, "spec", "selector", "matchLabels")
-	if err != nil || !found || len(matchLabels) == 0 {
-		return nil, fmt.Errorf("reading selector from %s %s", target.GetKind(), target.GetName())
+func containersFromTarget(obj client.Object) []corev1.Container {
+	switch t := obj.(type) {
+	case *appsv1.Deployment:
+		return t.Spec.Template.Spec.Containers
+	case *appsv1.StatefulSet:
+		return t.Spec.Template.Spec.Containers
+	default:
+		return nil
+	}
+}
+
+func selectorFromTarget(obj client.Object) (labels.Selector, error) {
+	var matchLabels map[string]string
+	switch t := obj.(type) {
+	case *appsv1.Deployment:
+		if t.Spec.Selector != nil {
+			matchLabels = t.Spec.Selector.MatchLabels
+		}
+	case *appsv1.StatefulSet:
+		if t.Spec.Selector != nil {
+			matchLabels = t.Spec.Selector.MatchLabels
+		}
+	}
+	if len(matchLabels) == 0 {
+		return nil, fmt.Errorf("no selector found on %s %s", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName())
 	}
 	return labels.SelectorFromSet(matchLabels), nil
 }

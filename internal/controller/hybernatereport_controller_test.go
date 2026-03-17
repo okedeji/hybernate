@@ -48,7 +48,7 @@ func managedWorkload(name string, phase v1alpha1.WorkloadPhase, cost *v1alpha1.C
 	return &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:     v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: name},
+			Target:     v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: name},
 			Prediction: v1alpha1.PredictionSpec{Confidence: 85},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{

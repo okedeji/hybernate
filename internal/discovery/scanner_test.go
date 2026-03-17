@@ -107,7 +107,7 @@ func TestScanner_Scan_ClassifiesWorkloads(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
 	scanner := NewScanner(c)
 
-	result, err := scanner.Scan(context.Background(), ns, []string{"Deployment"}, th)
+	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
 
 	assert.Equal(t, 3, result.Summary.Total)
@@ -141,7 +141,7 @@ func TestScanner_Scan_SkipsIgnored(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
 	scanner := NewScanner(c)
 
-	result, err := scanner.Scan(context.Background(), ns, []string{"Deployment"}, th)
+	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.Summary.Total)
@@ -159,9 +159,8 @@ func TestScanner_Scan_DetectsManaged(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "managed-app-mw", Namespace: ns},
 			Spec: v1alpha1.ManagedWorkloadSpec{
 				Target: v1alpha1.WorkloadRef{
-					APIVersion: "apps/v1",
-					Kind:       "Deployment",
-					Name:       "managed-app",
+					Kind: v1alpha1.TargetKindDeployment,
+					Name: "managed-app",
 				},
 			},
 		},
@@ -170,7 +169,7 @@ func TestScanner_Scan_DetectsManaged(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
 	scanner := NewScanner(c)
 
-	result, err := scanner.Scan(context.Background(), ns, []string{"Deployment"}, th)
+	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.Summary.Managed)
@@ -181,7 +180,7 @@ func TestScanner_Scan_EmptyNamespace(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	scanner := NewScanner(c)
 
-	result, err := scanner.Scan(context.Background(), "empty-ns", []string{"Deployment"}, DefaultThresholds())
+	result, err := scanner.Scan(context.Background(), "empty-ns", []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, DefaultThresholds())
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, result.Summary.Total)
@@ -206,7 +205,7 @@ func TestScanner_Scan_SortsBySavingsDescending(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
 	scanner := NewScanner(c)
 
-	result, err := scanner.Scan(context.Background(), ns, []string{"Deployment"}, th)
+	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
 	require.Len(t, result.Discovered, 2)
 

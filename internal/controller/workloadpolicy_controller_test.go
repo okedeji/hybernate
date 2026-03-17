@@ -180,7 +180,7 @@ func TestWorkloadPolicyReconciler_AutoManageCreatesWorkloads(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "idle-svc", mw.Spec.Target.Name)
-	assert.Equal(t, "Deployment", mw.Spec.Target.Kind)
+	assert.Equal(t, v1alpha1.TargetKindDeployment, mw.Spec.Target.Kind)
 	assert.True(t, mw.Spec.DryRun)
 	assert.Equal(t, "true", mw.Labels[v1alpha1.LabelAutoDiscovered])
 	assert.Equal(t, "dev-policy", mw.Annotations[v1alpha1.AnnotationWorkloadPolicy])

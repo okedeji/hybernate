@@ -33,7 +33,7 @@ func costWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
 	return &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			Prediction:   v1alpha1.PredictionSpec{Confidence: 85},
 			CostTracking: &v1alpha1.CostTrackingSpec{Enabled: true},
 		},

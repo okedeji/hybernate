@@ -21,11 +21,9 @@ import (
 	"fmt"
 	"sort"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -53,7 +51,7 @@ type ScanResult struct {
 
 // Scan lists workloads of the given kinds in the namespace, classifies each,
 // and returns the results capped at maxDiscovered sorted by savings descending.
-func (s *Scanner) Scan(ctx context.Context, namespace string, kinds []string, th Thresholds) (*ScanResult, error) {
+func (s *Scanner) Scan(ctx context.Context, namespace string, kinds []v1alpha1.TargetKind, th Thresholds) (*ScanResult, error) {
 	managed, err := s.managedTargets(ctx, namespace)
 	if err != nil {
 		return nil, fmt.Errorf("listing managed workloads: %w", err)
@@ -69,10 +67,7 @@ func (s *Scanner) Scan(ctx context.Context, namespace string, kinds []string, th
 		}
 
 		for _, obj := range workloads {
-			info, err := s.buildInfo(ctx, namespace, kind, obj, managed)
-			if err != nil {
-				continue
-			}
+			info := s.buildInfo(ctx, namespace, kind, obj, managed)
 			if info.Ignored {
 				continue
 			}
@@ -95,41 +90,66 @@ func (s *Scanner) Scan(ctx context.Context, namespace string, kinds []string, th
 	return &ScanResult{Discovered: all, Summary: summary}, nil
 }
 
-func (s *Scanner) listWorkloads(ctx context.Context, namespace, kind string) ([]unstructured.Unstructured, error) {
-	gvk := gvkForKind(kind)
-	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(gvk)
-	if err := s.client.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return nil, err
+func (s *Scanner) listWorkloads(ctx context.Context, namespace string, kind v1alpha1.TargetKind) ([]client.Object, error) {
+	switch kind {
+	case v1alpha1.TargetKindDeployment:
+		var list appsv1.DeploymentList
+		if err := s.client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+			return nil, err
+		}
+		out := make([]client.Object, len(list.Items))
+		for i := range list.Items {
+			out[i] = &list.Items[i]
+		}
+		return out, nil
+	case v1alpha1.TargetKindStatefulSet:
+		var list appsv1.StatefulSetList
+		if err := s.client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+			return nil, err
+		}
+		out := make([]client.Object, len(list.Items))
+		for i := range list.Items {
+			out[i] = &list.Items[i]
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unsupported kind: %s", kind)
 	}
-	return list.Items, nil
 }
 
-func (s *Scanner) buildInfo(ctx context.Context, namespace, kind string, obj unstructured.Unstructured, managed map[string]bool) (WorkloadInfo, error) {
+func (s *Scanner) buildInfo(ctx context.Context, namespace string, kind v1alpha1.TargetKind, obj client.Object, managed map[string]bool) WorkloadInfo {
 	name := obj.GetName()
 	info := WorkloadInfo{
 		Name:    name,
 		Kind:    kind,
-		Managed: managed[kind+"/"+name],
+		Managed: managed[string(kind)+"/"+name],
 		Ignored: obj.GetLabels()[v1alpha1.LabelIgnore] == "true",
 	}
 
-	replicas, found, _ := unstructured.NestedInt64(obj.Object, "spec", "replicas")
-	if found {
-		info.Replicas = int32(replicas)
+	replicas, containers, matchLabels := workloadFields(obj)
+
+	if replicas != nil {
+		info.Replicas = *replicas
 	} else {
 		info.Replicas = 1
 	}
 
-	info.CPURequestMillis, info.MemoryRequestBytes = requestsFromTemplate(obj)
+	for _, c := range containers {
+		if cpu := c.Resources.Requests.Cpu(); cpu != nil {
+			info.CPURequestMillis += cpu.MilliValue()
+		}
+		if mem := c.Resources.Requests.Memory(); mem != nil {
+			info.MemoryRequestBytes += mem.Value()
+		}
+	}
 
-	sel := selectorFromWorkload(obj)
-	if sel != nil {
+	if len(matchLabels) > 0 {
+		sel := labels.SelectorFromSet(matchLabels)
 		info.CPUUsageMillis, info.MemoryUsageBytes = s.podMetrics(ctx, namespace, sel)
 		info.StorageBytes = s.pvcBytes(ctx, namespace, sel)
 	}
 
-	return info, nil
+	return info
 }
 
 // managedTargets returns a set of "Kind/Name" strings for workloads already
@@ -141,7 +161,7 @@ func (s *Scanner) managedTargets(ctx context.Context, namespace string) (map[str
 	}
 	m := make(map[string]bool, len(list.Items))
 	for _, mw := range list.Items {
-		key := mw.Spec.Target.Kind + "/" + mw.Spec.Target.Name
+		key := string(mw.Spec.Target.Kind) + "/" + mw.Spec.Target.Name
 		m[key] = true
 	}
 	return m, nil
@@ -175,47 +195,23 @@ func (s *Scanner) pvcBytes(ctx context.Context, namespace string, sel labels.Sel
 	return total
 }
 
-func requestsFromTemplate(obj unstructured.Unstructured) (cpuMillis, memBytes int64) {
-	containers, found, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
-	if !found {
-		return 0, 0
-	}
-	for _, c := range containers {
-		cMap, ok := c.(map[string]any)
-		if !ok {
-			continue
+// workloadFields extracts the common fields from a Deployment or StatefulSet.
+func workloadFields(obj client.Object) (replicas *int32, containers []corev1.Container, matchLabels map[string]string) {
+	switch t := obj.(type) {
+	case *appsv1.Deployment:
+		replicas = t.Spec.Replicas
+		containers = t.Spec.Template.Spec.Containers
+		if t.Spec.Selector != nil {
+			matchLabels = t.Spec.Selector.MatchLabels
 		}
-		res, found, _ := unstructured.NestedMap(cMap, "resources", "requests")
-		if !found {
-			continue
-		}
-		if cpu, ok := res["cpu"]; ok {
-			cpuMillis += parseMilliCPU(fmt.Sprintf("%v", cpu))
-		}
-		if mem, ok := res["memory"]; ok {
-			memBytes += parseMemoryBytes(fmt.Sprintf("%v", mem))
+	case *appsv1.StatefulSet:
+		replicas = t.Spec.Replicas
+		containers = t.Spec.Template.Spec.Containers
+		if t.Spec.Selector != nil {
+			matchLabels = t.Spec.Selector.MatchLabels
 		}
 	}
-	return cpuMillis, memBytes
-}
-
-func selectorFromWorkload(obj unstructured.Unstructured) labels.Selector {
-	matchLabels, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "selector", "matchLabels")
-	if !found || len(matchLabels) == 0 {
-		return nil
-	}
-	return labels.SelectorFromSet(matchLabels)
-}
-
-func gvkForKind(kind string) schema.GroupVersionKind {
-	switch kind {
-	case "Deployment":
-		return schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "DeploymentList"}
-	case "StatefulSet":
-		return schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "StatefulSetList"}
-	default:
-		return schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: kind + "List"}
-	}
+	return
 }
 
 func buildSummary(discovered []v1alpha1.DiscoveredWorkload, totalSavings float64) v1alpha1.DiscoverySummary {
@@ -236,22 +232,4 @@ func buildSummary(discovered []v1alpha1.DiscoveredWorkload, totalSavings float64
 	}
 	s.EstimatedMonthlySavings = cost.FormatDollars(totalSavings)
 	return s
-}
-
-// parseMilliCPU converts a Kubernetes CPU string (e.g., "500m", "1") to millicores.
-func parseMilliCPU(s string) int64 {
-	q, err := resource.ParseQuantity(s)
-	if err != nil {
-		return 0
-	}
-	return q.MilliValue()
-}
-
-// parseMemoryBytes converts a Kubernetes memory string (e.g., "512Mi", "1Gi") to bytes.
-func parseMemoryBytes(s string) int64 {
-	q, err := resource.ParseQuantity(s)
-	if err != nil {
-		return 0
-	}
-	return q.Value()
 }

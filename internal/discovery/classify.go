@@ -44,7 +44,7 @@ func DefaultThresholds() Thresholds {
 // WorkloadInfo captures the resource profile of a single workload for classification.
 type WorkloadInfo struct {
 	Name               string
-	Kind               string
+	Kind               v1alpha1.TargetKind
 	Replicas           int32
 	CPUUsageMillis     int64
 	CPURequestMillis   int64

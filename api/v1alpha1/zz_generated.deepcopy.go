@@ -698,7 +698,7 @@ func (in *WorkloadPolicySpec) DeepCopyInto(out *WorkloadPolicySpec) {
 	*out = *in
 	if in.TargetKinds != nil {
 		in, out := &in.TargetKinds, &out.TargetKinds
-		*out = make([]string, len(*in))
+		*out = make([]TargetKind, len(*in))
 		copy(*out, *in)
 	}
 	if in.ScanInterval != nil {

@@ -193,7 +193,7 @@ func TestBuildDiscovered(t *testing.T) {
 
 	w := WorkloadInfo{
 		Name:               "api-server",
-		Kind:               "Deployment",
+		Kind:               v1alpha1.TargetKindDeployment,
 		CPUUsageMillis:     30,
 		CPURequestMillis:   1000,
 		MemoryUsageBytes:   256 << 20,
@@ -205,7 +205,7 @@ func TestBuildDiscovered(t *testing.T) {
 	d := BuildDiscovered(w, th)
 
 	assert.Equal(t, "api-server", d.Name)
-	assert.Equal(t, "Deployment", d.Kind)
+	assert.Equal(t, v1alpha1.TargetKindDeployment, d.Kind)
 	assert.Equal(t, v1alpha1.ClassificationIdle, d.Classification)
 	assert.Equal(t, int32(2), d.Replicas)
 	assert.Equal(t, 3, d.UtilizationPercent)

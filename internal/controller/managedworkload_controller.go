@@ -23,11 +23,9 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -456,17 +454,21 @@ const conditionTargetAvailable = "TargetAvailable"
 
 // checkTarget verifies the target workload exists. Returns the target object
 // on success, nil when not found (condition set, status updated), or an error.
-func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*unstructured.Unstructured, error) {
+func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (client.Object, error) {
 	ref := workload.Spec.Target
-	gv, err := schema.ParseGroupVersion(ref.APIVersion)
-	if err != nil {
-		return nil, fmt.Errorf("parsing api version %q: %w", ref.APIVersion, err)
+	nn := types.NamespacedName{Name: ref.Name, Namespace: workload.Namespace}
+
+	var obj client.Object
+	switch ref.Kind {
+	case v1alpha1.TargetKindDeployment:
+		obj = &appsv1.Deployment{}
+	case v1alpha1.TargetKindStatefulSet:
+		obj = &appsv1.StatefulSet{}
+	default:
+		return nil, fmt.Errorf("unsupported target kind: %s", ref.Kind)
 	}
 
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gv.WithKind(ref.Kind))
-
-	err = r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: workload.Namespace}, obj)
+	err := r.Get(ctx, nn, obj)
 	if apierrors.IsNotFound(err) {
 		r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetNotFound",
 			fmt.Sprintf("%s %s not found", ref.Kind, ref.Name))
@@ -497,16 +499,13 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 
 // checkDrift compares actual replicas on the target against what the operator
 // last set. When they differ, the conflict policy decides the response.
-func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedWorkload, target *unstructured.Unstructured) (*ctrl.Result, error) {
+func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	expected, ok := r.expectedReplicas(workload)
 	if !ok {
 		return nil, nil
 	}
 
-	actual, err := replicasFromUnstructured(target)
-	if err != nil {
-		return nil, fmt.Errorf("reading target replicas: %w", err)
-	}
+	actual := replicasFromTarget(target)
 
 	if actual == expected {
 		return nil, nil
@@ -556,20 +555,26 @@ func (r *Reconciler) expectedReplicas(workload *v1alpha1.ManagedWorkload) (int32
 	}
 }
 
-func replicasFromUnstructured(obj *unstructured.Unstructured) (int32, error) {
-	replicas, found, err := unstructured.NestedInt64(obj.Object, "spec", "replicas")
-	if err != nil {
-		return 0, err
+func replicasFromTarget(obj client.Object) int32 {
+	var replicas *int32
+	switch t := obj.(type) {
+	case *appsv1.Deployment:
+		replicas = t.Spec.Replicas
+	case *appsv1.StatefulSet:
+		replicas = t.Spec.Replicas
 	}
-	if !found {
-		return 1, nil
+	if replicas == nil {
+		return 1
 	}
-	return int32(replicas), nil
+	return *replicas
 }
 
-func (r *Reconciler) enforceReplicas(ctx context.Context, target *unstructured.Unstructured, desired int32) error {
-	if err := unstructured.SetNestedField(target.Object, int64(desired), "spec", "replicas"); err != nil {
-		return fmt.Errorf("setting replicas field: %w", err)
+func (r *Reconciler) enforceReplicas(ctx context.Context, target client.Object, desired int32) error {
+	switch t := target.(type) {
+	case *appsv1.Deployment:
+		t.Spec.Replicas = &desired
+	case *appsv1.StatefulSet:
+		t.Spec.Replicas = &desired
 	}
 	return r.Update(ctx, target)
 }

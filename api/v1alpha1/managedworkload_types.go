@@ -118,18 +118,20 @@ type ManagedWorkloadSpec struct {
 	DryRun bool `json:"dryRun,omitempty"`
 }
 
-// WorkloadRef identifies the target workload by group/version, kind, and name.
+// +kubebuilder:validation:Enum=Deployment;StatefulSet
+type TargetKind string
+
+const (
+	TargetKindDeployment  TargetKind = "Deployment"
+	TargetKindStatefulSet TargetKind = "StatefulSet"
+)
+
+// WorkloadRef identifies the target workload by kind and name.
 // The workload must exist in the same namespace as the ManagedWorkload CR.
 type WorkloadRef struct {
-	// APIVersion is the group/version of the target (e.g. "apps/v1").
-	// +kubebuilder:validation:MinLength=1
-	APIVersion string `json:"apiVersion"`
+	// +kubebuilder:default=Deployment
+	Kind TargetKind `json:"kind"`
 
-	// Kind is the resource kind (e.g. "Deployment", "StatefulSet").
-	// +kubebuilder:validation:MinLength=1
-	Kind string `json:"kind"`
-
-	// Name is the target workload's metadata.name.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 }

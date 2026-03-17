@@ -20,9 +20,8 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -51,25 +50,28 @@ func (s *subResourceScaler) UpdateScale(ctx context.Context, obj client.Object, 
 	return s.client.SubResource("scale").Update(ctx, obj, client.WithSubResourceBody(scale))
 }
 
-func getTarget(ctx context.Context, c client.Client, workload *v1alpha1.ManagedWorkload) (*unstructured.Unstructured, error) {
+func getTarget(ctx context.Context, c client.Client, workload *v1alpha1.ManagedWorkload) (client.Object, error) {
 	ref := workload.Spec.Target
+	nn := types.NamespacedName{Name: ref.Name, Namespace: workload.Namespace}
 
-	gv, err := schema.ParseGroupVersion(ref.APIVersion)
-	if err != nil {
-		return nil, fmt.Errorf("parsing api version %q: %w", ref.APIVersion, err)
+	var obj client.Object
+	switch ref.Kind {
+	case v1alpha1.TargetKindDeployment:
+		obj = &appsv1.Deployment{}
+	case v1alpha1.TargetKindStatefulSet:
+		obj = &appsv1.StatefulSet{}
+	default:
+		return nil, fmt.Errorf("unsupported kind: %s", ref.Kind)
 	}
 
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gv.WithKind(ref.Kind))
-
-	if err := c.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: workload.Namespace}, obj); err != nil {
+	if err := c.Get(ctx, nn, obj); err != nil {
 		return nil, fmt.Errorf("getting %s %s: %w", ref.Kind, ref.Name, err)
 	}
 
 	return obj, nil
 }
 
-func scaleTo(ctx context.Context, scaler WorkloadScaler, target *unstructured.Unstructured, n int32) error {
+func scaleTo(ctx context.Context, scaler WorkloadScaler, target client.Object, n int32) error {
 	scale, err := scaler.GetScale(ctx, target)
 	if err != nil {
 		return fmt.Errorf("getting scale subresource: %w", err)
@@ -86,7 +88,7 @@ func scaleTo(ctx context.Context, scaler WorkloadScaler, target *unstructured.Un
 	return nil
 }
 
-func checkReady(ctx context.Context, scaler WorkloadScaler, target *unstructured.Unstructured, desired int32) (bool, error) {
+func checkReady(ctx context.Context, scaler WorkloadScaler, target client.Object, desired int32) (bool, error) {
 	scale, err := scaler.GetScale(ctx, target)
 	if err != nil {
 		return false, fmt.Errorf("getting scale subresource: %w", err)

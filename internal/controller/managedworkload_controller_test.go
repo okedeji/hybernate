@@ -168,7 +168,7 @@ func TestReconcile_SetsInitialPhaseToRunning(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 	}
 
@@ -194,7 +194,7 @@ func TestReconcile_PauseTransitions(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			DesiredState: desiredState(v1alpha1.DesiredStatePaused),
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
@@ -215,7 +215,7 @@ func TestReconcile_PauseNotDoneRequeues(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			DesiredState: desiredState(v1alpha1.DesiredStatePaused),
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
@@ -233,7 +233,7 @@ func TestReconcile_AlreadyPausedIsNoOp(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			DesiredState: desiredState(v1alpha1.DesiredStatePaused),
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhasePaused},
@@ -253,7 +253,7 @@ func TestReconcile_ResumeTransitions(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			DesiredState: desiredState(v1alpha1.DesiredStateRunning),
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhasePaused},
@@ -274,7 +274,7 @@ func TestReconcile_ResumeNotReadyRequeues(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			DesiredState: desiredState(v1alpha1.DesiredStateRunning),
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhasePaused},
@@ -294,7 +294,7 @@ func TestReconcile_DestroyTransitions(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			DesiredState: desiredState(v1alpha1.DesiredStateDestroyed),
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
@@ -315,7 +315,7 @@ func TestReconcile_AlreadyDestroyedIsNoOp(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			DesiredState: desiredState(v1alpha1.DesiredStateDestroyed),
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseDestroyed},
@@ -336,7 +336,7 @@ func TestReconcile_PauseExpiryDestroysWorkload(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			Pause: &v1alpha1.PauseSpec{
 				ExpireAfter:  &metav1.Duration{Duration: 1 * time.Hour},
 				ExpireAction: v1alpha1.ExpireActionDestroy,
@@ -367,7 +367,7 @@ func TestReconcile_PauseExpiryResumesWorkload(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			Pause: &v1alpha1.PauseSpec{
 				ExpireAfter:  &metav1.Duration{Duration: 1 * time.Hour},
 				ExpireAction: v1alpha1.ExpireActionResume,
@@ -398,7 +398,7 @@ func TestReconcile_PauseNotExpiredRequeuesWithRemaining(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			Pause: &v1alpha1.PauseSpec{
 				ExpireAfter: &metav1.Duration{Duration: 1 * time.Hour},
 			},
@@ -427,7 +427,7 @@ func TestReconcile_PVCRetentionCleansUpAfterExpiry(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Phase: v1alpha1.PhaseDestroyed,
@@ -452,7 +452,7 @@ func TestReconcile_PVCRetentionWaitsBeforeExpiry(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Phase: v1alpha1.PhaseDestroyed,
@@ -478,7 +478,7 @@ func TestReconcile_FinalizerAddedOnFirstReconcile(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 	}
 
@@ -500,7 +500,7 @@ func TestReconcile_DeletionRemovesFinalizerWhenNoPVCRetention(t *testing.T) {
 			DeletionTimestamp: &now,
 		},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
 	}
@@ -521,7 +521,7 @@ func TestReconcile_TargetNotFoundSetsConditionAndRequeues(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
 	}
@@ -550,7 +550,7 @@ func TestReconcile_DriftWarnEmitsEventOnly(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:         v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			ConflictAction: v1alpha1.ConflictActionWarn,
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
@@ -574,7 +574,7 @@ func TestReconcile_DriftEnforceCorrects(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:         v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			ConflictAction: v1alpha1.ConflictActionEnforce,
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
@@ -600,7 +600,7 @@ func TestReconcile_DriftDeferAcceptsExternalChange(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:         v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			ConflictAction: v1alpha1.ConflictActionDefer,
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
@@ -628,7 +628,7 @@ func TestReconcile_NoDriftWhenReplicasMatch(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:         v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			ConflictAction: v1alpha1.ConflictActionEnforce,
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
@@ -651,7 +651,7 @@ func TestReconcile_NoDriftWithoutBaseline(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:         v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target:         v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			ConflictAction: v1alpha1.ConflictActionEnforce,
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
@@ -677,7 +677,7 @@ func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
 	}

@@ -363,21 +363,16 @@ spec:
                 description: Target identifies the workload to manage (e.g. a Deployment
                   or StatefulSet).
                 properties:
-                  apiVersion:
-                    description: APIVersion is the group/version of the target (e.g.
-                      "apps/v1").
-                    minLength: 1
-                    type: string
                   kind:
-                    description: Kind is the resource kind (e.g. "Deployment", "StatefulSet").
-                    minLength: 1
+                    default: Deployment
+                    enum:
+                    - Deployment
+                    - StatefulSet
                     type: string
                   name:
-                    description: Name is the target workload's metadata.name.
                     minLength: 1
                     type: string
                 required:
-                - apiVersion
                 - kind
                 - name
                 type: object

@@ -57,7 +57,7 @@ func TestPause_ScalesToZero(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 	}
 
@@ -90,7 +90,7 @@ func TestPause_Idempotent(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Pause: &v1alpha1.PauseStatus{
@@ -127,7 +127,7 @@ func TestResume_ScalesBackUp(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Pause: &v1alpha1.PauseStatus{PreviousReplicas: 3},
@@ -161,7 +161,7 @@ func TestResume_NotReadyRequeues(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Pause: &v1alpha1.PauseStatus{PreviousReplicas: 3},
@@ -182,7 +182,7 @@ func TestResume_NoPauseStatusIsNoOp(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 	}
 

@@ -42,7 +42,7 @@ const (
 type WorkloadPolicySpec struct {
 	// +kubebuilder:default={"Deployment","StatefulSet"}
 	// +optional
-	TargetKinds []string `json:"targetKinds,omitempty"`
+	TargetKinds []TargetKind `json:"targetKinds,omitempty"`
 
 	// +kubebuilder:default=suggest
 	// +optional
@@ -140,7 +140,7 @@ type DiscoverySummary struct {
 
 type DiscoveredWorkload struct {
 	Name                 string         `json:"name"`
-	Kind                 string         `json:"kind"`
+	Kind                 TargetKind     `json:"kind"`
 	Classification       Classification `json:"classification"`
 	CPUUsageMillis       int64          `json:"cpuUsageMillis"`
 	CPURequestMillis     int64          `json:"cpuRequestMillis"`

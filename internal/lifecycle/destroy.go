@@ -56,7 +56,7 @@ func (d *Destroyer) Destroy(ctx context.Context, workload *v1alpha1.ManagedWorkl
 	}
 
 	if err := d.client.Delete(ctx, target); err != nil {
-		return false, fmt.Errorf("deleting %s %s: %w", target.GetKind(), target.GetName(), err)
+		return false, fmt.Errorf("deleting %s %s: %w", workload.Spec.Target.Kind, target.GetName(), err)
 	}
 
 	now := d.clock()

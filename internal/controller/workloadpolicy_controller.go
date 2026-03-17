@@ -63,7 +63,7 @@ func (r *WorkloadPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	th := thresholdsFromSpec(policy.Spec)
 	kinds := policy.Spec.TargetKinds
 	if len(kinds) == 0 {
-		kinds = []string{"Deployment", "StatefulSet"}
+		kinds = []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment, v1alpha1.TargetKindStatefulSet}
 	}
 
 	scanner := discovery.NewScanner(r.Client)
@@ -143,9 +143,8 @@ func (r *WorkloadPolicyReconciler) autoManage(ctx context.Context, policy *v1alp
 			},
 			Spec: v1alpha1.ManagedWorkloadSpec{
 				Target: v1alpha1.WorkloadRef{
-					APIVersion: "apps/v1",
-					Kind:       d.Kind,
-					Name:       d.Name,
+					Kind: d.Kind,
+					Name: d.Name,
 				},
 				DryRun: policy.Spec.DryRun,
 				Prediction: func() v1alpha1.PredictionSpec {

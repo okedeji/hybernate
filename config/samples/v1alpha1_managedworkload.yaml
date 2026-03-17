@@ -1,9 +1,15 @@
-apiVersion: hybernate.hybernate.io/v1alpha1
+apiVersion: hybernate.io/v1alpha1
 kind: ManagedWorkload
 metadata:
   labels:
     app.kubernetes.io/name: hybernate
     app.kubernetes.io/managed-by: kustomize
   name: managedworkload-sample
+  namespace: staging
 spec:
-  # TODO(user): Add fields here
+  target:
+    kind: Deployment
+    name: api-server
+  prediction:
+    confidence: 85
+  dryRun: true

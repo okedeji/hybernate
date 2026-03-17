@@ -50,7 +50,7 @@ func newTestDestroyer(t *testing.T) (*Destroyer, *appsv1.Deployment, *v1alpha1.M
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 	}
 
@@ -118,7 +118,7 @@ func TestCleanupPVCs_DeletesAfterRetention(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Destroy: &v1alpha1.DestroyStatus{
@@ -152,7 +152,7 @@ func TestCleanupPVCs_WaitsBeforeRetentionExpiry(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"},
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Destroy: &v1alpha1.DestroyStatus{
