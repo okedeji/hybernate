@@ -148,9 +148,9 @@ func (d *IdleDetector) Reset(namespace, name string) {
 }
 
 func (e IdleEvaluation) IsIdle() bool                { return e.Status == IdleStatusIdle }
-func (e IdleEvaluation) IdleDuration() time.Duration  { return e.IdleFor }
-func (e IdleEvaluation) SignalsConfirm() bool          { return e.Status == IdleStatusSignalsConfirm }
-func (e IdleEvaluation) InGracePeriod() bool           { return e.Status == IdleStatusInGracePeriod }
+func (e IdleEvaluation) IdleDuration() time.Duration { return e.IdleFor }
+func (e IdleEvaluation) SignalsConfirm() bool        { return e.Status == IdleStatusSignalsConfirm }
+func (e IdleEvaluation) InGracePeriod() bool         { return e.Status == IdleStatusInGracePeriod }
 
 func (e IdleEvaluation) String() string {
 	return fmt.Sprintf("%s (%s)", e.Status, strings.Join(e.Reasons, "; "))

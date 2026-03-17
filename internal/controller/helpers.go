@@ -52,7 +52,7 @@ const (
 	ReasonRegimeChange         = "RegimeChange"
 )
 
-func (r *Reconciler) emitEvent(workload *v1alpha1.ManagedWorkload, dryRun bool, eventType, reason, msgFmt string, args ...interface{}) {
+func (r *Reconciler) emitEvent(workload *v1alpha1.ManagedWorkload, dryRun bool, eventType, reason, msgFmt string, args ...any) {
 	msg := fmt.Sprintf(msgFmt, args...)
 	r.Recorder.Event(workload, eventType, reason,
 		fmt.Sprintf("%s%s: %s", dryRunPrefix(dryRun), workload.Spec.Target.Name, msg))
@@ -120,20 +120,27 @@ func (r *Reconciler) updatePredictionStatus(workload *v1alpha1.ManagedWorkload, 
 	opmetrics.PredictionDataPoints.WithLabelValues(ns, name).Set(float64(engine.GetDataPoints()))
 }
 
+const (
+	seasonObserving  = "Observing"
+	seasonSuggesting = "Suggesting"
+	seasonActive     = "Active"
+	seasonUnknown    = "Unknown"
+)
+
 func seasonPhases(phase forecast.Phase) (daily, weekly string) {
 	switch phase {
 	case forecast.Observing:
-		return "Observing", "Observing"
+		return seasonObserving, seasonObserving
 	case forecast.DailySuggesting:
-		return "Suggesting", "Observing"
+		return seasonSuggesting, seasonObserving
 	case forecast.DailyActive:
-		return "Active", "Observing"
+		return seasonActive, seasonObserving
 	case forecast.WeeklySuggesting:
-		return "Active", "Suggesting"
+		return seasonActive, seasonSuggesting
 	case forecast.FullyActive:
-		return "Active", "Active"
+		return seasonActive, seasonActive
 	default:
-		return "Unknown", "Unknown"
+		return seasonUnknown, seasonUnknown
 	}
 }
 
@@ -228,6 +235,6 @@ func parseDollarAmount(s string) float64 {
 		return 0
 	}
 	var v float64
-	fmt.Sscanf(s[1:], "%f", &v)
+	_, _ = fmt.Sscanf(s[1:], "%f", &v)
 	return v
 }

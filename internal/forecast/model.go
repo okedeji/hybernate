@@ -36,7 +36,6 @@ limitations under the License.
 //   - s₁ = 24 (daily season), s₂ = 168 (weekly season)
 //   - α, β, γ₁, γ₂ = smoothing parameters in (0, 1)
 
-
 package forecast
 
 import "time"

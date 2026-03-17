@@ -137,7 +137,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 		return nil, nil
 	}
 
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	key := workload.Namespace + "/" + workload.Name
 	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, predictionState(workload))
 
@@ -145,14 +145,14 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	if r.metrics != nil && r.engines.shouldFeed(key, r.now()) {
 		metric, err := r.metrics.TotalCPUMillis(ctx, workload)
 		if err != nil {
-			log.Error(err, "reading metrics, will retry")
+			logger.Error(err, "reading metrics, will retry")
 			result := ctrl.Result{RequeueAfter: 1 * time.Minute}
 			return &result, nil
 		}
-		forecast := engine.Observe(metric, r.now())
+		prediction := engine.Observe(metric, r.now())
 		r.engines.markFed(key, r.now())
 		r.emitEvent(workload, false, "Normal", ReasonPredictionFed,
-			"fed %.0fm CPU, forecast %.0fm, phase %s", metric, forecast, engine.GetPhase())
+			"fed %.0fm CPU, forecast %.0fm, phase %s", metric, prediction, engine.GetPhase())
 
 		if engine.RegimeChanged() {
 			opmetrics.PredictionRegimeChanges.WithLabelValues(workload.Namespace, workload.Name).Inc()
@@ -181,7 +181,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	}
 
 	enginePhase := engine.GetPhase()
-	log.Info("automation tick", "engine_phase", enginePhase, "data_points", engine.GetDataPoints())
+	logger.Info("automation tick", "engine_phase", enginePhase, "data_points", engine.GetDataPoints())
 
 	switch enginePhase {
 	case forecast.Observing:

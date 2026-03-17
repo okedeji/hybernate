@@ -101,7 +101,7 @@ func TestIdleEvaluate_DeniedSignalResetsGracePeriod(t *testing.T) {
 	idleSignal := &fakeChecker{confirm: true, reason: "CPU at 3m"}
 	gracePeriod := 30 * time.Minute
 
-	d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
+	_, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
 	d.StartGracePeriod("default", "api")
 
 	fakeTime = fakeTime.Add(15 * time.Minute)
@@ -146,8 +146,8 @@ func TestIdleEvaluate_MultipleWorkloadsIndependent(t *testing.T) {
 	idleSignal := &fakeChecker{confirm: true, reason: "idle"}
 	gracePeriod := 10 * time.Minute
 
-	d.Evaluate(context.Background(), "staging", "api", []signal.Checker{idleSignal}, gracePeriod)
-	d.Evaluate(context.Background(), "staging", "db", []signal.Checker{idleSignal}, gracePeriod)
+	_, _ = d.Evaluate(context.Background(), "staging", "api", []signal.Checker{idleSignal}, gracePeriod)
+	_, _ = d.Evaluate(context.Background(), "staging", "db", []signal.Checker{idleSignal}, gracePeriod)
 	d.StartGracePeriod("staging", "api")
 	d.StartGracePeriod("staging", "db")
 
@@ -177,7 +177,7 @@ func TestIdleReset(t *testing.T) {
 	idleSignal := &fakeChecker{confirm: true, reason: "idle"}
 	gracePeriod := 5 * time.Minute
 
-	d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
+	_, _ = d.Evaluate(context.Background(), "default", "api", []signal.Checker{idleSignal}, gracePeriod)
 	d.StartGracePeriod("default", "api")
 
 	fakeTime = fakeTime.Add(5 * time.Minute)

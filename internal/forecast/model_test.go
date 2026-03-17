@@ -44,7 +44,7 @@ func TestModel_FirstDataPoint(t *testing.T) {
 func TestModel_LevelTracksConstantInput(t *testing.T) {
 	m := NewModel(DefaultParams())
 
-	for i := 0; i < 48; i++ {
+	for i := range 48 {
 		m.Update(50, hourAt(i))
 	}
 
@@ -58,8 +58,8 @@ func TestModel_ForecastReflectsDailyPattern(t *testing.T) {
 	// Feed 3 days of data with a clear daily pattern:
 	// hours 8-17 = 100 (busy), all other hours = 20 (quiet)
 	h := 0
-	for day := 0; day < 3; day++ {
-		for hour := 0; hour < 24; hour++ {
+	for range 3 {
+		for hour := range 24 {
 			if hour >= 8 && hour <= 17 {
 				m.Update(100, hourAt(h))
 			} else {
@@ -82,7 +82,7 @@ func TestModel_ForecastReflectsDailyPattern(t *testing.T) {
 func TestModel_ForecastNeverNegative(t *testing.T) {
 	m := NewModel(DefaultParams())
 
-	for i := 0; i < 48; i++ {
+	for i := range 48 {
 		m.Update(math.Max(0, 100-float64(i)*3), hourAt(i))
 	}
 
@@ -95,10 +95,10 @@ func TestModel_ForecastNeverNegative(t *testing.T) {
 func TestModel_SeasonalFactorsInitializedToOne(t *testing.T) {
 	m := NewModel(DefaultParams())
 
-	for i := 0; i < DailySeason; i++ {
+	for i := range DailySeason {
 		assert.Equal(t, 1.0, m.daily[i])
 	}
-	for i := 0; i < WeeklySeason; i++ {
+	for i := range WeeklySeason {
 		assert.Equal(t, 1.0, m.weekly[i])
 	}
 }
@@ -127,7 +127,7 @@ func TestScorer_ConfidenceZeroBeforeReady(t *testing.T) {
 	assert.Equal(t, 0.0, s.Confidence())
 	assert.False(t, s.Ready())
 
-	for i := 0; i < defaultWindow-1; i++ {
+	for range defaultWindow - 1 {
 		s.Record(100, 100)
 	}
 	assert.False(t, s.Ready())
@@ -137,7 +137,7 @@ func TestScorer_ConfidenceZeroBeforeReady(t *testing.T) {
 func TestScorer_PerfectPredictions(t *testing.T) {
 	s := NewScorer()
 
-	for i := 0; i < defaultWindow; i++ {
+	for range defaultWindow {
 		s.Record(100, 100)
 	}
 
@@ -148,7 +148,7 @@ func TestScorer_PerfectPredictions(t *testing.T) {
 func TestScorer_TenPercentError(t *testing.T) {
 	s := NewScorer()
 
-	for i := 0; i < defaultWindow; i++ {
+	for range defaultWindow {
 		s.Record(110, 100) // 10% over every time
 	}
 
@@ -160,13 +160,13 @@ func TestScorer_RollingWindow(t *testing.T) {
 	s := NewScorer()
 
 	// Fill with bad predictions (50% error)
-	for i := 0; i < defaultWindow; i++ {
+	for range defaultWindow {
 		s.Record(150, 100)
 	}
 	assert.InDelta(t, 0.5, s.Confidence(), 0.01)
 
 	// Replace with perfect predictions
-	for i := 0; i < defaultWindow; i++ {
+	for range defaultWindow {
 		s.Record(100, 100)
 	}
 	assert.Equal(t, 1.0, s.Confidence())
@@ -175,7 +175,7 @@ func TestScorer_RollingWindow(t *testing.T) {
 func TestAnomalyDetector_NoAnomalyOnNormalData(t *testing.T) {
 	ad := NewAnomalyDetector()
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		anomaly := ad.Record(50, 50+float64(i%3))
 		_ = anomaly
 	}
@@ -187,12 +187,12 @@ func TestAnomalyDetector_RegimeChangeOnSpike(t *testing.T) {
 	ad := NewAnomalyDetector()
 
 	// Normal data for a while
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		ad.Record(50, 50)
 	}
 
 	// Sudden massive spike — 10x normal
-	for i := 0; i < anomalyWindow; i++ {
+	for range anomalyWindow {
 		ad.Record(50, 500)
 	}
 
@@ -204,7 +204,7 @@ func TestEngine_PhaseProgression(t *testing.T) {
 
 	assert.Equal(t, Observing, e.Phase)
 
-	for i := 0; i < DailySeason; i++ {
+	for i := range DailySeason {
 		e.Observe(50, hourAt(i))
 	}
 	assert.Equal(t, DailySuggesting, e.Phase)
@@ -213,7 +213,7 @@ func TestEngine_PhaseProgression(t *testing.T) {
 func TestEngine_PredictReturnsZeroBeforeDailyActive(t *testing.T) {
 	e := NewEngine(DefaultParams(), 50)
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		e.Observe(50, hourAt(i))
 	}
 
@@ -224,7 +224,7 @@ func TestEngine_DailyActiveProducesPredictions(t *testing.T) {
 	e := NewEngine(DefaultParams(), 0) // threshold=0 so it promotes immediately
 
 	n := DailySeason + defaultWindow + 1
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e.Observe(50, hourAt(i))
 	}
 
@@ -239,13 +239,13 @@ func TestEngine_FullLifecycle(t *testing.T) {
 	e := NewEngine(DefaultParams(), 0) // threshold=0 for easy promotion
 	h := 0
 
-	for i := 0; i < DailySeason; i++ {
+	for range DailySeason {
 		e.Observe(50, hourAt(h))
 		h++
 	}
 	assert.Equal(t, DailySuggesting, e.Phase)
 
-	for i := 0; i < defaultWindow; i++ {
+	for range defaultWindow {
 		e.Observe(50, hourAt(h))
 		h++
 	}
@@ -257,7 +257,7 @@ func TestEngine_FullLifecycle(t *testing.T) {
 	}
 	assert.Equal(t, WeeklySuggesting, e.Phase)
 
-	for i := 0; i < defaultWindow; i++ {
+	for range defaultWindow {
 		e.Observe(50, hourAt(h))
 		h++
 	}
@@ -269,7 +269,7 @@ func TestEngine_ExportImportRoundTrip(t *testing.T) {
 
 	// Train to DailyActive
 	n := DailySeason + defaultWindow + 1
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e.Observe(50, hourAt(i))
 	}
 	require.Equal(t, DailyActive, e.Phase)
@@ -307,7 +307,7 @@ func TestEngine_RegimeChangedSignal(t *testing.T) {
 	h := 0
 
 	// Advance to DailyActive.
-	for i := 0; i < DailySeason+defaultWindow+1; i++ {
+	for range DailySeason + defaultWindow + 1 {
 		e.Observe(50, hourAt(h))
 		h++
 	}
@@ -315,14 +315,14 @@ func TestEngine_RegimeChangedSignal(t *testing.T) {
 	assert.False(t, e.RegimeChanged(), "no regime change yet")
 
 	// Build up anomaly detector baseline.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		e.Observe(50, hourAt(h))
 		h++
 	}
 	assert.False(t, e.RegimeChanged())
 
 	// Inject anomalies to trigger regime change.
-	for i := 0; i < anomalyWindow; i++ {
+	for range anomalyWindow {
 		e.Observe(500, hourAt(h))
 		h++
 	}

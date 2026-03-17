@@ -30,7 +30,7 @@ func TestPrometheus_Confirms(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/v1/query", r.URL.Path)
 		assert.Equal(t, `rate(http_requests_total[5m])`, r.URL.Query().Get("query"))
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"status": "success",
 			"data": {
 				"resultType": "vector",
@@ -50,7 +50,7 @@ func TestPrometheus_Confirms(t *testing.T) {
 
 func TestPrometheus_DeniesZeroValue(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"status": "success",
 			"data": {
 				"resultType": "vector",
@@ -70,7 +70,7 @@ func TestPrometheus_DeniesZeroValue(t *testing.T) {
 
 func TestPrometheus_DeniesEmptyResult(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"status": "success",
 			"data": {
 				"resultType": "vector",
@@ -90,7 +90,7 @@ func TestPrometheus_DeniesEmptyResult(t *testing.T) {
 
 func TestPrometheus_QueryError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"status": "error", "errorType": "bad_data", "error": "invalid query"}`))
+		_, _ = w.Write([]byte(`{"status": "error", "errorType": "bad_data", "error": "invalid query"}`))
 	}))
 	defer srv.Close()
 
@@ -124,7 +124,7 @@ func TestPrometheus_Unreachable(t *testing.T) {
 
 func TestPrometheus_InvalidJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`not json`))
+		_, _ = w.Write([]byte(`not json`))
 	}))
 	defer srv.Close()
 

@@ -167,12 +167,12 @@ func (e *Engine) advancePhase() {
 	}
 }
 
-func (e *Engine) GetPhase() Phase        { return e.Phase }
-func (e *Engine) GetDataPoints() int      { return e.Model.DataPoints() }
-func (e *Engine) GetThreshold() int       { return e.Threshold }
+func (e *Engine) GetPhase() Phase    { return e.Phase }
+func (e *Engine) GetDataPoints() int { return e.Model.DataPoints() }
+func (e *Engine) GetThreshold() int  { return e.Threshold }
 
-func (e *Engine) RegimeChanged() bool    { return e.lastRegimeChange }
-func (e *Engine) AnomalyDetected() bool  { return e.lastAnomaly }
+func (e *Engine) RegimeChanged() bool   { return e.lastRegimeChange }
+func (e *Engine) AnomalyDetected() bool { return e.lastAnomaly }
 
 func (e *Engine) handleRegimeChange() {
 	e.lastRegimeChange = true

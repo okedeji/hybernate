@@ -87,11 +87,11 @@ func TestAccumulateCost_RunningAccumulatesUsage(t *testing.T) {
 
 	w := costWorkload(v1alpha1.PhaseRunning)
 	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:    *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:          "$0.00",
-		LastAccumulatedAt:       &lastMeta,
+		MonthlySavings:           "$0.00",
+		LastAccumulatedAt:        &lastMeta,
 	}
 
 	m := &stubMetrics{
@@ -118,11 +118,11 @@ func TestAccumulateCost_PausedAccumulatesStorageAndSavings(t *testing.T) {
 
 	w := costWorkload(v1alpha1.PhasePaused)
 	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:    *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:          "$0.00",
-		LastAccumulatedAt:       &lastMeta,
+		MonthlySavings:           "$0.00",
+		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Pause = &v1alpha1.PauseStatus{
 		PreviousReplicas: 3,
@@ -154,11 +154,11 @@ func TestAccumulateCost_DestroyedWithRetainedPVCs(t *testing.T) {
 
 	w := costWorkload(v1alpha1.PhaseDestroyed)
 	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:    *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:          "$0.00",
-		LastAccumulatedAt:       &lastMeta,
+		MonthlySavings:           "$0.00",
+		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Destroy = &v1alpha1.DestroyStatus{
 		Resources: &v1alpha1.ResourceSnapshot{
@@ -187,11 +187,11 @@ func TestAccumulateCost_DestroyedPVCsCleanedUp(t *testing.T) {
 
 	w := costWorkload(v1alpha1.PhaseDestroyed)
 	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:    *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:          "$0.00",
-		LastAccumulatedAt:       &lastMeta,
+		MonthlySavings:           "$0.00",
+		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Destroy = &v1alpha1.DestroyStatus{
 		Resources: &v1alpha1.ResourceSnapshot{
@@ -219,11 +219,11 @@ func TestAccumulateCost_MonthlyReset(t *testing.T) {
 
 	w := costWorkload(v1alpha1.PhaseRunning)
 	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:    *resource.NewMilliQuantity(50000, resource.DecimalSI),
-		CurrentMonthMemoryHours: *resource.NewMilliQuantity(30000, resource.DecimalSI),
+		CurrentMonthCPUHours:     *resource.NewMilliQuantity(50000, resource.DecimalSI),
+		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(30000, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(10000, resource.DecimalSI),
-		MonthlySavings:          "$42.00",
-		LastAccumulatedAt:       &lastMeta,
+		MonthlySavings:           "$42.00",
+		LastAccumulatedAt:        &lastMeta,
 	}
 
 	r := costReconciler(fixedTime, &stubMetrics{cpuMillis: 1000})
@@ -250,11 +250,11 @@ func TestAccumulateCost_CostWithoutManagement(t *testing.T) {
 
 	w := costWorkload(v1alpha1.PhasePaused)
 	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:    *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:          "$0.00",
-		LastAccumulatedAt:       &lastMeta,
+		MonthlySavings:           "$0.00",
+		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Pause = &v1alpha1.PauseStatus{
 		PreviousReplicas: 2,
@@ -283,11 +283,11 @@ func TestAccumulateCost_CustomRates(t *testing.T) {
 		CPUPerHour: &cpuRate,
 	}
 	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:    *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:          "$0.00",
-		LastAccumulatedAt:       &lastMeta,
+		MonthlySavings:           "$0.00",
+		LastAccumulatedAt:        &lastMeta,
 	}
 
 	m := &stubMetrics{cpuMillis: 1000}
@@ -302,11 +302,11 @@ func TestAccumulateCost_CustomRates(t *testing.T) {
 	// So custom rate should produce a higher cost.
 	wDefault := costWorkload(v1alpha1.PhaseRunning)
 	wDefault.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:    *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
+		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:          "$0.00",
-		LastAccumulatedAt:       &lastMeta,
+		MonthlySavings:           "$0.00",
+		LastAccumulatedAt:        &lastMeta,
 	}
 
 	r2 := costReconciler(fixedTime, m)

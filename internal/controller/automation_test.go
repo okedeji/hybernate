@@ -52,21 +52,21 @@ func (f *stubForecaster) Observe(actual float64, _ time.Time) float64 {
 	f.observeCalls++
 	return f.predictValue
 }
-func (f *stubForecaster) Predict(_ int, _ time.Time) float64   { return f.predictValue }
-func (f *stubForecaster) Export() ([]byte, error)              { return []byte("{}"), nil }
-func (f *stubForecaster) GetPhase() forecast.Phase             { return f.phase }
-func (f *stubForecaster) DailyConfidence() int         { return f.dailyConfidence }
-func (f *stubForecaster) WeeklyConfidence() int        { return f.weeklyConfidence }
-func (f *stubForecaster) GetDataPoints() int           { return f.dataPoints }
-func (f *stubForecaster) RegimeChanged() bool          { return f.regimeChanged }
-func (f *stubForecaster) AnomalyDetected() bool        { return f.anomalyDetected }
+func (f *stubForecaster) Predict(_ int, _ time.Time) float64 { return f.predictValue }
+func (f *stubForecaster) Export() ([]byte, error)            { return []byte("{}"), nil }
+func (f *stubForecaster) GetPhase() forecast.Phase           { return f.phase }
+func (f *stubForecaster) DailyConfidence() int               { return f.dailyConfidence }
+func (f *stubForecaster) WeeklyConfidence() int              { return f.weeklyConfidence }
+func (f *stubForecaster) GetDataPoints() int                 { return f.dataPoints }
+func (f *stubForecaster) RegimeChanged() bool                { return f.regimeChanged }
+func (f *stubForecaster) AnomalyDetected() bool              { return f.anomalyDetected }
 
 type stubMetrics struct {
-	cpuMillis      float64
-	cpuPerReplica  float64
-	memoryBytes    float64
-	pvcBytes       float64
-	err            error
+	cpuMillis     float64
+	cpuPerReplica float64
+	memoryBytes   float64
+	pvcBytes      float64
+	err           error
 }
 
 func (m *stubMetrics) CPUUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
@@ -93,11 +93,11 @@ func (m *stubMetrics) TotalPVCBytes(_ context.Context, _ *v1alpha1.ManagedWorklo
 }
 
 type stubIdleEvaluator struct {
-	eval             policy.IdleEvaluation
-	err              error
-	evalCalls        int
-	startGraceCalls  int
-	resetCalls       int
+	eval            policy.IdleEvaluation
+	err             error
+	evalCalls       int
+	startGraceCalls int
+	resetCalls      int
 }
 
 func (s *stubIdleEvaluator) Evaluate(_ context.Context, _, _ string, _ []signal.Checker, _ time.Duration) (policy.IdleEvaluation, error) {
@@ -580,10 +580,10 @@ func TestAutomation_SeasonPhasesMapping(t *testing.T) {
 
 func TestAutomation_DemandToReplicas(t *testing.T) {
 	tests := []struct {
-		demand         float64
-		cpuPerReplica  float64
-		min, max       int
-		want           int32
+		demand        float64
+		cpuPerReplica float64
+		min, max      int
+		want          int32
 	}{
 		{0, 100, 1, 10, 1},
 		{50, 100, 1, 10, 1},
@@ -592,9 +592,9 @@ func TestAutomation_DemandToReplicas(t *testing.T) {
 		{800, 100, 1, 10, 8},
 		{1500, 100, 1, 10, 10},
 		{-10, 100, 1, 10, 1},
-		{750, 250, 1, 10, 3},   // 250m per replica: ceil(750/250) = 3
-		{500, 500, 1, 10, 1},   // 500m per replica: ceil(500/500) = 1
-		{0, 0, 1, 10, 1},       // zero cpuPerReplica returns min
+		{750, 250, 1, 10, 3}, // 250m per replica: ceil(750/250) = 3
+		{500, 500, 1, 10, 1}, // 500m per replica: ceil(500/500) = 1
+		{0, 0, 1, 10, 1},     // zero cpuPerReplica returns min
 	}
 
 	for _, tt := range tests {

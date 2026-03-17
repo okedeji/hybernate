@@ -80,7 +80,7 @@ type lifecycleDestroyer interface {
 
 // Reconcile evaluates the current state of a ManagedWorkload and acts on it.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, retErr error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	defer func() {
 		if retErr != nil {
@@ -158,7 +158,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	// --- Cost tracking ---
 	r.accumulateCost(ctx, &workload)
 
-	log.Info("reconciled", "phase", workload.Status.Phase)
+	logger.Info("reconciled", "phase", workload.Status.Phase)
 	return ctrl.Result{}, nil
 }
 
@@ -381,7 +381,7 @@ func (r *Reconciler) checkPVCRetention(ctx context.Context, workload *v1alpha1.M
 	return &result, nil
 }
 
-func (r *Reconciler) checkPVCRetentionWarning(_ context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
+func (r *Reconciler) checkPVCRetentionWarning(_ context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) { //nolint:unparam
 	if workload.Status.Phase != v1alpha1.PhaseDestroyed {
 		return nil, nil
 	}
@@ -499,7 +499,7 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 
 // checkDrift compares actual replicas on the target against what the operator
 // last set. When they differ, the conflict policy decides the response.
-func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
+func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) { //nolint:unparam
 	expected, ok := r.expectedReplicas(workload)
 	if !ok {
 		return nil, nil
@@ -511,8 +511,8 @@ func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedW
 		return nil, nil
 	}
 
-	log := log.FromContext(ctx)
-	log.Info("replica drift detected", "expected", expected, "actual", actual)
+	logger := log.FromContext(ctx)
+	logger.Info("replica drift detected", "expected", expected, "actual", actual)
 
 	policy := resolveConflictAction(workload)
 	metrics.DriftDetections.WithLabelValues(string(policy)).Inc()
@@ -630,8 +630,8 @@ func (r *Reconciler) findWorkloadsForTarget(ctx context.Context, obj client.Obje
 
 // --- Helpers ---
 
-func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) (ctrl.Result, error) { //nolint:unparam
+	logger := log.FromContext(ctx)
 	old := workload.Status.Phase
 	workload.Status.Phase = phase
 
@@ -642,7 +642,7 @@ func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedW
 		return ctrl.Result{}, fmt.Errorf("updating phase to %s: %w", phase, err)
 	}
 	metrics.LifecycleTransitions.WithLabelValues(string(old), string(phase)).Inc()
-	log.Info("phase transition", "from", old, "to", phase, "reason", reason)
+	logger.Info("phase transition", "from", old, "to", phase, "reason", reason)
 	return ctrl.Result{}, nil
 }
 

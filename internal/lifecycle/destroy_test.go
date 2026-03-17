@@ -33,7 +33,7 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
 
-func newTestDestroyer(t *testing.T) (*Destroyer, *appsv1.Deployment, *v1alpha1.ManagedWorkload) {
+func newTestDestroyer(t *testing.T) (*Destroyer, *appsv1.Deployment, *v1alpha1.ManagedWorkload) { //nolint:unparam
 	t.Helper()
 	scheme := testScheme(t)
 	dep := &appsv1.Deployment{

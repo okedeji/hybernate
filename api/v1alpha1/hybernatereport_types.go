@@ -58,8 +58,8 @@ type HybernateReportStatus struct {
 	PausedWorkloads       int `json:"pausedWorkloads"`
 	DestroyedWorkloads    int `json:"destroyedWorkloads"`
 
-	TotalCPUHours    resource.Quantity `json:"totalCPUHours"`
-	TotalMemoryHours resource.Quantity `json:"totalMemoryHours"`
+	TotalCPUHours     resource.Quantity `json:"totalCPUHours"`
+	TotalMemoryHours  resource.Quantity `json:"totalMemoryHours"`
 	TotalStorageHours resource.Quantity `json:"totalStorageHours"`
 
 	EstimatedMonthlyCost  string `json:"estimatedMonthlyCost"`

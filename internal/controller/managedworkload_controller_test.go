@@ -38,11 +38,11 @@ import (
 var fixedTime = time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
 
 type stubPauser struct {
-	pauseDone  bool
-	pauseErr   error
-	resumeDone bool
-	resumeErr  error
-	pauseCalls int
+	pauseDone   bool
+	pauseErr    error
+	resumeDone  bool
+	resumeErr   error
+	pauseCalls  int
 	resumeCalls int
 }
 
@@ -57,12 +57,12 @@ func (s *stubPauser) Resume(_ context.Context, _ *v1alpha1.ManagedWorkload) (boo
 }
 
 type stubDestroyer struct {
-	destroyDone    bool
-	destroyErr     error
-	cleanupDone    bool
-	cleanupErr     error
-	destroyCalls   int
-	cleanupCalls   int
+	destroyDone  bool
+	destroyErr   error
+	cleanupDone  bool
+	cleanupErr   error
+	destroyCalls int
+	cleanupCalls int
 }
 
 func (s *stubDestroyer) Destroy(_ context.Context, _ *v1alpha1.ManagedWorkload) (bool, error) {
@@ -155,7 +155,7 @@ func desiredState(s v1alpha1.DesiredState) *v1alpha1.DesiredState {
 	return &s
 }
 
-func getWorkload(t *testing.T, r *Reconciler, name string) *v1alpha1.ManagedWorkload {
+func getWorkload(t *testing.T, r *Reconciler, name string) *v1alpha1.ManagedWorkload { //nolint:unparam
 	t.Helper()
 	var w v1alpha1.ManagedWorkload
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, &w))

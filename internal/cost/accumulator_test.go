@@ -178,10 +178,10 @@ func TestEstimateMonthlyCost(t *testing.T) {
 	costSoFar := TotalCost(s, rates)
 
 	tests := []struct {
-		name       string
-		dayOfMonth int
+		name        string
+		dayOfMonth  int
 		daysInMonth int
-		want       float64
+		want        float64
 	}{
 		{
 			name:        "day 1 returns pending",

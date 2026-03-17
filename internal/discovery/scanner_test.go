@@ -33,6 +33,8 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
 
+const testNamespace = "test-ns"
+
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = appsv1.AddToScheme(s)
@@ -44,7 +46,7 @@ func newScheme() *runtime.Scheme {
 
 func int32Ptr(i int32) *int32 { return &i }
 
-func makeDeployment(name, namespace string, replicas int32, cpuReq, memReq string, lbls map[string]string) *appsv1.Deployment {
+func makeDeployment(name, namespace string, replicas int32, cpuReq, memReq string, lbls map[string]string) *appsv1.Deployment { //nolint:unparam
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: lbls},
 		Spec: appsv1.DeploymentSpec{
@@ -69,7 +71,7 @@ func makeDeployment(name, namespace string, replicas int32, cpuReq, memReq strin
 	}
 }
 
-func makePodMetrics(name, namespace string, cpuUsage, memUsage string) *metricsv1beta1.PodMetrics {
+func makePodMetrics(name, namespace string, cpuUsage, memUsage string) *metricsv1beta1.PodMetrics { //nolint:unparam
 	return &metricsv1beta1.PodMetrics{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name + "-pod-1",
@@ -87,7 +89,7 @@ func makePodMetrics(name, namespace string, cpuUsage, memUsage string) *metricsv
 }
 
 func TestScanner_Scan_ClassifiesWorkloads(t *testing.T) {
-	ns := "test-ns"
+	ns := testNamespace
 	th := DefaultThresholds()
 
 	objects := []runtime.Object{
@@ -126,7 +128,7 @@ func TestScanner_Scan_ClassifiesWorkloads(t *testing.T) {
 }
 
 func TestScanner_Scan_SkipsIgnored(t *testing.T) {
-	ns := "test-ns"
+	ns := testNamespace
 	th := DefaultThresholds()
 
 	objects := []runtime.Object{
@@ -149,7 +151,7 @@ func TestScanner_Scan_SkipsIgnored(t *testing.T) {
 }
 
 func TestScanner_Scan_DetectsManaged(t *testing.T) {
-	ns := "test-ns"
+	ns := testNamespace
 	th := DefaultThresholds()
 
 	objects := []runtime.Object{
@@ -189,7 +191,7 @@ func TestScanner_Scan_EmptyNamespace(t *testing.T) {
 }
 
 func TestScanner_Scan_SortsBySavingsDescending(t *testing.T) {
-	ns := "test-ns"
+	ns := testNamespace
 	th := DefaultThresholds()
 
 	objects := []runtime.Object{

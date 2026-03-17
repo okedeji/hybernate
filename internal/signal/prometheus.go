@@ -75,7 +75,7 @@ func (p *Prometheus) Check(ctx context.Context, _, _ string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("querying prometheus: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return Result{}, fmt.Errorf("prometheus returned status %d", resp.StatusCode)

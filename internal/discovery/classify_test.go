@@ -131,8 +131,8 @@ func TestEstimateMonthlyCost(t *testing.T) {
 	rates := cost.DefaultRates
 
 	w := WorkloadInfo{
-		CPURequestMillis:   1000, // 1 core
-		MemoryRequestBytes: 1 << 30, // 1 GiB
+		CPURequestMillis:   1000,     // 1 core
+		MemoryRequestBytes: 1 << 30,  // 1 GiB
 		StorageBytes:       10 << 30, // 10 GiB
 		Replicas:           2,
 	}

@@ -33,15 +33,15 @@ type EngineState struct {
 }
 
 type ModelState struct {
-	Alpha  float64              `json:"a"`
-	Beta   float64              `json:"b"`
-	Gamma1 float64              `json:"g1"`
-	Gamma2 float64              `json:"g2"`
-	Level  float64              `json:"l"`
-	Trend  float64              `json:"t"`
-	Daily  [DailySeason]float64 `json:"d"`
+	Alpha  float64               `json:"a"`
+	Beta   float64               `json:"b"`
+	Gamma1 float64               `json:"g1"`
+	Gamma2 float64               `json:"g2"`
+	Level  float64               `json:"l"`
+	Trend  float64               `json:"t"`
+	Daily  [DailySeason]float64  `json:"d"`
 	Weekly [WeeklySeason]float64 `json:"w"`
-	N      int                  `json:"n"`
+	N      int                   `json:"n"`
 }
 
 type ScorerState struct {
