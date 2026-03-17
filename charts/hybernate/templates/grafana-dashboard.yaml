@@ -1,0 +1,13 @@
+{{- if .Values.grafana.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hybernate.fullname" . }}-grafana-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  hybernate.json: |-
+    {{- .Files.Get "dashboards/hybernate.json" | nindent 4 }}
+{{- end }}

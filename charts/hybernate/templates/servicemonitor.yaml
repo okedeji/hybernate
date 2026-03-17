@@ -1,0 +1,23 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "hybernate.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+spec:
+  endpoints:
+    - path: /metrics
+      port: {{ if .Values.metrics.secure }}https{{ else }}http{{ end }}
+      {{- if .Values.metrics.secure }}
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+      {{- end }}
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+  selector:
+    matchLabels:
+      {{- include "hybernate.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,45 @@
+image:
+  repository: ghcr.io/okedeji/hybernate
+  tag: "" # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+leaderElection:
+  enabled: true
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: "" # defaults to fullname
+
+metrics:
+  enabled: true
+  port: 8443
+  secure: true
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+  prometheusRule:
+    enabled: false
+
+grafana:
+  enabled: false
+
+networkPolicy:
+  enabled: false
+
+logLevel: info

@@ -1,0 +1,53 @@
+Hybernate has been installed in namespace {{ .Release.Namespace }}.
+
+1. Verify the controller is running:
+
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "hybernate.name" . }}
+
+2. Create a ManagedWorkload to start managing a Deployment:
+
+   cat <<EOF | kubectl apply -f -
+   apiVersion: hybernate.io/v1alpha1
+   kind: ManagedWorkload
+   metadata:
+     name: my-app
+     namespace: default
+   spec:
+     target:
+       kind: Deployment
+       name: my-app
+     idlePolicy:
+       idleThreshold: 10m
+       action: Pause
+   EOF
+
+3. Or create a WorkloadPolicy to auto-discover idle workloads in a namespace:
+
+   cat <<EOF | kubectl apply -f -
+   apiVersion: hybernate.io/v1alpha1
+   kind: WorkloadPolicy
+   metadata:
+     name: default-policy
+     namespace: default
+   spec:
+     mode: Suggest
+     targetKinds:
+       - Deployment
+       - StatefulSet
+   EOF
+
+4. Check status:
+
+   kubectl get managedworkloads -A
+   kubectl get workloadpolicies -A
+
+{{- if .Values.metrics.serviceMonitor.enabled }}
+
+5. Metrics are being scraped via ServiceMonitor. Check Prometheus targets for the hybernate endpoint.
+{{- end }}
+{{- if .Values.grafana.enabled }}
+
+6. The Grafana dashboard has been provisioned. Look for "Hybernate Operator" in your dashboards.
+{{- end }}
+
+For more information, visit: https://github.com/okedeji/hybernate

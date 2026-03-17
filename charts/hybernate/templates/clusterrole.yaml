@@ -1,0 +1,31 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hybernate.fullname" . }}-manager
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [delete, get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [delete, get, list, update, watch]
+  - apiGroups: [apps]
+    resources: [deployments/scale, statefulsets/scale]
+    verbs: [get, update]
+  - apiGroups: [hybernate.io]
+    resources: [hybernatereports, managedworkloads, workloadpolicies]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [hybernate.io]
+    resources: [hybernatereports/finalizers, managedworkloads/finalizers, workloadpolicies/finalizers]
+    verbs: [update]
+  - apiGroups: [hybernate.io]
+    resources: [hybernatereports/status, managedworkloads/status, workloadpolicies/status]
+    verbs: [get, patch, update]
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods]
+    verbs: [get, list]

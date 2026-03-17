@@ -1,0 +1,77 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "hybernate.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: hybernate.critical
+      rules:
+        - alert: HybernateReconcileErrorsHigh
+          expr: rate(hybernate_reconcile_errors_total[5m]) > 0.1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Hybernate reconcile error rate is high"
+            description: "Controller {{ "{{" }} $labels.controller {{ "}}" }} is seeing >0.1 errors/sec for 10 minutes."
+        - alert: HybernateDown
+          expr: absent(up{job=~".*hybernate.*"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Hybernate operator is down"
+            description: "No healthy Hybernate operator target has been scraped for 5 minutes."
+    - name: hybernate.warning
+      rules:
+        - alert: HybernatePredictionConfidenceLow
+          expr: hybernate_prediction_confidence_percent{season="daily"} < 50 and on(namespace, workload) hybernate_prediction_data_points > 168
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Prediction confidence is low for {{ "{{" }} $labels.workload {{ "}}" }}"
+            description: "Daily confidence is {{ "{{" }} $value {{ "}}" }}% despite having >168 data points."
+        - alert: HybernateRegimeChangeDetected
+          expr: increase(hybernate_prediction_regime_changes_total[1h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Regime change detected for {{ "{{" }} $labels.workload {{ "}}" }}"
+            description: "The prediction engine detected a regime change for {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.workload {{ "}}" }}."
+        - alert: HybernateDriftFrequent
+          expr: increase(hybernate_drift_detections_total[1h]) > 3
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Frequent replica drift detected"
+            description: "Policy {{ "{{" }} $labels.policy {{ "}}" }} saw >3 drift detections in the last hour."
+        - alert: HybernatePVCRetentionExpiring
+          expr: hybernate_pvc_retention_remaining_seconds < 86400
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVC retention expiring for {{ "{{" }} $labels.workload {{ "}}" }}"
+            description: "PVCs for {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.workload {{ "}}" }} will be deleted in {{ "{{" }} $value | humanizeDuration {{ "}}" }}."
+        - alert: HybernateScaleGuardBlockedRepeatedly
+          expr: increase(hybernate_scale_guard_blocked_total[1h]) > 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Scale-down repeatedly blocked for {{ "{{" }} $labels.workload {{ "}}" }}"
+            description: "Guard probes blocked scale-down >5 times in the last hour."
+        - alert: HybernateDiscoveryScanSlow
+          expr: histogram_quantile(0.95, sum by (le) (rate(hybernate_discovery_scan_duration_seconds_bucket[5m]))) > 30
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Discovery scans are taking too long"
+            description: "p95 scan duration is {{ "{{" }} $value | humanizeDuration {{ "}}" }}."
+{{- end }}
