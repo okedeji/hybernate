@@ -1,5 +1,6 @@
 ## Append samples of your project ##
 resources:
-- hybernate_v1alpha1_managedworkload.yaml
+- v1alpha1_managedworkload.yaml
 - v1alpha1_hybernatereport.yaml
+- v1alpha1_workloadpolicy.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

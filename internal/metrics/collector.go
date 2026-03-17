@@ -184,6 +184,31 @@ var (
 	}, []string{"namespace", "workload"})
 )
 
+// --- Discovery ---
+
+var (
+	DiscoveryScanDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "hybernate_discovery_scan_duration_seconds",
+		Help:    "Duration of namespace discovery scans.",
+		Buckets: prometheus.ExponentialBuckets(0.1, 2, 10),
+	})
+
+	DiscoveryWorkloads = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hybernate_discovery_workloads",
+		Help: "Number of discovered workloads by classification.",
+	}, []string{"classification"})
+
+	DiscoveryEstimatedSavings = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_discovery_estimated_savings_dollars",
+		Help: "Total estimated monthly savings from discovered workloads.",
+	})
+
+	DiscoveryAutoManaged = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hybernate_discovery_auto_managed_total",
+		Help: "Total ManagedWorkload CRs auto-created by discovery.",
+	})
+)
+
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		// Tier 1
@@ -221,5 +246,11 @@ func init() {
 		AutomationSkipped,
 		DryrunActions,
 		TargetUnavailable,
+
+		// Discovery
+		DiscoveryScanDuration,
+		DiscoveryWorkloads,
+		DiscoveryEstimatedSavings,
+		DiscoveryAutoManaged,
 	)
 }

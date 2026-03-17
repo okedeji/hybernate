@@ -2,8 +2,9 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
-- bases/hybernate.hybernate.io_managedworkloads.yaml
+- bases/hybernate.io_managedworkloads.yaml
 - bases/hybernate.io_hybernatereports.yaml
+- bases/hybernate.io_workloadpolicies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

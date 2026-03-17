@@ -24,4 +24,12 @@ resources:
   kind: HybernateReport
   path: github.com/okedeji/hybernate/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: hybernate.io
+  kind: WorkloadPolicy
+  path: github.com/okedeji/hybernate/api/v1alpha1
+  version: v1alpha1
 version: "3"

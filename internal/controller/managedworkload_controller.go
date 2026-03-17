@@ -42,7 +42,7 @@ import (
 	"github.com/okedeji/hybernate/internal/metrics"
 )
 
-const finalizerName = "hybernate.io/cleanup"
+const finalizerName = v1alpha1.FinalizerCleanup
 
 // Reconciler drives ManagedWorkload objects through their lifecycle.
 type Reconciler struct {
@@ -480,6 +480,15 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 	}
 	if err != nil {
 		return nil, fmt.Errorf("checking target %s %s: %w", ref.Kind, ref.Name, err)
+	}
+
+	if obj.GetLabels()[v1alpha1.LabelIgnore] == "true" {
+		r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetIgnored",
+			fmt.Sprintf("%s %s has %s label", ref.Kind, ref.Name, v1alpha1.LabelIgnore))
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return nil, fmt.Errorf("updating target condition: %w", err)
+		}
+		return nil, nil
 	}
 
 	r.setCondition(workload, conditionTargetAvailable, metav1.ConditionTrue, "TargetExists", "")

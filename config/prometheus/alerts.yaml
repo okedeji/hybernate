@@ -71,3 +71,12 @@ spec:
           annotations:
             summary: "Scale-down repeatedly blocked for {{ $labels.workload }}"
             description: "Guard probes blocked scale-down >5 times in the last hour for {{ $labels.namespace }}/{{ $labels.workload }}."
+
+        - alert: HybernateDiscoveryScanSlow
+          expr: histogram_quantile(0.95, sum by (le) (rate(hybernate_discovery_scan_duration_seconds_bucket[5m]))) > 30
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Discovery scans are taking too long"
+            description: "p95 scan duration is {{ $value | humanizeDuration }}. Consider reducing the number of target kinds or namespaces."

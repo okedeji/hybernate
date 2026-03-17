@@ -327,6 +327,68 @@ data:
             { "expr": "sum(increase(hybernate_dryrun_actions_total[24h]))", "legendFormat": "" }
           ],
           "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 },
+          "id": 105,
+          "title": "Discovery",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 0, "y": 38 },
+          "id": 21,
+          "options": { "legend": { "displayMode": "list", "placement": "right" }, "pieType": "donut", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Discovered by Classification",
+          "targets": [
+            { "expr": "hybernate_discovery_workloads", "legendFormat": "{{ classification }}" }
+          ],
+          "type": "piechart"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "currencyUSD", "thresholds": { "steps": [{ "color": "green", "value": null }] } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 6, "y": 38 },
+          "id": 22,
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Discovery Estimated Savings",
+          "targets": [
+            { "expr": "hybernate_discovery_estimated_savings_dollars", "legendFormat": "" }
+          ],
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "custom": { "drawStyle": "line" } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 12, "y": 38 },
+          "id": 23,
+          "title": "Scan Duration",
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(hybernate_discovery_scan_duration_seconds_bucket[5m])))", "legendFormat": "p95" }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "steps": [{ "color": "blue", "value": null }] } }
+          },
+          "gridPos": { "h": 7, "w": 6, "x": 18, "y": 38 },
+          "id": 24,
+          "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "title": "Auto-Managed (Total)",
+          "targets": [
+            { "expr": "hybernate_discovery_auto_managed_total", "legendFormat": "" }
+          ],
+          "type": "stat"
         }
       ],
       "schemaVersion": 39,
