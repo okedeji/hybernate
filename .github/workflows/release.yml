@@ -95,6 +95,43 @@ jobs:
             done
           done
 
+      - name: Generate Krew manifest with checksums
+        run: |
+          TAG=${{ steps.version.outputs.tag }}
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+
+          cat > krew-hybernate.yaml <<EOF
+          apiVersion: krew.googlecontainertools.github.com/v1alpha2
+          kind: Plugin
+          metadata:
+            name: hybernate
+          spec:
+            version: ${TAG}
+            homepage: https://github.com/${{ github.repository }}
+            shortDescription: Export and manage workload lifecycle policies
+            description: |
+              Hybernate kubectl plugin for exporting discovered workloads from a
+              WorkloadPolicy as ManagedWorkload YAML manifests. Supports filtering
+              by classification (Active, Idle, Wasteful), specific workload name,
+              and outputting to stdout or individual files for GitOps workflows.
+            platforms:
+          EOF
+
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              sha=$(sha256sum kubectl-hybernate-${os}-${arch}.tar.gz | cut -d' ' -f1)
+              cat >> krew-hybernate.yaml <<PLATFORM
+              - selector:
+                  matchLabels:
+                    os: ${os}
+                    arch: ${arch}
+                uri: ${BASE_URL}/kubectl-hybernate-${os}-${arch}.tar.gz
+                sha256: "${sha}"
+                bin: kubectl-hybernate-${os}-${arch}
+          PLATFORM
+            done
+          done
+
       - name: Generate install manifest
         run: |
           make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
@@ -115,4 +152,5 @@ jobs:
             dist/install.yaml
             hybernate-*.tgz
             kubectl-hybernate-*.tar.gz
+            krew-hybernate.yaml
             sbom.spdx.json

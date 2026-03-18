@@ -1,0 +1,47 @@
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: hybernate
+spec:
+  version: v0.1.0
+  homepage: https://github.com/okedeji/hybernate
+  shortDescription: Export and manage workload lifecycle policies
+  description: |
+    Hybernate kubectl plugin for exporting discovered workloads from a
+    WorkloadPolicy as ManagedWorkload YAML manifests. Supports filtering
+    by classification (Active, Idle, Wasteful), specific workload name,
+    and outputting to stdout or individual files for GitOps workflows.
+
+    Usage:
+      kubectl hybernate export --policy <name> -n <namespace>
+      kubectl hybernate export --policy <name> -n <namespace> --classification Idle
+      kubectl hybernate export --policy <name> -n <namespace> --output ./manifests/
+  platforms:
+    - selector:
+        matchLabels:
+          os: linux
+          arch: amd64
+      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.0/kubectl-hybernate-linux-amd64.tar.gz
+      sha256: "PLACEHOLDER"
+      bin: kubectl-hybernate-linux-amd64
+    - selector:
+        matchLabels:
+          os: linux
+          arch: arm64
+      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.0/kubectl-hybernate-linux-arm64.tar.gz
+      sha256: "PLACEHOLDER"
+      bin: kubectl-hybernate-linux-arm64
+    - selector:
+        matchLabels:
+          os: darwin
+          arch: amd64
+      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.0/kubectl-hybernate-darwin-amd64.tar.gz
+      sha256: "PLACEHOLDER"
+      bin: kubectl-hybernate-darwin-amd64
+    - selector:
+        matchLabels:
+          os: darwin
+          arch: arm64
+      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.0/kubectl-hybernate-darwin-arm64.tar.gz
+      sha256: "PLACEHOLDER"
+      bin: kubectl-hybernate-darwin-arm64
