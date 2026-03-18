@@ -137,11 +137,15 @@ func TestGenerate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := Generate(testPolicy(), tt.filter)
 
-			var names []string
+			names := make([]string, 0, len(result.Workloads))
 			for _, mw := range result.Workloads {
 				names = append(names, mw.Name)
 			}
-			assert.Equal(t, tt.wantNames, names)
+			if tt.wantNames == nil {
+				assert.Empty(t, names)
+			} else {
+				assert.Equal(t, tt.wantNames, names)
+			}
 
 			if tt.wantSkipReasons != nil {
 				skipReasons := make(map[string]string)

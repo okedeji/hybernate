@@ -703,7 +703,7 @@ func TestReconcile_DuplicateTargetBlocksNewer(t *testing.T) {
 			Name:              "deployment-idle-app",
 			Namespace:         "default",
 			UID:               "aaa",
-			CreationTimestamp:  metav1.NewTime(fixedTime.Add(-1 * time.Hour)),
+			CreationTimestamp: metav1.NewTime(fixedTime.Add(-1 * time.Hour)),
 			ResourceVersion:   "1",
 		},
 		Spec: v1alpha1.ManagedWorkloadSpec{
@@ -720,7 +720,7 @@ func TestReconcile_DuplicateTargetBlocksNewer(t *testing.T) {
 			Name:              "duplicate-idle-app",
 			Namespace:         "default",
 			UID:               "bbb",
-			CreationTimestamp:  metav1.NewTime(fixedTime),
+			CreationTimestamp: metav1.NewTime(fixedTime),
 			ResourceVersion:   "2",
 		},
 		Spec: v1alpha1.ManagedWorkloadSpec{
@@ -780,7 +780,7 @@ func TestReconcile_DuplicateTargetAllowsOlder(t *testing.T) {
 			Name:              "deployment-idle-app",
 			Namespace:         "default",
 			UID:               "aaa",
-			CreationTimestamp:  metav1.NewTime(fixedTime.Add(-1 * time.Hour)),
+			CreationTimestamp: metav1.NewTime(fixedTime.Add(-1 * time.Hour)),
 			ResourceVersion:   "1",
 		},
 		Spec: v1alpha1.ManagedWorkloadSpec{
@@ -794,7 +794,7 @@ func TestReconcile_DuplicateTargetAllowsOlder(t *testing.T) {
 			Name:              "duplicate-idle-app",
 			Namespace:         "default",
 			UID:               "bbb",
-			CreationTimestamp:  metav1.NewTime(fixedTime),
+			CreationTimestamp: metav1.NewTime(fixedTime),
 			ResourceVersion:   "2",
 		},
 		Spec: v1alpha1.ManagedWorkloadSpec{
@@ -837,7 +837,7 @@ func TestReconcile_DuplicateTargetClearsWhenResolved(t *testing.T) {
 			Name:              "deployment-idle-app",
 			Namespace:         "default",
 			UID:               "aaa",
-			CreationTimestamp:  metav1.NewTime(fixedTime),
+			CreationTimestamp: metav1.NewTime(fixedTime),
 			ResourceVersion:   "1",
 		},
 		Spec: v1alpha1.ManagedWorkloadSpec{

@@ -144,7 +144,7 @@ func main() {
 	if err := (&controller.WorkloadPolicyReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("workloadpolicy"), //nolint:staticcheck // migrate to events.EventRecorder in a future PR
+		Recorder: mgr.GetEventRecorderFor("workloadpolicy"), //nolint:staticcheck
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "WorkloadPolicy")
 		os.Exit(1)

@@ -131,8 +131,12 @@ Examples:
 	cmd.Flags().StringVar(&policyName, "policy", "", "Name of the WorkloadPolicy to export from")
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "Directory to write individual YAML files (stdout if omitted)")
 	cmd.Flags().StringVar(&name, "name", "", "Export only the workload with this name")
-	cmd.Flags().StringSliceVar(&classifications, "classification", nil, "Filter by classification (Active, Idle, Wasteful)")
-	cmd.Flags().BoolVar(&includeManaged, "include-managed", false, "Include workloads that already have a ManagedWorkload CR")
+	cmd.Flags().StringSliceVar(
+		&classifications, "classification", nil, "Filter by classification (Active, Idle, Wasteful)",
+	)
+	cmd.Flags().BoolVar(
+		&includeManaged, "include-managed", false, "Include workloads that already have a ManagedWorkload CR",
+	)
 
 	return cmd
 }

@@ -40,7 +40,10 @@ import (
 	"github.com/okedeji/hybernate/internal/metrics"
 )
 
-const finalizerName = v1alpha1.FinalizerCleanup
+const (
+	finalizerName            = v1alpha1.FinalizerCleanup
+	conditionDuplicateTarget = "DuplicateTarget"
+)
 
 // Reconciler drives ManagedWorkload objects through their lifecycle.
 type Reconciler struct {
@@ -634,8 +637,8 @@ func (r *Reconciler) checkDuplicate(ctx context.Context, workload *v1alpha1.Mana
 		if other.Spec.Target.Kind == workload.Spec.Target.Kind && other.Spec.Target.Name == workload.Spec.Target.Name {
 			if other.CreationTimestamp.Before(&workload.CreationTimestamp) || other.UID < workload.UID {
 				msg := fmt.Sprintf("%s/%s is already managed by %s", workload.Spec.Target.Kind, workload.Spec.Target.Name, other.Name)
-				r.setCondition(workload, "DuplicateTarget", metav1.ConditionTrue, "DuplicateTarget", msg)
-				r.Recorder.Event(workload, "Warning", "DuplicateTarget", msg)
+				r.setCondition(workload, conditionDuplicateTarget, metav1.ConditionTrue, conditionDuplicateTarget, msg)
+				r.Recorder.Event(workload, "Warning", conditionDuplicateTarget, msg)
 				if err := r.Status().Update(ctx, workload); err != nil {
 					return false, fmt.Errorf("updating duplicate condition: %w", err)
 				}
@@ -646,7 +649,7 @@ func (r *Reconciler) checkDuplicate(ctx context.Context, workload *v1alpha1.Mana
 
 	// Clear the condition if it was previously set and the conflict is gone.
 	for i, c := range workload.Status.Conditions {
-		if c.Type == "DuplicateTarget" && c.Status == metav1.ConditionTrue {
+		if c.Type == conditionDuplicateTarget && c.Status == metav1.ConditionTrue {
 			workload.Status.Conditions[i].Status = metav1.ConditionFalse
 			workload.Status.Conditions[i].Reason = "Resolved"
 			workload.Status.Conditions[i].Message = ""
