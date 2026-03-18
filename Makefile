@@ -108,6 +108,10 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-plugin
+build-plugin: fmt vet ## Build kubectl-hybernate plugin binary.
+	go build -o bin/kubectl-hybernate ./cmd/kubectl-hybernate
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go

@@ -103,6 +103,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("ensuring finalizer: %w", err)
 	}
 
+	if duplicate, err := r.checkDuplicate(ctx, &workload); err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking duplicate target: %w", err)
+	} else if duplicate {
+		return ctrl.Result{}, nil
+	}
+
 	// Set initial phase.
 	if workload.Status.Phase == "" {
 		return r.transition(ctx, &workload, v1alpha1.PhaseRunning, "Created")
@@ -610,6 +616,49 @@ func (r *Reconciler) setCondition(workload *v1alpha1.ManagedWorkload, condType s
 		Message:            message,
 		LastTransitionTime: now,
 	})
+}
+
+// checkDuplicate returns true if another ManagedWorkload in the same namespace
+// already targets the same workload. The older resource (by creation time) wins;
+// the newer one gets a DuplicateTarget condition and is skipped.
+func (r *Reconciler) checkDuplicate(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error) {
+	var list v1alpha1.ManagedWorkloadList
+	if err := r.List(ctx, &list, client.InNamespace(workload.Namespace)); err != nil {
+		return false, fmt.Errorf("listing managed workloads: %w", err)
+	}
+
+	for _, other := range list.Items {
+		if other.UID == workload.UID {
+			continue
+		}
+		if other.Spec.Target.Kind == workload.Spec.Target.Kind && other.Spec.Target.Name == workload.Spec.Target.Name {
+			if other.CreationTimestamp.Before(&workload.CreationTimestamp) || other.UID < workload.UID {
+				msg := fmt.Sprintf("%s/%s is already managed by %s", workload.Spec.Target.Kind, workload.Spec.Target.Name, other.Name)
+				r.setCondition(workload, "DuplicateTarget", metav1.ConditionTrue, "DuplicateTarget", msg)
+				r.Recorder.Event(workload, "Warning", "DuplicateTarget", msg)
+				if err := r.Status().Update(ctx, workload); err != nil {
+					return false, fmt.Errorf("updating duplicate condition: %w", err)
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// Clear the condition if it was previously set and the conflict is gone.
+	for i, c := range workload.Status.Conditions {
+		if c.Type == "DuplicateTarget" && c.Status == metav1.ConditionTrue {
+			workload.Status.Conditions[i].Status = metav1.ConditionFalse
+			workload.Status.Conditions[i].Reason = "Resolved"
+			workload.Status.Conditions[i].Message = ""
+			workload.Status.Conditions[i].LastTransitionTime = r.clockTime()
+			if err := r.Status().Update(ctx, workload); err != nil {
+				return false, fmt.Errorf("clearing duplicate condition: %w", err)
+			}
+			break
+		}
+	}
+
+	return false, nil
 }
 
 func (r *Reconciler) findWorkloadsForTarget(ctx context.Context, obj client.Object) []reconcile.Request {

@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,6 +33,7 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/discovery"
+	"github.com/okedeji/hybernate/internal/export"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
 )
 
@@ -142,7 +142,7 @@ func (r *WorkloadPolicyReconciler) autoManage(ctx context.Context, policy *v1alp
 
 		mw := v1alpha1.ManagedWorkload{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      strings.ToLower(fmt.Sprintf("%s-%s", d.Kind, d.Name)),
+				Name:      export.ResourceName(d.Kind, d.Name),
 				Namespace: policy.Namespace,
 				Labels: map[string]string{
 					v1alpha1.LabelAutoDiscovered: "true",
