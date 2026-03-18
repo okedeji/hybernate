@@ -68,7 +68,7 @@ config/                        # CRD, RBAC, deployment manifests
 
 ## Code Standards
 
-See [CLAUDE.md](.claude/CLAUDE.md) for the full coding standards. Key points:
+Key coding standards:
 
 - **No comments that restate what the code does.** Comments are for *why*, not *what*.
 - **Wrap errors with context:** `fmt.Errorf("doing X: %w", err)`
