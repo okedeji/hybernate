@@ -23,14 +23,20 @@ spec:
     - jsonPath: .status.summary.total
       name: Discovered
       type: integer
+    - jsonPath: .status.summary.active
+      name: Active
+      type: integer
     - jsonPath: .status.summary.idle
       name: Idle
       type: integer
     - jsonPath: .status.summary.wasteful
       name: Wasteful
       type: integer
+    - jsonPath: .status.summary.estimatedMonthlyCost
+      name: Projected Cost
+      type: string
     - jsonPath: .status.summary.estimatedMonthlySavings
-      name: Savings
+      name: Projected Savings
       type: string
     name: v1alpha1
     schema:
@@ -70,19 +76,14 @@ spec:
                 - defer
                 type: string
               costTracking:
+                default:
+                  enabled: true
                 description: Default cost tracking config copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
                   enabled:
                     description: Enabled turns cost tracking on or off.
                     type: boolean
-                  labels:
-                    description: |-
-                      Labels are workload label keys used for cost attribution slicing
-                      (e.g. "tenant_id", "team", "environment").
-                    items:
-                      type: string
-                    type: array
                   rates:
                     description: Rates overrides the default cost rates. Omit to use
                       AWS on-demand defaults.
@@ -117,6 +118,9 @@ spec:
                 - enabled
                 type: object
               destroy:
+                default:
+                  pvcRetention: 168h0m0s
+                  pvcRetentionWarning: 24h0m0s
                 description: Default destroy behavior copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
@@ -139,6 +143,11 @@ spec:
                   mode.
                 type: boolean
               idlePolicy:
+                default:
+                  action: pause
+                  autoResume: true
+                  gracePeriod: 5m0s
+                  idleThreshold: 50
                 description: Default idle policy copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
@@ -213,6 +222,9 @@ spec:
                 - auto-manage
                 type: string
               pause:
+                default:
+                  expireAction: resume
+                  expireAfter: 168h0m0s
                 description: Default pause behavior copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
@@ -233,6 +245,8 @@ spec:
                     type: string
                 type: object
               prediction:
+                default:
+                  confidence: 85
                 description: Default prediction config copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
@@ -287,6 +301,13 @@ spec:
                 minimum: 1
                 type: integer
               scalePolicy:
+                default:
+                  down:
+                    stabilization: 5m0s
+                  maxReplicas: 10
+                  minReplicas: 1
+                  up:
+                    stabilization: 2m0s
                 description: Default scaling policy copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
@@ -560,6 +581,8 @@ spec:
                 properties:
                   active:
                     type: integer
+                  estimatedMonthlyCost:
+                    type: string
                   estimatedMonthlySavings:
                     type: string
                   idle:

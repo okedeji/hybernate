@@ -6,6 +6,9 @@ metadata:
     {{- include "hybernate.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
   - apiGroups: [""]
@@ -28,4 +31,4 @@ rules:
     verbs: [get, patch, update]
   - apiGroups: [metrics.k8s.io]
     resources: [pods]
-    verbs: [get, list]
+    verbs: [get, list, watch]

@@ -17,11 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
@@ -90,14 +96,26 @@ func idleGracePeriod(workload *v1alpha1.ManagedWorkload) time.Duration {
 	return 0
 }
 
-func predictionState(workload *v1alpha1.ManagedWorkload) *string {
-	if workload.Status.Prediction == nil {
+func (r *Reconciler) predictionState(ctx context.Context, workload *v1alpha1.ManagedWorkload) *string {
+	var cm corev1.ConfigMap
+	key := client.ObjectKey{
+		Namespace: workload.Namespace,
+		Name:      predictionConfigMapName(workload.Name),
+	}
+	if err := r.Get(ctx, key, &cm); err != nil {
 		return nil
 	}
-	return workload.Status.Prediction.State
+	if s, ok := cm.Data["state"]; ok {
+		return &s
+	}
+	return nil
 }
 
-func (r *Reconciler) updatePredictionStatus(workload *v1alpha1.ManagedWorkload, engine forecaster) {
+func predictionConfigMapName(workloadName string) string {
+	return workloadName + "-prediction-state"
+}
+
+func (r *Reconciler) updatePredictionStatus(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster) {
 	phase := engine.GetPhase()
 	dailyPhase, weeklyPhase := seasonPhases(phase)
 
@@ -109,8 +127,7 @@ func (r *Reconciler) updatePredictionStatus(workload *v1alpha1.ManagedWorkload, 
 	}
 
 	if data, err := engine.Export(); err == nil {
-		s := string(data)
-		workload.Status.Prediction.State = &s
+		r.savePredictionState(ctx, workload, string(data))
 	}
 
 	ns, name := workload.Namespace, workload.Name
@@ -118,6 +135,25 @@ func (r *Reconciler) updatePredictionStatus(workload *v1alpha1.ManagedWorkload, 
 	opmetrics.PredictionConfidence.WithLabelValues("weekly", ns, name).Set(float64(engine.WeeklyConfidence()))
 	opmetrics.PredictionPhase.WithLabelValues(ns, name).Set(float64(phase))
 	opmetrics.PredictionDataPoints.WithLabelValues(ns, name).Set(float64(engine.GetDataPoints()))
+}
+
+func (r *Reconciler) savePredictionState(ctx context.Context, workload *v1alpha1.ManagedWorkload, state string) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      predictionConfigMapName(workload.Name),
+			Namespace: workload.Namespace,
+		},
+	}
+	_, err := ctrlutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = make(map[string]string)
+		}
+		cm.Data["state"] = state
+		return ctrlutil.SetOwnerReference(workload, cm, r.Scheme)
+	})
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "saving prediction state", "configmap", cm.Name)
+	}
 }
 
 const (

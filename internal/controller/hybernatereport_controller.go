@@ -25,7 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
@@ -145,6 +147,11 @@ func (r *HybernateReportReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 func (r *HybernateReportReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.HybernateReport{}).
+		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(
+			func(_ context.Context, _ client.Object) []reconcile.Request {
+				return []reconcile.Request{{NamespacedName: client.ObjectKey{Name: reportSingletonName}}}
+			},
+		)).
 		Named("hybernatereport").
 		Complete(r)
 }

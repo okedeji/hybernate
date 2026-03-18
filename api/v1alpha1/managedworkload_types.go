@@ -316,11 +316,6 @@ type CostTrackingSpec struct {
 	// Enabled turns cost tracking on or off.
 	Enabled bool `json:"enabled"`
 
-	// Labels are workload label keys used for cost attribution slicing
-	// (e.g. "tenant_id", "team", "environment").
-	// +optional
-	Labels []string `json:"labels,omitempty"`
-
 	// Rates overrides the default cost rates. Omit to use AWS on-demand defaults.
 	// +optional
 	Rates *CostRates `json:"rates,omitempty"`
@@ -478,12 +473,6 @@ type PredictionStatus struct {
 
 	// WeeklyConfidence is the weekly season's prediction accuracy percentage.
 	WeeklyConfidence int `json:"weeklyConfidence"`
-
-	// State is the serialized forecast engine state. The operator persists this
-	// on every status write so the engine survives operator restarts without
-	// losing learned patterns.
-	// +optional
-	State *string `json:"state,omitempty"`
 }
 
 // CostStatus holds accumulated resource cost data for the current billing period.

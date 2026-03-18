@@ -19,12 +19,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,14 +42,15 @@ const defaultScanInterval = 10 * time.Minute
 // WorkloadPolicyReconciler reconciles a WorkloadPolicy object.
 type WorkloadPolicyReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=hybernate.io,resources=workloadpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=hybernate.io,resources=workloadpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=hybernate.io,resources=workloadpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list
+// +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 
 // Reconcile scans the namespace for workloads, classifies them, and updates
@@ -93,6 +96,8 @@ func (r *WorkloadPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		created := r.autoManage(ctx, &policy, result)
 		if created > 0 {
 			log.Info("auto-managed workloads", "namespace", policy.Namespace, "count", created)
+			r.Recorder.Event(&policy, "Normal", "AutoManaged",
+				fmt.Sprintf("Created %d ManagedWorkload CRs (dryRun: %t)", created, policy.Spec.DryRun))
 		}
 	}
 
@@ -118,6 +123,11 @@ func (r *WorkloadPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
+	r.Recorder.Event(&policy, "Normal", "ScanCompleted",
+		fmt.Sprintf("Discovered %d workloads: %d active, %d idle, %d wasteful (cost: %s, savings: %s)",
+			result.Summary.Total, result.Summary.Active, result.Summary.Idle, result.Summary.Wasteful,
+			result.Summary.EstimatedMonthlyCost, result.Summary.EstimatedMonthlySavings))
+
 	return ctrl.Result{RequeueAfter: requeueInterval(policy.Spec)}, nil
 }
 
@@ -132,7 +142,7 @@ func (r *WorkloadPolicyReconciler) autoManage(ctx context.Context, policy *v1alp
 
 		mw := v1alpha1.ManagedWorkload{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-%s", d.Kind, d.Name),
+				Name:      strings.ToLower(fmt.Sprintf("%s-%s", d.Kind, d.Name)),
 				Namespace: policy.Namespace,
 				Labels: map[string]string{
 					v1alpha1.LabelAutoDiscovered: "true",

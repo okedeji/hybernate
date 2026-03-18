@@ -81,32 +81,31 @@ type WorkloadPolicySpec struct {
 	DryRun bool `json:"dryRun,omitempty"`
 
 	// Default idle policy copied into exported/auto-created ManagedWorkloads.
-	// +optional
+	// +kubebuilder:default={"action":"pause","idleThreshold":50,"gracePeriod":"5m0s","autoResume":true}
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
 	// Default scaling policy copied into exported/auto-created ManagedWorkloads.
-	// +optional
+	// +kubebuilder:default={"minReplicas":1,"maxReplicas":10,"down":{"stabilization":"5m0s"},"up":{"stabilization":"2m0s"}}
 	ScalePolicy *ScalePolicySpec `json:"scalePolicy,omitempty"`
 
 	// Default pause behavior copied into exported/auto-created ManagedWorkloads.
-	// +optional
+	// +kubebuilder:default={"expireAfter":"168h0m0s","expireAction":"resume"}
 	Pause *PauseSpec `json:"pause,omitempty"`
 
 	// Default destroy behavior copied into exported/auto-created ManagedWorkloads.
-	// +optional
+	// +kubebuilder:default={"pvcRetention":"168h0m0s","pvcRetentionWarning":"24h0m0s"}
 	Destroy *DestroySpec `json:"destroy,omitempty"`
 
 	// Default prediction config copied into exported/auto-created ManagedWorkloads.
-	// +optional
+	// +kubebuilder:default={"confidence":85}
 	Prediction *PredictionSpec `json:"prediction,omitempty"`
 
 	// Default cost tracking config copied into exported/auto-created ManagedWorkloads.
-	// +optional
+	// +kubebuilder:default={"enabled":true}
 	CostTracking *CostTrackingSpec `json:"costTracking,omitempty"`
 
 	// Default conflict action for exported/auto-created ManagedWorkloads.
 	// +kubebuilder:default=warn
-	// +optional
 	ConflictAction ConflictAction `json:"conflictAction,omitempty"`
 }
 
@@ -135,6 +134,7 @@ type DiscoverySummary struct {
 	Idle                    int    `json:"idle"`
 	Wasteful                int    `json:"wasteful"`
 	Managed                 int    `json:"managed"`
+	EstimatedMonthlyCost    string `json:"estimatedMonthlyCost,omitempty"`
 	EstimatedMonthlySavings string `json:"estimatedMonthlySavings,omitempty"`
 }
 
@@ -159,9 +159,11 @@ type DiscoveredWorkload struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Discovered",type=integer,JSONPath=`.status.summary.total`
+// +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=`.status.summary.active`
 // +kubebuilder:printcolumn:name="Idle",type=integer,JSONPath=`.status.summary.idle`
 // +kubebuilder:printcolumn:name="Wasteful",type=integer,JSONPath=`.status.summary.wasteful`
-// +kubebuilder:printcolumn:name="Savings",type=string,JSONPath=`.status.summary.estimatedMonthlySavings`
+// +kubebuilder:printcolumn:name="Projected Cost",type=string,JSONPath=`.status.summary.estimatedMonthlyCost`
+// +kubebuilder:printcolumn:name="Projected Savings",type=string,JSONPath=`.status.summary.estimatedMonthlySavings`
 // +kubebuilder:resource:shortName=wp
 
 // WorkloadPolicy scans its own namespace for workloads that are candidates

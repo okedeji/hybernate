@@ -30,7 +30,7 @@ Hybernate has been installed in namespace {{ .Release.Namespace }}.
      name: default-policy
      namespace: default
    spec:
-     mode: Suggest
+     mode: suggest
      targetKinds:
        - Deployment
        - StatefulSet

@@ -139,7 +139,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 
 	logger := log.FromContext(ctx)
 	key := workload.Namespace + "/" + workload.Name
-	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, predictionState(workload))
+	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, r.predictionState(ctx, workload))
 
 	// Feed engine hourly — prediction learns regardless of desiredState.
 	if r.metrics != nil && r.engines.shouldFeed(key, r.now()) {
@@ -165,7 +165,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	}
 
 	// Always update prediction status so the user sees progress.
-	r.updatePredictionStatus(workload, engine)
+	r.updatePredictionStatus(ctx, workload, engine)
 
 	// If manual desiredState is set, prediction still learns but
 	// automation does not act. Status is updated above.
@@ -210,7 +210,7 @@ func (r *Reconciler) reconcileAutoResume(ctx context.Context, workload *v1alpha1
 	}
 
 	key := workload.Namespace + "/" + workload.Name
-	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, predictionState(workload))
+	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, r.predictionState(ctx, workload))
 
 	enginePhase := engine.GetPhase()
 	if enginePhase == forecast.Observing {

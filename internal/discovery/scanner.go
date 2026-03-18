@@ -58,7 +58,7 @@ func (s *Scanner) Scan(ctx context.Context, namespace string, kinds []v1alpha1.T
 	}
 
 	var all []v1alpha1.DiscoveredWorkload
-	var totalSavings float64
+	var totalSavings, totalCost float64
 
 	for _, kind := range kinds {
 		workloads, err := s.listWorkloads(ctx, namespace, kind)
@@ -73,8 +73,8 @@ func (s *Scanner) Scan(ctx context.Context, namespace string, kinds []v1alpha1.T
 			}
 
 			d := BuildDiscovered(info, th)
-			savings := EstimateSavings(info, d.Classification, th)
-			totalSavings += savings
+			totalSavings += EstimateSavings(info, d.Classification, th)
+			totalCost += EstimateMonthlyCost(info, th.Rates)
 			all = append(all, d)
 		}
 	}
@@ -86,7 +86,7 @@ func (s *Scanner) Scan(ctx context.Context, namespace string, kinds []v1alpha1.T
 		all = all[:maxDiscovered]
 	}
 
-	summary := buildSummary(all, totalSavings)
+	summary := buildSummary(all, totalCost, totalSavings)
 	return &ScanResult{Discovered: all, Summary: summary}, nil
 }
 
@@ -214,7 +214,7 @@ func workloadFields(obj client.Object) (replicas *int32, containers []corev1.Con
 	return
 }
 
-func buildSummary(discovered []v1alpha1.DiscoveredWorkload, totalSavings float64) v1alpha1.DiscoverySummary {
+func buildSummary(discovered []v1alpha1.DiscoveredWorkload, totalCost, totalSavings float64) v1alpha1.DiscoverySummary {
 	var s v1alpha1.DiscoverySummary
 	s.Total = len(discovered)
 	for _, d := range discovered {
@@ -230,6 +230,7 @@ func buildSummary(discovered []v1alpha1.DiscoveredWorkload, totalSavings float64
 			s.Managed++
 		}
 	}
+	s.EstimatedMonthlyCost = cost.FormatDollars(totalCost)
 	s.EstimatedMonthlySavings = cost.FormatDollars(totalSavings)
 	return s
 }
