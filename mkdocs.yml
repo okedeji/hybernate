@@ -1,0 +1,84 @@
+site_name: Hybernate
+site_description: Intelligent Kubernetes workload lifecycle management
+site_url: https://okedeji.github.io/hybernate
+repo_url: https://github.com/okedeji/hybernate
+repo_name: okedeji/hybernate
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - kubectl Plugin: getting-started/kubectl-plugin.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Lifecycle: concepts/lifecycle.md
+      - Forecasting: concepts/forecasting.md
+      - Idle Detection: concepts/idle-detection.md
+      - Cost Tracking: concepts/cost-tracking.md
+  - Guides:
+      - ManagedWorkload: guides/managed-workload.md
+      - WorkloadPolicy: guides/workload-policy.md
+      - Scaling: guides/scaling.md
+      - Pause & Destroy: guides/pause-destroy.md
+      - Prometheus Signals: guides/prometheus-signals.md
+      - GitOps Export: guides/gitops-export.md
+      - Dry Run: guides/dry-run.md
+  - Reference:
+      - API: reference/api.md
+      - Metrics: reference/metrics.md
+      - Labels & Annotations: reference/labels-annotations.md
+      - Configuration: reference/configuration.md
+  - Operations:
+      - Monitoring: operations/monitoring.md
+      - Troubleshooting: operations/troubleshooting.md
+      - Upgrading: operations/upgrading.md
+  - Contributing: contributing.md

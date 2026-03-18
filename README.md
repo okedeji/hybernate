@@ -1,135 +1,92 @@
-# hybernate
-// TODO(user): Add simple overview of use/purpose
+# Hybernate
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.26+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 
-## Getting Started
+**Intelligent Kubernetes workload lifecycle management.**
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+Hybernate is a Kubernetes operator that automatically pauses, scales, and destroys workloads based on real-time idle detection and demand forecasting — saving you money without manual intervention.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+## Features
 
-```sh
-make docker-build docker-push IMG=<some-registry>/hybernate:tag
+- **Demand Forecasting** — Holt-Winters double seasonal model learns daily and weekly traffic patterns per workload
+- **Multi-Signal Idle Detection** — CPU metrics + Prometheus queries with consensus-based confirmation and configurable grace periods
+- **Prediction-Driven Scaling** — replica counts adjust based on forecasted demand with stabilization windows, step limits, and guard probes
+- **Pause & Destroy Lifecycle** — scale to zero with automatic expiry, resume, and PVC retention
+- **Cost Tracking** — per-workload resource cost and savings calculation with cluster-wide aggregation
+- **Auto-Discovery** — scan namespaces, classify workloads as Active/Idle/Wasteful, auto-create management resources
+- **GitOps Export** — `kubectl hybernate export` generates manifests for ArgoCD/Flux workflows
+- **Dry Run Mode** — observe what Hybernate would do without it taking action
+- **Full Observability** — 30+ Prometheus metrics, Grafana dashboards, and alerting rules included
+
+## Quick Start
+
+```bash
+# Install the operator
+kubectl apply -f https://github.com/okedeji/hybernate/releases/latest/download/install.yaml
+
+# Create a ManagedWorkload
+cat <<EOF | kubectl apply -f -
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata:
+  name: my-api
+  namespace: staging
+spec:
+  target:
+    kind: Deployment
+    name: my-api
+  idlePolicy:
+    cpuThreshold: "50m"
+    gracePeriod: "5m"
+  pause:
+    expireAfter: "24h"
+    expireAction: Resume
+  prediction:
+    confidence: 85
+  costTracking:
+    enabled: true
+  dryRun: true
+EOF
+
+# Watch what happens
+kubectl describe managedworkload my-api -n staging
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+## Documentation
 
-**Install the CRDs into the cluster:**
+Full documentation is available at [okedeji.github.io/hybernate](https://okedeji.github.io/hybernate).
 
-```sh
-make install
+| Section | Description |
+|---------|-------------|
+| [Installation](https://okedeji.github.io/hybernate/getting-started/installation/) | Helm, kubectl, and source install |
+| [Quickstart](https://okedeji.github.io/hybernate/getting-started/quickstart/) | Manage your first workload in 5 minutes |
+| [Architecture](https://okedeji.github.io/hybernate/concepts/architecture/) | System overview and components |
+| [ManagedWorkload Guide](https://okedeji.github.io/hybernate/guides/managed-workload/) | Full spec reference with examples |
+| [API Reference](https://okedeji.github.io/hybernate/reference/api/) | Complete CRD field reference |
+| [Metrics](https://okedeji.github.io/hybernate/reference/metrics/) | Prometheus metrics reference |
+
+## How It Works
+
+```
+ManagedWorkload CR ──► Reconciler Loop ──► Idle Detection
+                                      ──► Forecast Engine (Holt-Winters)
+                                      ──► Scaling Constraints
+                                      ──► Pause / Resume / Destroy
+                                      ──► Cost Tracking
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
-
-```sh
-make deploy IMG=<some-registry>/hybernate:tag
-```
-
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
-```
-
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/hybernate:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/hybernate/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+1. You declare a `ManagedWorkload` pointing at a Deployment or StatefulSet
+2. The operator monitors CPU usage and optional Prometheus signals
+3. A per-workload Holt-Winters model learns daily and weekly demand patterns
+4. When the workload is confirmed idle (signals + prediction + grace period), it's paused
+5. Cost savings are tracked and reported via Prometheus metrics and the `HybernateReport` singleton
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+See [CONTRIBUTING](https://okedeji.github.io/hybernate/contributing/) for development setup, testing, and PR guidelines.
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Copyright 2026. Licensed under the [Apache License, Version 2.0](LICENSE).
