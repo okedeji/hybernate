@@ -6,6 +6,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "hybernate.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   groups:
     - name: hybernate.critical
@@ -74,4 +77,28 @@ spec:
           annotations:
             summary: "Discovery scans are taking too long"
             description: "p95 scan duration is {{ "{{" }} $value | humanizeDuration {{ "}}" }}."
+        - alert: HybernateTargetUnavailable
+          expr: increase(hybernate_target_unavailable_total[1h]) > 3
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Target workload not found for {{ "{{" }} $labels.workload {{ "}}" }}"
+            description: "ManagedWorkload {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.workload {{ "}}" }} cannot find its target. It may have been deleted or renamed."
+        - alert: HybernateDryRunActionsHigh
+          expr: increase(hybernate_dryrun_actions_total[1h]) > 10
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High dry-run action rate"
+            description: "{{ "{{" }} $value {{ "}}" }} actions were suppressed by dry-run in the last hour. Review workloads and disable dry-run when ready."
+        - alert: HybernateNoDiscoveredWorkloads
+          expr: sum(hybernate_discovery_workloads) == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "WorkloadPolicy is not discovering any workloads"
+            description: "No workloads discovered for 30 minutes. Check targetKinds and namespace configuration."
 {{- end }}

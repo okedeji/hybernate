@@ -694,3 +694,195 @@ func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
 	assert.Equal(t, 0, pauser.resumeCalls)
 	assert.Equal(t, 0, destroyer.destroyCalls)
 }
+
+// --- Duplicate target detection ---
+
+func TestReconcile_DuplicateTargetBlocksNewer(t *testing.T) {
+	older := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "deployment-idle-app",
+			Namespace:         "default",
+			UID:               "aaa",
+			CreationTimestamp:  metav1.NewTime(fixedTime.Add(-1 * time.Hour)),
+			ResourceVersion:   "1",
+		},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:     v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "idle-app"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85},
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{
+			Phase: v1alpha1.PhaseRunning,
+		},
+	}
+
+	newer := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "duplicate-idle-app",
+			Namespace:         "default",
+			UID:               "bbb",
+			CreationTimestamp:  metav1.NewTime(fixedTime),
+			ResourceVersion:   "2",
+		},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:     v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "idle-app"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85},
+		},
+	}
+
+	scheme := testScheme(t)
+	recorder := record.NewFakeRecorder(10)
+	k := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.ManagedWorkload{}).
+		WithObjects(older, newer, targetDeployment("idle-app", "default")).
+		Build()
+
+	r := &Reconciler{
+		Client:    k,
+		Scheme:    scheme,
+		Recorder:  recorder,
+		pauser:    &stubPauser{},
+		destroyer: &stubDestroyer{},
+		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:     func() time.Time { return fixedTime },
+	}
+
+	// Reconcile the newer one — should be blocked.
+	_, err := r.Reconcile(context.Background(), reconcileFor("duplicate-idle-app"))
+	require.NoError(t, err)
+
+	w := getWorkload(t, r, "duplicate-idle-app")
+	require.NotEmpty(t, w.Status.Conditions)
+
+	var found bool
+	for _, c := range w.Status.Conditions {
+		if c.Type == "DuplicateTarget" {
+			found = true
+			assert.Equal(t, metav1.ConditionTrue, c.Status)
+			assert.Contains(t, c.Message, "deployment-idle-app")
+			break
+		}
+	}
+	require.True(t, found, "expected DuplicateTarget condition")
+
+	// Verify warning event was emitted.
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "DuplicateTarget")
+	default:
+		t.Fatal("expected DuplicateTarget warning event")
+	}
+}
+
+func TestReconcile_DuplicateTargetAllowsOlder(t *testing.T) {
+	older := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "deployment-idle-app",
+			Namespace:         "default",
+			UID:               "aaa",
+			CreationTimestamp:  metav1.NewTime(fixedTime.Add(-1 * time.Hour)),
+			ResourceVersion:   "1",
+		},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:     v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "idle-app"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85},
+		},
+	}
+
+	newer := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "duplicate-idle-app",
+			Namespace:         "default",
+			UID:               "bbb",
+			CreationTimestamp:  metav1.NewTime(fixedTime),
+			ResourceVersion:   "2",
+		},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:     v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "idle-app"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85},
+		},
+	}
+
+	scheme := testScheme(t)
+	k := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.ManagedWorkload{}).
+		WithObjects(older, newer, targetDeployment("idle-app", "default")).
+		Build()
+
+	r := &Reconciler{
+		Client:    k,
+		Scheme:    scheme,
+		Recorder:  record.NewFakeRecorder(10),
+		pauser:    &stubPauser{},
+		destroyer: &stubDestroyer{},
+		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:     func() time.Time { return fixedTime },
+	}
+
+	// Reconcile the older one — should proceed normally.
+	_, err := r.Reconcile(context.Background(), reconcileFor("deployment-idle-app"))
+	require.NoError(t, err)
+
+	w := getWorkload(t, r, "deployment-idle-app")
+	for _, c := range w.Status.Conditions {
+		assert.NotEqual(t, "DuplicateTarget", c.Type, "older workload should not get DuplicateTarget")
+	}
+	assert.Equal(t, v1alpha1.PhaseRunning, w.Status.Phase)
+}
+
+func TestReconcile_DuplicateTargetClearsWhenResolved(t *testing.T) {
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "deployment-idle-app",
+			Namespace:         "default",
+			UID:               "aaa",
+			CreationTimestamp:  metav1.NewTime(fixedTime),
+			ResourceVersion:   "1",
+		},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:     v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "idle-app"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85},
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{
+			Phase: v1alpha1.PhaseRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:               "DuplicateTarget",
+					Status:             metav1.ConditionTrue,
+					Reason:             "DuplicateTarget",
+					Message:            "was duplicate",
+					LastTransitionTime: metav1.NewTime(fixedTime),
+				},
+			},
+		},
+	}
+
+	scheme := testScheme(t)
+	k := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.ManagedWorkload{}).
+		WithObjects(workload, targetDeployment("idle-app", "default")).
+		Build()
+
+	r := &Reconciler{
+		Client:    k,
+		Scheme:    scheme,
+		Recorder:  record.NewFakeRecorder(10),
+		pauser:    &stubPauser{},
+		destroyer: &stubDestroyer{},
+		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:     func() time.Time { return fixedTime },
+	}
+
+	// No duplicate exists anymore — condition should clear.
+	_, err := r.Reconcile(context.Background(), reconcileFor("deployment-idle-app"))
+	require.NoError(t, err)
+
+	w := getWorkload(t, r, "deployment-idle-app")
+	for _, c := range w.Status.Conditions {
+		if c.Type == "DuplicateTarget" {
+			assert.Equal(t, metav1.ConditionFalse, c.Status, "condition should be cleared")
+		}
+	}
+}
