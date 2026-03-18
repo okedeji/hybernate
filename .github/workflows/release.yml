@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 env:
   REGISTRY: ghcr.io
@@ -53,6 +54,7 @@ jobs:
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push multi-arch image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -65,6 +67,33 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.version.outputs.tag }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign container image
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM
+        run: |
+          syft ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }} -o spdx-json=sbom.spdx.json
+
+      - name: Attach SBOM to image
+        run: |
+          cosign attest --yes --predicate sbom.spdx.json --type spdxjson ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+
+      - name: Build kubectl-hybernate plugin binaries
+        run: |
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              GOOS=$os GOARCH=$arch go build -o kubectl-hybernate-${os}-${arch} ./cmd/kubectl-hybernate
+              tar czf kubectl-hybernate-${os}-${arch}.tar.gz kubectl-hybernate-${os}-${arch}
+            done
+          done
 
       - name: Generate install manifest
         run: |
@@ -85,3 +114,5 @@ jobs:
           files: |
             dist/install.yaml
             hybernate-*.tgz
+            kubectl-hybernate-*.tar.gz
+            sbom.spdx.json
