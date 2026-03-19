@@ -56,16 +56,16 @@ kubectl describe managedworkload my-api -n staging
 
 ## Documentation
 
-Full documentation is available at [okedeji.github.io/hybernate](https://okedeji.github.io/hybernate).
+Full documentation is available at [okedeji.io/hybernate](https://okedeji.io/hybernate).
 
 | Section | Description |
 |---------|-------------|
-| [Installation](https://okedeji.github.io/hybernate/getting-started/installation/) | Helm, kubectl, and source install |
-| [Quickstart](https://okedeji.github.io/hybernate/getting-started/quickstart/) | Manage your first workload in 5 minutes |
-| [Architecture](https://okedeji.github.io/hybernate/concepts/architecture/) | System overview and components |
-| [ManagedWorkload Guide](https://okedeji.github.io/hybernate/guides/managed-workload/) | Full spec reference with examples |
-| [API Reference](https://okedeji.github.io/hybernate/reference/api/) | Complete CRD field reference |
-| [Metrics](https://okedeji.github.io/hybernate/reference/metrics/) | Prometheus metrics reference |
+| [Installation](https://okedeji.io/hybernate/getting-started/installation/) | Helm, kubectl, and source install |
+| [Quickstart](https://okedeji.io/hybernate/getting-started/quickstart/) | Manage your first workload in 5 minutes |
+| [Architecture](https://okedeji.io/hybernate/concepts/architecture/) | System overview and components |
+| [ManagedWorkload Guide](https://okedeji.io/hybernate/guides/managed-workload/) | Full spec reference with examples |
+| [API Reference](https://okedeji.io/hybernate/reference/api/) | Complete CRD field reference |
+| [Metrics](https://okedeji.io/hybernate/reference/metrics/) | Prometheus metrics reference |
 
 ## How It Works
 
@@ -85,7 +85,7 @@ ManagedWorkload CR ──► Reconciler Loop ──► Idle Detection
 
 ## Contributing
 
-See [CONTRIBUTING](https://okedeji.github.io/hybernate/contributing/) for development setup, testing, and PR guidelines.
+See [CONTRIBUTING](https://okedeji.io/hybernate/contributing/) for development setup, testing, and PR guidelines.
 
 ## License
 
