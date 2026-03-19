@@ -11,13 +11,10 @@
 
 === "Helm"
 
-    Add the Helm repo and install the chart into its own namespace:
+    Install directly from the OCI registry:
 
     ```bash
-    helm repo add hybernate https://okedeji.github.io/hybernate/charts
-    helm repo update
-
-    helm install hybernate hybernate/hybernate \
+    helm install hybernate oci://ghcr.io/okedeji/hybernate/charts/hybernate \
       --namespace hybernate-system \
       --create-namespace
     ```
