@@ -6,19 +6,19 @@
 
 **Intelligent Kubernetes workload lifecycle management.**
 
-Hybernate is a Kubernetes operator that automatically pauses, scales, and destroys workloads based on real-time idle detection and demand forecasting — saving you money without manual intervention.
+Hybernate is a Kubernetes operator that automatically pauses, scales, and destroys workloads based on real-time idle detection and demand forecasting, saving you money without manual intervention.
 
 ## Features
 
-- **Demand Forecasting** — Holt-Winters double seasonal model learns daily and weekly traffic patterns per workload
-- **Multi-Signal Idle Detection** — CPU metrics + Prometheus queries with consensus-based confirmation and configurable grace periods
-- **Prediction-Driven Scaling** — replica counts adjust based on forecasted demand with stabilization windows, step limits, and guard probes
-- **Pause & Destroy Lifecycle** — scale to zero with automatic expiry, resume, and PVC retention
-- **Cost Tracking** — per-workload resource cost and savings calculation with cluster-wide aggregation
-- **Auto-Discovery** — scan namespaces, classify workloads as Active/Idle/Wasteful, auto-create management resources
-- **GitOps Export** — `kubectl hybernate export` generates manifests for ArgoCD/Flux workflows
-- **Dry Run Mode** — observe what Hybernate would do without it taking action
-- **Full Observability** — 30+ Prometheus metrics, Grafana dashboards, and alerting rules included
+- **Demand Forecasting**: Holt-Winters double seasonal model learns daily and weekly traffic patterns per workload
+- **Multi-Signal Idle Detection**: CPU metrics + Prometheus queries with consensus-based confirmation and configurable grace periods
+- **Prediction-Driven Scaling**: replica counts adjust based on forecasted demand with stabilization windows, step limits, and guard probes
+- **Pause & Destroy Lifecycle**: scale to zero with automatic expiry, resume, and PVC retention
+- **Cost Tracking**: per-workload resource cost and savings calculation with cluster-wide aggregation
+- **Auto-Discovery**: scan namespaces, classify workloads as Active/Idle/Wasteful, auto-create management resources
+- **GitOps Export**: `kubectl hybernate export` generates manifests for ArgoCD/Flux workflows
+- **Dry Run Mode**: observe what Hybernate would do without it taking action
+- **Full Observability**: 30+ Prometheus metrics, Grafana dashboards, and alerting rules included
 
 ## Quick Start
 

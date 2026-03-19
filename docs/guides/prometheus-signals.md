@@ -6,8 +6,8 @@ Prometheus signals let you add application-level checks to idle detection and sc
 
 Hybernate sends an instant query to the Prometheus API (`/api/v1/query`) with a 5-second timeout.
 
-- **Non-zero, non-empty result** — signal **confirms** the action
-- **Zero value or empty result** — signal **denies** the action
+- **Non-zero, non-empty result**: signal **confirms** the action
+- **Zero value or empty result**: signal **denies** the action
 
 The key insight: **write your PromQL so that a non-zero result means "yes, proceed with this action."**
 
@@ -17,7 +17,7 @@ Prometheus signals appear in two places:
 
 ### Idle Detection Signals
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 spec:
   idlePolicy:
     signals:
@@ -25,11 +25,11 @@ spec:
         promQL: 'rate(http_requests_total{service="my-api"}[10m]) == 0'
 ```
 
-The query above returns `1` (non-zero) when the request rate is zero — confirming idle.
+The query above returns `1` (non-zero) when the request rate is zero, confirming idle.
 
 ### Scale-Down Guards
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 spec:
   scalePolicy:
     down:
@@ -38,13 +38,13 @@ spec:
           promQL: 'sum(active_connections{service="my-api"}) < 10'
 ```
 
-The query returns `1` when active connections are below 10 — confirming it's safe to scale down.
+The query returns `1` when active connections are below 10, confirming it's safe to scale down.
 
 ## Prometheus Endpoint
 
 The operator needs to know where your Prometheus instance lives. This is configured via the `PROMETHEUS_ENDPOINT` environment variable on the operator deployment:
 
-```yaml
+```yaml title="deployment.yaml" linenums="1"
 env:
   - name: PROMETHEUS_ENDPOINT
     value: "http://prometheus.monitoring.svc.cluster.local:9090"
@@ -76,9 +76,9 @@ env:
 
 ### Use comparison operators for idle signals
 
-Idle signals should evaluate to a boolean — use `== 0` for "is this metric absent":
+Idle signals should evaluate to a boolean. Use `== 0` for "is this metric absent":
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 # Good: Returns 1 (confirms idle) when rate is zero
 promQL: 'rate(http_requests_total{service="api"}[10m]) == 0'
 
@@ -91,7 +91,7 @@ promQL: 'rate(http_requests_total{service="api"}[10m])'
 Too short: noisy, may trigger on brief pauses between requests.
 Too long: slow to react, may delay idle detection.
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 # Good: 10-minute window smooths out brief gaps
 promQL: 'rate(http_requests_total{service="api"}[10m]) == 0'
 
@@ -103,7 +103,7 @@ promQL: 'rate(http_requests_total{service="api"}[1m]) == 0'
 
 Include labels that identify your workload to avoid matching other services:
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 # Good: specific to the service
 promQL: 'sum(active_connections{service="my-api", namespace="staging"}) < 10'
 

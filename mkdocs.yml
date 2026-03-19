@@ -8,20 +8,9 @@ edit_uri: edit/main/docs/
 theme:
   name: material
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
+    scheme: default
+    primary: white
+    accent: black
   features:
     - navigation.tabs
     - navigation.sections
@@ -30,9 +19,15 @@ theme:
     - search.suggest
     - search.highlight
     - content.code.copy
+    - content.code.annotate
+    - content.code.select
     - content.action.edit
   icon:
+    logo: material/snowflake
     repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/custom.css
 
 plugins:
   - search
@@ -45,12 +40,20 @@ markdown_extensions:
       alternate_style: true
   - pymdownx.highlight:
       anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
   - pymdownx.inlinehilite
   - pymdownx.snippets
   - attr_list
   - md_in_html
+  - pymdownx.arithmatex:
+      generic: true
   - toc:
       permalink: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 nav:
   - Home: index.md
@@ -63,6 +66,7 @@ nav:
       - Lifecycle: concepts/lifecycle.md
       - Forecasting: concepts/forecasting.md
       - Idle Detection: concepts/idle-detection.md
+      - Scaling: concepts/scaling.md
       - Cost Tracking: concepts/cost-tracking.md
   - Guides:
       - ManagedWorkload: guides/managed-workload.md
@@ -74,6 +78,7 @@ nav:
       - Dry Run: guides/dry-run.md
   - Reference:
       - API: reference/api.md
+      - Helm Values: reference/helm-values.md
       - Metrics: reference/metrics.md
       - Labels & Annotations: reference/labels-annotations.md
       - Configuration: reference/configuration.md

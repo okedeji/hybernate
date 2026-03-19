@@ -35,7 +35,7 @@ func costWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
 		Spec: v1alpha1.ManagedWorkloadSpec{
 			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 			Prediction:   v1alpha1.PredictionSpec{Confidence: 85},
-			CostTracking: &v1alpha1.CostTrackingSpec{Enabled: true},
+			CostTracking: &v1alpha1.CostTrackingSpec{},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: phase},
 	}
@@ -49,16 +49,6 @@ func costReconciler(now time.Time, metrics *stubMetrics) *Reconciler {
 		r.metrics = metrics
 	}
 	return r
-}
-
-func TestAccumulateCost_SkipsWhenDisabled(t *testing.T) {
-	w := costWorkload(v1alpha1.PhaseRunning)
-	w.Spec.CostTracking = nil
-
-	r := costReconciler(fixedTime, &stubMetrics{cpuMillis: 1000})
-	r.accumulateCost(context.Background(), w)
-
-	assert.Nil(t, w.Status.Cost)
 }
 
 func TestAccumulateCost_SkipsWhenNoMetrics(t *testing.T) {

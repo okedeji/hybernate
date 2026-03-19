@@ -363,6 +363,19 @@ func (r *Reconciler) checkPVCRetention(ctx context.Context, workload *v1alpha1.M
 		return nil, nil
 	}
 
+	// If the user removed pvcRetention from the spec after destroy,
+	// cancel the scheduled cleanup and preserve PVCs indefinitely.
+	if workload.Spec.Destroy == nil || workload.Spec.Destroy.PVCRetention == nil {
+		workload.Status.Destroy.PVCRetentionExpiresAt = nil
+		metrics.PVCRetentionRemaining.WithLabelValues(workload.Namespace, workload.Spec.Target.Name).Set(0)
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return nil, fmt.Errorf("cancelling pvc retention: %w", err)
+		}
+		r.emitEvent(workload, false, "Normal", ReasonPVCRetentionExpiring,
+			"PVC retention removed from spec, cleanup cancelled")
+		return nil, nil
+	}
+
 	now := r.now()
 	expiry := workload.Status.Destroy.PVCRetentionExpiresAt.Time
 	if now.Before(expiry) {

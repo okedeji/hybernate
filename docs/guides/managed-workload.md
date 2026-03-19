@@ -4,7 +4,7 @@ The ManagedWorkload CR is the core resource in Hybernate. It declares a single D
 
 ## Minimal Example
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 apiVersion: hybernate.io/v1alpha1
 kind: ManagedWorkload
 metadata:
@@ -22,7 +22,7 @@ This is the absolute minimum. The operator will watch the Deployment but won't t
 
 ## Full Example
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 apiVersion: hybernate.io/v1alpha1
 kind: ManagedWorkload
 metadata:
@@ -67,7 +67,6 @@ spec:
     confidence: 85
 
   costTracking:
-    enabled: true
     rates:
       cpuPerHour: "0.031"
       memoryPerHour: "0.004"
@@ -146,9 +145,10 @@ See [Pause & Destroy](pause-destroy.md) for detailed behavior.
 
 ### `costTracking`
 
+Cost tracking is always enabled with AWS on-demand defaults. Set `costTracking.rates` to override pricing for your cloud provider.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Turn on cost tracking |
 | `rates.cpuPerHour` | quantity | `0.031` | $/vCPU-hour |
 | `rates.memoryPerHour` | quantity | `0.004` | $/GiB-hour |
 | `rates.storagePerMonth` | quantity | `0.08` | $/GiB-month |

@@ -1,43 +1,50 @@
 # kubectl Plugin
 
-Hybernate provides a `kubectl hybernate` plugin for exporting discovered workloads as ManagedWorkload YAML manifests — designed for GitOps workflows.
+Hybernate provides a `kubectl hybernate` plugin for exporting discovered workloads as ManagedWorkload YAML manifests, designed for GitOps workflows.
 
 ## Installation
 
-### Krew
+=== "Krew"
 
-```bash
-kubectl krew install hybernate
-```
+    ```bash
+    kubectl krew install --manifest-url \
+      https://github.com/okedeji/hybernate/releases/latest/download/krew-hybernate.yaml
+    ```
 
-### Binary
+    !!! note
+        This uses a custom manifest URL. Once the plugin is accepted into the [krew-index](https://github.com/kubernetes-sigs/krew-index), you'll be able to install with just `kubectl krew install hybernate`.
 
-Download the binary from the [releases page](https://github.com/okedeji/hybernate/releases) and place it in your `PATH`:
+=== "Binary"
 
-```bash
-# macOS (Apple Silicon)
-curl -LO https://github.com/okedeji/hybernate/releases/latest/download/kubectl-hybernate_darwin_arm64
-chmod +x kubectl-hybernate_darwin_arm64
-mv kubectl-hybernate_darwin_arm64 /usr/local/bin/kubectl-hybernate
+    Download the binary from the [releases page](https://github.com/okedeji/hybernate/releases) and place it in your `PATH`:
 
-# Linux (amd64)
-curl -LO https://github.com/okedeji/hybernate/releases/latest/download/kubectl-hybernate_linux_amd64
-chmod +x kubectl-hybernate_linux_amd64
-mv kubectl-hybernate_linux_amd64 /usr/local/bin/kubectl-hybernate
-```
+    ```bash
+    # macOS (Apple Silicon)
+    curl -LO https://github.com/okedeji/hybernate/releases/latest/download/kubectl-hybernate-darwin-arm64.tar.gz
+    tar xzf kubectl-hybernate-darwin-arm64.tar.gz
+    chmod +x kubectl-hybernate-darwin-arm64
+    mv kubectl-hybernate-darwin-arm64 /usr/local/bin/kubectl-hybernate
 
-### Build from Source
+    # Linux (amd64)
+    curl -LO https://github.com/okedeji/hybernate/releases/latest/download/kubectl-hybernate-linux-amd64.tar.gz
+    tar xzf kubectl-hybernate-linux-amd64.tar.gz
+    chmod +x kubectl-hybernate-linux-amd64
+    mv kubectl-hybernate-linux-amd64 /usr/local/bin/kubectl-hybernate
+    ```
 
-```bash
-git clone https://github.com/okedeji/hybernate.git
-cd hybernate
-make build-plugin
-# Binary is at bin/kubectl-hybernate
-```
+=== "Source"
+
+    ```bash
+    git clone https://github.com/okedeji/hybernate.git
+    cd hybernate
+    make build-plugin
+    # Binary is at bin/kubectl-hybernate
+    ```
 
 ## Usage
 
-The plugin requires a WorkloadPolicy to exist in the target namespace (it reads from `status.discovered`).
+!!! note
+    The plugin requires a WorkloadPolicy to exist in the target namespace. It reads from the policy's `status.discovered` field. If the policy doesn't exist, the command exits with a clear error.
 
 ### Export All Unmanaged Workloads
 

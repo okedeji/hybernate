@@ -424,10 +424,12 @@ func TestReconcile_PauseNotExpiredRequeuesWithRemaining(t *testing.T) {
 func TestReconcile_PVCRetentionCleansUpAfterExpiry(t *testing.T) {
 	destroyedAt := metav1.NewTime(fixedTime.Add(-8 * time.Hour))
 	expiresAt := metav1.NewTime(fixedTime.Add(-1 * time.Hour))
+	retention := metav1.Duration{Duration: 7 * time.Hour}
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			Target:  v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			Destroy: &v1alpha1.DestroySpec{PVCRetention: &retention},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Phase: v1alpha1.PhaseDestroyed,
@@ -449,10 +451,12 @@ func TestReconcile_PVCRetentionCleansUpAfterExpiry(t *testing.T) {
 func TestReconcile_PVCRetentionWaitsBeforeExpiry(t *testing.T) {
 	destroyedAt := metav1.NewTime(fixedTime.Add(-1 * time.Hour))
 	expiresAt := metav1.NewTime(fixedTime.Add(6 * time.Hour))
+	retention := metav1.Duration{Duration: 7 * time.Hour}
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			Target:  v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			Destroy: &v1alpha1.DestroySpec{PVCRetention: &retention},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Phase: v1alpha1.PhaseDestroyed,
@@ -470,6 +474,35 @@ func TestReconcile_PVCRetentionWaitsBeforeExpiry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 6*time.Hour, result.RequeueAfter)
 	assert.Equal(t, 0, destroyer.cleanupCalls)
+}
+
+func TestReconcile_PVCRetentionCancelledWhenSpecRemoved(t *testing.T) {
+	destroyedAt := metav1.NewTime(fixedTime.Add(-2 * time.Hour))
+	expiresAt := metav1.NewTime(fixedTime.Add(5 * time.Hour))
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			// No Destroy spec — user removed pvcRetention after destroy
+		},
+		Status: v1alpha1.ManagedWorkloadStatus{
+			Phase: v1alpha1.PhaseDestroyed,
+			Destroy: &v1alpha1.DestroyStatus{
+				DestroyedAt:           &destroyedAt,
+				PVCRetentionExpiresAt: &expiresAt,
+			},
+		},
+	}
+
+	destroyer := &stubDestroyer{}
+	r := newTestReconciler(t, workload, &stubPauser{}, destroyer)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+	assert.Equal(t, 0, destroyer.cleanupCalls, "should not clean up PVCs when retention removed from spec")
+
+	w := getWorkload(t, r, "api")
+	assert.Nil(t, w.Status.Destroy.PVCRetentionExpiresAt, "should clear expiry from status")
 }
 
 // --- Finalizer + Deletion ---

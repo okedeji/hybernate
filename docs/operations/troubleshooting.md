@@ -39,11 +39,11 @@ If `dailyPhase` is `Observing`, the engine hasn't collected enough data yet (nee
 
 ### Workload keeps cycling between paused and running
 
-This usually means idle detection triggers pause, then auto-resume immediately detects "not idle" (because paused workloads have zero CPU — which is below threshold but the workload has no pods to measure).
+This usually means idle detection triggers pause, then auto-resume immediately detects "not idle" (because paused workloads have zero CPU, which is below threshold, but the workload has no pods to measure).
 
 **Fix:** Ensure your Prometheus signals check for actual traffic, not just CPU:
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 idlePolicy:
   signals:
     - source: prometheus
@@ -68,8 +68,8 @@ kubectl describe managedworkload my-api -n staging
 
 Look for:
 
-- **"in stabilization window"** — cooldown from a recent scale event. Wait for the stabilization period to elapse.
-- **Guard probe denial** — a Prometheus guard query returned zero/empty. Check the query against Prometheus directly.
+- **"in stabilization window"**: cooldown from a recent scale event. Wait for the stabilization period to elapse.
+- **Guard probe denial**: a Prometheus guard query returned zero/empty. Check the query against Prometheus directly.
 
 ### Target not found
 
@@ -93,7 +93,6 @@ kubectl get managedworkloads -n staging -o jsonpath='{range .items[*]}{.metadata
 
 ### Cost data shows $0.00
 
-- Verify `costTracking.enabled: true` is set
 - Cost accumulation requires metrics-server data. Check `kubectl top pods`.
 - On day 1 of the month, `estimatedMonthlyCost` shows "pending" until day 2.
 

@@ -100,8 +100,8 @@ type WorkloadPolicySpec struct {
 	// +kubebuilder:default={"confidence":85}
 	Prediction *PredictionSpec `json:"prediction,omitempty"`
 
-	// Default cost tracking config copied into exported/auto-created ManagedWorkloads.
-	// +kubebuilder:default={"enabled":true}
+	// Default cost rate overrides copied into exported/auto-created ManagedWorkloads.
+	// +optional
 	CostTracking *CostTrackingSpec `json:"costTracking,omitempty"`
 
 	// Default conflict action for exported/auto-created ManagedWorkloads.

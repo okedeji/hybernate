@@ -1,12 +1,12 @@
 # Dry Run Guide
 
-Dry run mode lets you observe what Hybernate would do without it taking any action. The operator evaluates all policies, emits events, and updates predictions — but never modifies your workloads.
+Dry run mode lets you observe what Hybernate would do without it taking any action. The operator evaluates all policies, emits events, and updates predictions, but never modifies your workloads.
 
 ## Enabling Dry Run
 
 ### Per Workload
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 apiVersion: hybernate.io/v1alpha1
 kind: ManagedWorkload
 metadata:
@@ -26,7 +26,7 @@ spec:
 
 ### Via WorkloadPolicy (for auto-managed workloads)
 
-```yaml
+```yaml title="workloadpolicy.yaml" linenums="1"
 apiVersion: hybernate.io/v1alpha1
 kind: WorkloadPolicy
 metadata:
@@ -43,9 +43,9 @@ The operator runs its full evaluation pipeline:
 
 | Action | Dry Run Behavior |
 |--------|-----------------|
-| Idle detection | Signals are checked, grace period is tracked, events are emitted — but the workload is **not** paused |
-| Scaling | Forecast engine proposes targets, constraints are evaluated — but replicas are **not** changed |
-| Pause expiry | Expiry is detected — but the workload is **not** resumed or destroyed |
+| Idle detection | Signals are checked, grace period is tracked, and events are emitted, but the workload is **not** paused |
+| Scaling | Forecast engine proposes targets and constraints are evaluated, but replicas are **not** changed |
+| Pause expiry | Expiry is detected, but the workload is **not** resumed or destroyed |
 | Cost tracking | Costs are accumulated normally (resource usage is real regardless of management) |
 | Prediction engine | Data points are observed and confidence builds normally |
 | Events | All events are emitted with a `[DRY RUN]` prefix |
@@ -74,7 +74,7 @@ The status reflects the evaluated state:
 kubectl get managedworkload my-api -n staging -o yaml
 ```
 
-```yaml
+```yaml title="status" linenums="1"
 status:
   phase: Running  # Stays Running because no action was taken
   prediction:
@@ -86,10 +86,10 @@ status:
 
 ## Recommended Workflow
 
-1. **Deploy with `dryRun: true`** — observe events and status for a few days
-2. **Check prediction confidence** — wait until the forecast engine reaches DailyActive and confidence exceeds your threshold
-3. **Review events** — confirm the operator would have made the right decisions
-4. **Disable dry run** — flip to `false` to enable automation
+1. **Deploy with `dryRun: true`**. Observe events and status for a few days.
+2. **Check prediction confidence**. Wait until the forecast engine reaches DailyActive and confidence exceeds your threshold.
+3. **Review events**. Confirm the operator would have made the right decisions.
+4. **Disable dry run**. Flip to `false` to enable automation.
 
 ```bash
 kubectl patch managedworkload my-api -n staging \

@@ -76,14 +76,9 @@ spec:
                 - defer
                 type: string
               costTracking:
-                default:
-                  enabled: true
-                description: Default cost tracking config copied into exported/auto-created
+                description: Default cost rate overrides copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
-                  enabled:
-                    description: Enabled turns cost tracking on or off.
-                    type: boolean
                   rates:
                     description: Rates overrides the default cost rates. Omit to use
                       AWS on-demand defaults.
@@ -114,8 +109,6 @@ spec:
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                     type: object
-                required:
-                - enabled
                 type: object
               destroy:
                 default:

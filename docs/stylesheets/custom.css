@@ -1,0 +1,68 @@
+/* Light mode overrides */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #ffffff;
+  --md-primary-bg-color: #000000;
+  --md-accent-fg-color: #000000;
+  --md-typeset-a-color: #4a6fa5;
+}
+
+/* Active nav highlight */
+[data-md-color-scheme="default"] .md-nav__link--active,
+[data-md-color-scheme="default"] .md-nav__link:is(:focus, :hover) {
+  color: #000000;
+}
+
+/* Header text on white background */
+[data-md-color-scheme="default"] .md-header {
+  background-color: #ffffff;
+  color: #000000;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+[data-md-color-scheme="default"] .md-header__topic,
+[data-md-color-scheme="default"] .md-header-nav__button,
+[data-md-color-scheme="default"] .md-header .md-icon {
+  color: #000000;
+}
+
+/* Tabs */
+[data-md-color-scheme="default"] .md-tabs {
+  background-color: #ffffff;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+[data-md-color-scheme="default"] .md-tabs__link {
+  color: #000000;
+}
+
+[data-md-color-scheme="default"] .md-tabs__link--active {
+  color: #000000;
+  border-bottom: 2px solid #000000;
+}
+
+/* Search input */
+.md-search__form {
+  border-radius: 12px;
+}
+
+.md-search__input {
+  border-radius: 12px;
+}
+
+/* Dark mode overrides */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #000000;
+  --md-primary-bg-color: #ffffff;
+  --md-accent-fg-color: #ffffff;
+  --md-typeset-a-color: #7aabdf;
+}
+
+[data-md-color-scheme="slate"] .md-nav__link--active,
+[data-md-color-scheme="slate"] .md-nav__link:is(:focus, :hover) {
+  color: #ffffff;
+}
+
+/* Hide "Made with Material for MkDocs" footer */
+.md-footer-meta__inner {
+  display: none;
+}

@@ -99,8 +99,9 @@ type ManagedWorkloadSpec struct {
 	// +required
 	Prediction PredictionSpec `json:"prediction"`
 
-	// CostTracking enables resource cost calculation and attribution for
-	// this workload.
+	// CostTracking configures custom cost rates for this workload.
+	// Cost tracking is always enabled with AWS on-demand defaults.
+	// Set this field only to override pricing rates.
 	// +optional
 	CostTracking *CostTrackingSpec `json:"costTracking,omitempty"`
 
@@ -311,11 +312,9 @@ type DestroySpec struct {
 	PVCRetentionWarning *metav1.Duration `json:"pvcRetentionWarning,omitempty"`
 }
 
-// CostTrackingSpec enables resource cost calculation for this workload.
+// CostTrackingSpec configures resource cost calculation for this workload.
+// Cost tracking is always enabled. This struct exists to allow custom rate overrides.
 type CostTrackingSpec struct {
-	// Enabled turns cost tracking on or off.
-	Enabled bool `json:"enabled"`
-
 	// Rates overrides the default cost rates. Omit to use AWS on-demand defaults.
 	// +optional
 	Rates *CostRates `json:"rates,omitempty"`

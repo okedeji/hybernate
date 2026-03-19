@@ -62,12 +62,10 @@ spec:
                 type: string
               costTracking:
                 description: |-
-                  CostTracking enables resource cost calculation and attribution for
-                  this workload.
+                  CostTracking configures custom cost rates for this workload.
+                  Cost tracking is always enabled with AWS on-demand defaults.
+                  Set this field only to override pricing rates.
                 properties:
-                  enabled:
-                    description: Enabled turns cost tracking on or off.
-                    type: boolean
                   rates:
                     description: Rates overrides the default cost rates. Omit to use
                       AWS on-demand defaults.
@@ -98,8 +96,6 @@ spec:
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                     type: object
-                required:
-                - enabled
                 type: object
               desiredState:
                 description: |-

@@ -4,7 +4,7 @@ Hybernate provides two lifecycle actions beyond scaling: **pause** (scale to zer
 
 ## Pause
 
-Pausing scales the workload to zero replicas. The Deployment or StatefulSet still exists — only the pods are removed.
+Pausing scales the workload to zero replicas. The Deployment or StatefulSet still exists; only the pods are removed.
 
 ### What Happens When a Workload Is Paused
 
@@ -29,7 +29,7 @@ kubectl patch managedworkload my-api -n staging \
 
 Configure what happens if a workload stays paused too long:
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 spec:
   pause:
     expireAfter: "24h"
@@ -61,7 +61,7 @@ kubectl patch managedworkload my-api -n staging \
 
 ## Destroy
 
-Destroying deletes the target Deployment or StatefulSet. The ManagedWorkload CR remains — it tracks PVC retention and cost savings.
+Destroying deletes the target Deployment or StatefulSet. The ManagedWorkload CR remains to track PVC retention and cost savings.
 
 ### What Happens When a Workload Is Destroyed
 
@@ -87,9 +87,9 @@ kubectl patch managedworkload my-api -n staging \
 
 ### PVC Retention
 
-By default, PVCs are not cleaned up when a workload is destroyed — they persist independently. Configure retention to clean them up on a schedule:
+By default, PVCs are not cleaned up when a workload is destroyed. They persist independently. Configure retention to clean them up on a schedule:
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 spec:
   destroy:
     pvcRetention: "168h"       # Keep PVCs for 7 days after destroy
@@ -108,13 +108,15 @@ The operator matches PVCs using the workload's pod template selector labels.
 !!! warning
     Once PVCs are deleted, the data is gone. Set `pvcRetentionWarning` to give users time to recover data before cleanup.
 
+To cancel a scheduled PVC cleanup, remove `pvcRetention` from the spec. The operator detects the change and clears the expiry timer, preserving PVCs indefinitely.
+
 ### PVC Retention Without Destroy
 
 PVC retention only applies when a workload is destroyed. Paused workloads keep their PVCs unconditionally (only pods are removed, the workload object and PVCs remain).
 
 ## Cost Savings During Pause and Destroy
 
-If cost tracking is enabled:
+Cost tracking is always enabled. During pause and destroy:
 
 - **While paused:** CPU and memory savings accrue every reconcile. Storage savings are zero (PVCs persist).
 - **While destroyed:** CPU and memory savings accrue. Storage savings begin accruing after PVC retention expires and PVCs are cleaned up.

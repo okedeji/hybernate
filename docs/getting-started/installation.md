@@ -7,52 +7,58 @@
 - [metrics-server](https://github.com/kubernetes-sigs/metrics-server) installed (Hybernate reads pod CPU/memory via the Kubernetes Metrics API)
 - Helm v3 (if using Helm install)
 
-## Install with kubectl
+## Install
 
-Apply the all-in-one installer manifest directly:
+=== "Helm"
 
-```bash
-kubectl apply -f https://github.com/okedeji/hybernate/releases/latest/download/install.yaml
-```
+    Add the Helm repo and install the chart into its own namespace:
 
-This installs the CRDs, RBAC, and the operator Deployment into the `hybernate-system` namespace.
+    ```bash
+    helm repo add hybernate https://okedeji.github.io/hybernate/charts
+    helm repo update
 
-## Install with Helm
+    helm install hybernate hybernate/hybernate \
+      --namespace hybernate-system \
+      --create-namespace
+    ```
 
-```bash
-helm repo add hybernate https://okedeji.github.io/hybernate/charts
-helm repo update
+    ??? tip "Helm Values"
 
-helm install hybernate hybernate/hybernate \
-  --namespace hybernate-system \
-  --create-namespace
-```
+        | Value | Default | Description |
+        |-------|---------|-------------|
+        | `replicaCount` | `1` | Number of operator replicas |
+        | `image.repository` | `ghcr.io/okedeji/hybernate` | Container image |
+        | `image.tag` | `latest` | Image tag |
+        | `leaderElection.enabled` | `true` | Enable HA leader election |
+        | `metrics.secure` | `true` | Serve metrics over HTTPS |
+        | `resources.limits.cpu` | `500m` | CPU limit |
+        | `resources.limits.memory` | `128Mi` | Memory limit |
 
-### Helm Values
+=== "kubectl"
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `replicaCount` | `1` | Number of operator replicas |
-| `image.repository` | `ghcr.io/okedeji/hybernate` | Container image |
-| `image.tag` | `latest` | Image tag |
-| `leaderElection.enabled` | `true` | Enable HA leader election |
-| `metrics.secure` | `true` | Serve metrics over HTTPS |
-| `resources.limits.cpu` | `500m` | CPU limit |
-| `resources.limits.memory` | `128Mi` | Memory limit |
+    Apply the all-in-one installer manifest directly:
 
-## Install from Source
+    ```bash     
+    kubectl apply -f https://github.com/okedeji/hybernate/releases/latest/download/install.yaml
+    ```
 
-```bash
-git clone https://github.com/okedeji/hybernate.git
-cd hybernate
+    This installs the CRDs, RBAC, and the operator Deployment into the `hybernate-system` namespace.
 
-# Install CRDs
-make install
+=== "Source"
 
-# Build and deploy the operator
-make docker-build IMG=ghcr.io/okedeji/hybernate:dev
-make deploy IMG=ghcr.io/okedeji/hybernate:dev
-```
+    Clone the repo, install CRDs, then build and deploy the operator:
+
+    ```bash
+    git clone https://github.com/okedeji/hybernate.git
+    cd hybernate
+
+    # Install CRDs
+    make install
+
+    # Build and deploy the operator
+    make docker-build IMG=ghcr.io/okedeji/hybernate:dev
+    make deploy IMG=ghcr.io/okedeji/hybernate:dev
+    ```
 
 ## Verify Installation
 
@@ -81,7 +87,7 @@ make uninstall
 ```
 
 !!! warning
-    Deleting CRDs removes all ManagedWorkload, WorkloadPolicy, and HybernateReport resources from the cluster. Workloads that were paused (scaled to zero) will remain at zero replicas — you must manually restore them.
+    Deleting CRDs removes all ManagedWorkload, WorkloadPolicy, and HybernateReport resources from the cluster. Workloads that were paused (scaled to zero) will remain at zero replicas. You must manually restore them.
 
 ## Next Steps
 

@@ -6,16 +6,16 @@ Hybernate supports a GitOps workflow where you use the `kubectl hybernate export
 
 Auto-manage mode creates ManagedWorkloads directly in the cluster, which works well for getting started. But for production, you often want:
 
-- **Auditability** — Git history shows who enabled management for which workload and when
-- **Review process** — PR-based approval before managing a workload
-- **Reproducibility** — Manifests in Git can recreate the same state on any cluster
-- **Gradual rollout** — Review and customize individual ManagedWorkloads before applying
+- **Auditability**: Git history shows who enabled management for which workload and when
+- **Review process**: PR-based approval before managing a workload
+- **Reproducibility**: Manifests in Git can recreate the same state on any cluster
+- **Gradual rollout**: Review and customize individual ManagedWorkloads before applying
 
 ## Workflow
 
 ### 1. Deploy a WorkloadPolicy in Suggest Mode
 
-```yaml
+```yaml title="workloadpolicy.yaml" linenums="1"
 apiVersion: hybernate.io/v1alpha1
 kind: WorkloadPolicy
 metadata:
@@ -66,8 +66,7 @@ Each file is a complete ManagedWorkload manifest with the policy's defaults appl
 
 Open each manifest and adjust as needed:
 
-```yaml
-# k8s/hybernate/staging/idle-worker.yaml
+```yaml title="k8s/hybernate/staging/idle-worker.yaml" linenums="1"
 apiVersion: hybernate.io/v1alpha1
 kind: ManagedWorkload
 metadata:
@@ -121,6 +120,6 @@ kubectl hybernate export \
 ## Tips
 
 - **Start with `dryRun: true`** in exported manifests. Review events before enabling.
-- **Use `--classification`** to export in batches — idle workloads first, wasteful later.
-- **Customize per-workload** when defaults don't fit — different grace periods, different idle thresholds, adding Prometheus signals.
+- **Use `--classification`** to export in batches: idle workloads first, wasteful later.
+- **Customize per-workload** when defaults don't fit. Adjust grace periods, idle thresholds, or add Prometheus signals as needed.
 - **Keep the WorkloadPolicy in suggest mode** alongside GitOps. It continues scanning and reporting new discoveries without creating anything automatically.

@@ -31,15 +31,15 @@ These flags are passed to the operator binary (`manager`).
 
 | Endpoint | Port | Description |
 |----------|------|-------------|
-| `/healthz` | 8081 | Liveness probe — returns 200 when the operator is running |
-| `/readyz` | 8081 | Readiness probe — returns 200 when the operator is ready to reconcile |
+| `/healthz` | 8081 | Liveness probe. Returns 200 when the operator is running. |
+| `/readyz` | 8081 | Readiness probe. Returns 200 when the operator is ready to reconcile. |
 | `/metrics` | 8443 | Prometheus metrics (HTTPS by default) |
 
 ## Resource Requirements
 
 Recommended resource requests/limits for the operator:
 
-```yaml
+```yaml title="deployment.yaml" linenums="1"
 resources:
   requests:
     cpu: 100m

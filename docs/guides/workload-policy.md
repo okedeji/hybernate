@@ -4,7 +4,7 @@ WorkloadPolicy automates workload discovery and classification within a namespac
 
 ## Quick Start
 
-```yaml
+```yaml title="workloadpolicy.yaml" linenums="1"
 apiVersion: hybernate.io/v1alpha1
 kind: WorkloadPolicy
 metadata:
@@ -51,7 +51,7 @@ Use this mode to:
 
 Automatically creates ManagedWorkload CRs for idle and wasteful workloads using the policy's default settings. Active workloads are left alone.
 
-```yaml
+```yaml title="workloadpolicy.yaml" linenums="1"
 spec:
   mode: auto-manage
   dryRun: true  # Auto-created ManagedWorkloads start in dry-run mode
@@ -68,7 +68,7 @@ spec:
 | **Wasteful** | CPU utilization < `wastefulThreshold` (default: 30%) |
 | **Active** | Everything else |
 
-**Utilization** is calculated as `(usage / request) x 100%`. A workload requesting 1000m CPU but using 200m has 20% utilization — classified as Wasteful.
+**Utilization** is calculated as `(usage / request) x 100%`. A workload requesting 1000m CPU but using 200m has 20% utilization, which is classified as Wasteful.
 
 **Right-size savings** are estimated as the cost difference between current resources and what would be needed at `rightSizeTarget` utilization (default: 70%).
 
@@ -76,7 +76,7 @@ spec:
 
 WorkloadPolicy sets defaults for ManagedWorkloads it creates (in auto-manage mode) or exports (via kubectl plugin):
 
-```yaml
+```yaml title="workloadpolicy.yaml" linenums="1"
 spec:
   idlePolicy:
     action: pause
@@ -102,9 +102,6 @@ spec:
 
   prediction:
     confidence: 85
-
-  costTracking:
-    enabled: true
 
   conflictAction: warn
 ```

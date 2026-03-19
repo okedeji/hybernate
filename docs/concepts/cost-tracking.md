@@ -2,17 +2,9 @@
 
 Hybernate tracks per-workload resource consumption and calculates the cost savings from its actions (pause, scale, destroy). Cost data is available per-workload in the ManagedWorkload status and aggregated cluster-wide in the HybernateReport.
 
-## Enabling Cost Tracking
-
-Cost tracking is opt-in per workload:
-
-```yaml
-spec:
-  costTracking:
-    enabled: true
-```
-
 ## How Costs Are Calculated
+
+Cost tracking is always enabled. Every ManagedWorkload accumulates resource consumption and calculates savings automatically using AWS on-demand defaults.
 
 ### Resource Accumulation
 
@@ -40,10 +32,9 @@ Resource hours are converted to dollar costs using configurable rates:
 
 Override defaults to match your cloud provider's pricing:
 
-```yaml
+```yaml title="managedworkload.yaml" linenums="1"
 spec:
   costTracking:
-    enabled: true
     rates:
       cpuPerHour: "0.045"      # GKE Autopilot pricing
       memoryPerHour: "0.005"    # GKE Autopilot pricing
@@ -62,7 +53,7 @@ Savings are accumulated when Hybernate takes action:
 
 Cost data appears in `status.cost`:
 
-```yaml
+```yaml title="status.cost" linenums="1"
 status:
   cost:
     currentMonthCPUHours: "720"
@@ -88,17 +79,17 @@ The HybernateReport singleton aggregates cost data across all ManagedWorkloads:
 kubectl get hybernatereport cluster-report -o jsonpath='{.status}'
 ```
 
-This gives you total managed workload count, aggregate CPU/memory/storage hours, total estimated cost, and total savings — a single view of Hybernate's impact.
+This gives you total managed workload count, aggregate CPU/memory/storage hours, total estimated cost, and total savings, providing a single view of Hybernate's impact.
 
 ## Prometheus Metrics
 
 Cost data is also exposed as Prometheus metrics:
 
-- `hybernate_cost_estimated_dollars` — per workload
-- `hybernate_cost_savings_dollars` — per workload
-- `hybernate_cost_without_management_dollars` — per workload
-- `hybernate_cost_cpu_hours` — per workload
-- `hybernate_cost_memory_hours` — per workload
-- `hybernate_cost_storage_hours` — per workload
+- `hybernate_cost_estimated_dollars` (per workload)
+- `hybernate_cost_savings_dollars` (per workload)
+- `hybernate_cost_without_management_dollars` (per workload)
+- `hybernate_cost_cpu_hours` (per workload)
+- `hybernate_cost_memory_hours` (per workload)
+- `hybernate_cost_storage_hours` (per workload)
 
 See the [Metrics Reference](../reference/metrics.md) for the full list.

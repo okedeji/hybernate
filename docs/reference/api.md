@@ -32,8 +32,7 @@
 | `destroy.pvcRetentionWarning` | duration | No | | Warning before PVC cleanup |
 | `prediction` | `PredictionSpec` | Yes | | Forecast engine config |
 | `prediction.confidence` | int (0-100) | No | `85` | Confidence threshold |
-| `costTracking` | `CostTrackingSpec` | No | | Cost tracking config |
-| `costTracking.enabled` | bool | No | `false` | Enable cost tracking |
+| `costTracking` | `CostTrackingSpec` | No | | Custom cost rate overrides |
 | `costTracking.rates` | `CostRates` | No | AWS defaults | Custom cost rates |
 | `conflictAction` | `enforce` \| `warn` \| `defer` | No | `warn` | Drift handling |
 | `dryRun` | bool | No | `false` | Evaluate without acting |
@@ -121,7 +120,7 @@
 | `pause` | `PauseSpec` | No | See defaults | Default pause behavior |
 | `destroy` | `DestroySpec` | No | See defaults | Default destroy behavior |
 | `prediction` | `PredictionSpec` | No | `{confidence: 85}` | Default prediction config |
-| `costTracking` | `CostTrackingSpec` | No | `{enabled: true}` | Default cost tracking |
+| `costTracking` | `CostTrackingSpec` | No | AWS defaults | Custom cost rate overrides |
 | `conflictAction` | `ConflictAction` | No | `warn` | Default conflict handling |
 
 ### Status (`WorkloadPolicyStatus`)

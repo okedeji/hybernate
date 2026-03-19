@@ -2,21 +2,23 @@
 
 ## General Upgrade Process
 
-1. **Read the release notes** for the target version — check for breaking changes, CRD schema changes, or required migrations.
+1. **Read the release notes** for the target version. Check for breaking changes, CRD schema changes, or required migrations.
 
-2. **Update CRDs first** — CRD changes must be applied before upgrading the operator:
+2. **Update CRDs first.** CRD changes must be applied before upgrading the operator:
 
-    ```bash
-    kubectl apply -f https://github.com/okedeji/hybernate/releases/download/vX.Y.Z/install.yaml
-    ```
+    === "Helm"
 
-    Or if using Helm:
+        ```bash
+        helm repo update
+        helm upgrade hybernate hybernate/hybernate \
+          --namespace hybernate-system
+        ```
 
-    ```bash
-    helm repo update
-    helm upgrade hybernate hybernate/hybernate \
-      --namespace hybernate-system
-    ```
+    === "kubectl"
+
+        ```bash
+        kubectl apply -f https://github.com/okedeji/hybernate/releases/download/vX.Y.Z/install.yaml
+        ```
 
 3. **Verify the upgrade:**
 
@@ -50,13 +52,17 @@ The forecast engine state is serialized in each ManagedWorkload's status. On upg
 
 If something goes wrong:
 
-```bash
-# Helm
-helm rollback hybernate -n hybernate-system
+=== "Helm"
 
-# kubectl
-kubectl apply -f https://github.com/okedeji/hybernate/releases/download/vPREVIOUS/install.yaml
-```
+    ```bash
+    helm rollback hybernate -n hybernate-system
+    ```
+
+=== "kubectl"
+
+    ```bash
+    kubectl apply -f https://github.com/okedeji/hybernate/releases/download/vPREVIOUS/install.yaml
+    ```
 
 Paused workloads remain paused during rollback. The previous operator version resumes managing them.
 

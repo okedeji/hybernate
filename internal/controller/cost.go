@@ -31,9 +31,6 @@ import (
 const bytesPerGiB = 1024 * 1024 * 1024
 
 func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.ManagedWorkload) {
-	if workload.Spec.CostTracking == nil || !workload.Spec.CostTracking.Enabled {
-		return
-	}
 	if r.metrics == nil {
 		return
 	}

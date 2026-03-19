@@ -46,8 +46,8 @@ rate(hybernate_scale_guard_blocked_total[1h])
 
 Pre-built dashboards are available in `config/grafana/`:
 
-- **Hybernate Overview** — cluster-wide workload counts, cost savings, phase distribution
-- **Workload Detail** — per-workload prediction confidence, scaling history, idle detection state
+- **Hybernate Overview**: cluster-wide workload counts, cost savings, phase distribution
+- **Workload Detail**: per-workload prediction confidence, scaling history, idle detection state
 
 Import them via Grafana's dashboard import feature or deploy them as ConfigMaps if using the Grafana sidecar.
 
@@ -67,7 +67,7 @@ Sample alerting rules are in `config/prometheus/`:
 
 ### Example Alert Rule
 
-```yaml
+```yaml title="alerts.yaml" linenums="1"
 groups:
   - name: hybernate
     rules:
@@ -105,8 +105,8 @@ kubectl logs -n hybernate-system deployment/hybernate-controller-manager -f
 
 Key log entries to watch for:
 
-- `"pool scaled"` — scaling events with before/after counts
-- `"phase transition"` — lifecycle state changes
-- `"idle confirmed"` — idle detection results
-- `"regime change"` — prediction engine pattern shifts
-- `"drift detected"` — external replica changes
+- `"pool scaled"`: scaling events with before/after counts
+- `"phase transition"`: lifecycle state changes
+- `"idle confirmed"`: idle detection results
+- `"regime change"`: prediction engine pattern shifts
+- `"drift detected"`: external replica changes
