@@ -83,8 +83,8 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	docker pull curlimages/curl:latest
-	$(KIND) load docker-image curlimages/curl:latest --name $(KIND_CLUSTER)
+	docker pull curlimages/curl:8.7.1
+	$(KIND) load docker-image curlimages/curl:8.7.1 --name $(KIND_CLUSTER)
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
 
