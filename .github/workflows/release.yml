@@ -144,10 +144,18 @@ jobs:
         run: |
           helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}
 
+      - name: Extract changelog for release
+        id: changelog
+        run: |
+          TAG=${{ steps.version.outputs.tag }}
+          VERSION="${TAG#v}"
+          # Extract the section for this version from CHANGELOG.md
+          awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found" CHANGELOG.md > release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             dist/install.yaml
             hybernate-*.tgz
