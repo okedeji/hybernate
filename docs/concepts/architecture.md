@@ -54,6 +54,12 @@ Hybernate reads from three external systems:
 - **Metrics Server**: for pod CPU and memory usage (required)
 - **Prometheus**: for custom PromQL signal queries (optional)
 
+## Node-Level Cost Savings
+
+Hybernate operates at the workload layer. It does not manage nodes directly. When Hybernate pauses or scales down a workload, it frees CPU and memory on the node. A cluster autoscaler (Cluster Autoscaler, Karpenter, or a managed equivalent) is responsible for detecting underutilized nodes and removing them to realize actual infrastructure cost savings.
+
+See the [Cluster Autoscaler Guide](../guides/cluster-autoscaler.md) for recommended configurations.
+
 ## Leader Election
 
 When running multiple replicas for high availability, Hybernate uses controller-runtime's leader election (`--leader-elect`). Only the leader runs reconciliation loops; standby replicas take over if the leader fails.

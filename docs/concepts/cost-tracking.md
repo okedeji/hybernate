@@ -2,6 +2,9 @@
 
 Hybernate tracks per-workload resource consumption and calculates the cost savings from its actions (pause, scale, destroy). Cost data is available per-workload in the ManagedWorkload status and aggregated cluster-wide in the HybernateReport.
 
+!!! info "Cluster autoscaler required for node-level savings"
+    Hybernate operates at the workload layer: it removes pods, freeing up node capacity. For that freed capacity to translate into real cost savings, your cluster needs an autoscaler (Cluster Autoscaler, Karpenter, or a managed equivalent like GKE Autopilot) that removes underutilized nodes. See the [Cluster Autoscaler Guide](../guides/cluster-autoscaler.md) for recommended settings.
+
 ## How Costs Are Calculated
 
 Cost tracking is always enabled. Every ManagedWorkload accumulates resource consumption and calculates savings automatically using AWS on-demand defaults.

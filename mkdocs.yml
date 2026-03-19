@@ -75,6 +75,7 @@ nav:
       - Pause & Destroy: guides/pause-destroy.md
       - Prometheus Signals: guides/prometheus-signals.md
       - GitOps Export: guides/gitops-export.md
+      - Cluster Autoscaler: guides/cluster-autoscaler.md
       - Dry Run: guides/dry-run.md
   - Reference:
       - API: reference/api.md
