@@ -61,7 +61,7 @@ spec:
     name: my-api
   idlePolicy:
     action: auto
-    idleThreshold: 50
+    cpuIdleThreshold: 50
     gracePeriod: 10m
   prediction:
     confidence: 85

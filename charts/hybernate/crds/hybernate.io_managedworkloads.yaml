@@ -151,6 +151,12 @@ spec:
                       AutoResume re-enables the workload when idle detection clears
                       (i.e. signals no longer confirm idle).
                     type: boolean
+                  cpuIdleThreshold:
+                    default: 50
+                    description: |-
+                      CPUIdleThreshold is the CPU usage in millicores below which the workload
+                      is considered potentially idle (e.g. 50 means 50m).
+                    type: integer
                   gracePeriod:
                     description: |-
                       GracePeriod is how long signals must continuously confirm idle before
@@ -158,11 +164,13 @@ spec:
                       a false idle.
                     format: duration
                     type: string
-                  idleThreshold:
-                    default: 50
+                  memoryIdleThreshold:
+                    default: 104857600
                     description: |-
-                      IdleThreshold is the CPU usage in millicores below which the workload
-                      is considered potentially idle (e.g. 50 means 50m).
+                      MemoryIdleThreshold is the memory usage in bytes below which the
+                      workload is considered potentially idle. Both CPU and memory must be
+                      below their respective thresholds for idle detection to confirm.
+                    format: int64
                     type: integer
                   signals:
                     description: |-
@@ -448,11 +456,6 @@ spec:
                 description: Cost holds accumulated resource cost data for the current
                   month.
                 properties:
-                  costWithoutManagement:
-                    description: |-
-                      CostWithoutManagement is what this workload would have cost without
-                      Hybernate — the sum of estimated cost and savings.
-                    type: string
                   currentMonthCPUHours:
                     anyOf:
                     - type: integer
@@ -477,27 +480,58 @@ spec:
                       storage provisioned this month.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
+                  estimatedCostWithoutManagement:
+                    description: |-
+                      EstimatedCostWithoutManagement is what this workload would have cost
+                      without Hybernate — the sum of estimated cost and estimated savings.
+                    type: string
                   estimatedMonthlyCost:
                     description: |-
                       EstimatedMonthlyCost is the projected cost for the full month based
                       on current usage patterns. Set to "pending" on day 1 of the month.
                     type: string
+                  estimatedMonthlySavings:
+                    description: |-
+                      EstimatedMonthlySavings is the projected dollar amount saved by Hybernate
+                      actions (pause, scale-down, destroy) this month. These savings are only
+                      realized when freed resources lead to node removal by a cluster autoscaler.
+                    type: string
                   lastAccumulatedAt:
                     description: LastAccumulatedAt is when costs were last accumulated.
                     format: date-time
                     type: string
-                  monthlySavings:
+                  resourceReduction:
                     description: |-
-                      MonthlySavings is the dollar amount saved by Hybernate actions
-                      (pause, scale-down, destroy) this month.
-                    type: string
+                      ResourceReduction tracks the concrete resources freed by Hybernate actions.
+                      Unlike cost estimates, these values are always accurate regardless of
+                      whether a cluster autoscaler removes the underlying nodes.
+                    properties:
+                      cpuMillis:
+                        description: CPUMillis is the total CPU millicores freed by
+                          removing pods.
+                        format: int64
+                        type: integer
+                      memoryBytes:
+                        description: MemoryBytes is the total memory bytes freed by
+                          removing pods.
+                        format: int64
+                        type: integer
+                      replicas:
+                        description: Replicas is the number of pod replicas removed.
+                        format: int32
+                        type: integer
+                    required:
+                    - cpuMillis
+                    - memoryBytes
+                    - replicas
+                    type: object
                 required:
-                - costWithoutManagement
                 - currentMonthCPUHours
                 - currentMonthMemoryHours
                 - currentMonthStorageHours
+                - estimatedCostWithoutManagement
                 - estimatedMonthlyCost
-                - monthlySavings
+                - estimatedMonthlySavings
                 type: object
               destroy:
                 description: Destroy holds state after the workload is destroyed.

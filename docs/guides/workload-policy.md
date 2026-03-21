@@ -13,8 +13,8 @@ metadata:
 spec:
   mode: suggest
   scanInterval: "10m"
-  idleThreshold: 50
-  wastefulThreshold: 30
+  cpuIdleThreshold: 50
+  cpuWastefulThreshold: 30
   rightSizeTarget: 70
 ```
 
@@ -64,8 +64,8 @@ spec:
 
 | Classification | Condition |
 |---------------|-----------|
-| **Idle** | Aggregate CPU usage < `idleThreshold` (default: 50 millicores) |
-| **Wasteful** | CPU utilization < `wastefulThreshold` (default: 30%) |
+| **Idle** | CPU usage < `cpuIdleThreshold` AND memory usage < `memoryIdleThreshold` |
+| **Wasteful** | CPU utilization < `cpuWastefulThreshold` OR memory utilization < `memoryWastefulThreshold` |
 | **Active** | Everything else |
 
 **Utilization** is calculated as `(usage / request) x 100%`. A workload requesting 1000m CPU but using 200m has 20% utilization, which is classified as Wasteful.
@@ -80,7 +80,7 @@ WorkloadPolicy sets defaults for ManagedWorkloads it creates (in auto-manage mod
 spec:
   idlePolicy:
     action: pause
-    idleThreshold: 50
+    cpuIdleThreshold: 50
     gracePeriod: "5m"
     autoResume: true
 
@@ -132,7 +132,7 @@ Each entry includes:
 - `cpuUsageMillis`, `cpuRequestMillis`, `utilizationPercent`
 - `memoryUsageBytes`, `memoryRequestBytes`
 - `storageBytes`
-- `estimatedMonthlyCost`, `estimatedSavings`
+- `estimatedMonthlyCost`, `estimatedPotentialSavings`
 - `managed` (already has a ManagedWorkload)
 - `ignored` (has the `hybernate.io/ignore` label)
 
@@ -145,8 +145,10 @@ Results are capped at 500 entries, sorted by estimated savings descending.
 | `targetKinds` | list | `[Deployment, StatefulSet]` | Which kinds to scan |
 | `mode` | `suggest` or `auto-manage` | `suggest` | Reporting only or auto-create ManagedWorkloads |
 | `scanInterval` | duration | `10m` | How often to re-scan |
-| `idleThreshold` | int (millicores) | `50` | CPU below this = Idle |
-| `wastefulThreshold` | int (percent) | `30` | Utilization below this = Wasteful |
+| `cpuIdleThreshold` | int (millicores) | `50` | CPU below this = Idle |
+| `memoryIdleThreshold` | int64 (bytes) | `104857600` (100Mi) | Memory below this = Idle |
+| `cpuWastefulThreshold` | int (percent) | `30` | CPU utilization below this = Wasteful |
+| `memoryWastefulThreshold` | int (percent) | `30` | Memory utilization below this = Wasteful |
 | `rightSizeTarget` | int (percent) | `70` | Target utilization for savings estimates |
 | `dryRun` | bool | `true` | Default dryRun for auto-created ManagedWorkloads |
 | `rates` | CostRates | AWS defaults | Cost rates for savings estimates |

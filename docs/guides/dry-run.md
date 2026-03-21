@@ -17,7 +17,7 @@ spec:
     kind: Deployment
     name: my-api
   idlePolicy:
-    idleThreshold: 50
+    cpuIdleThreshold: 50
     gracePeriod: "5m"
   prediction:
     confidence: 85

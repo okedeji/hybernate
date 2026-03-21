@@ -33,9 +33,11 @@ func TestAllMetricsRegistered(t *testing.T) {
 		"hybernate_reconcile_errors_total",
 		"hybernate_lifecycle_transitions_total",
 		"hybernate_lifecycle_action_duration_seconds",
-		"hybernate_cost_savings_dollars",
+		"hybernate_cost_estimated_savings_dollars",
 		"hybernate_cost_estimated_dollars",
-		"hybernate_cost_without_management_dollars",
+		"hybernate_cost_estimated_without_management_dollars",
+		"hybernate_resource_reduction_cpu_millicores",
+		"hybernate_resource_reduction_memory_bytes",
 
 		// Tier 2
 		"hybernate_prediction_confidence_percent",

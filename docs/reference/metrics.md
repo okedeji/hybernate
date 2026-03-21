@@ -15,9 +15,11 @@ These metrics provide a high-level view of Hybernate's impact.
 | `hybernate_reconcile_errors_total` | Counter | `controller` | Reconciliation errors by controller |
 | `hybernate_lifecycle_transitions_total` | Counter | `from`, `to` | Phase transitions |
 | `hybernate_lifecycle_action_duration_seconds` | Histogram | `action` | Duration of lifecycle actions (pause, resume, destroy, scale) |
-| `hybernate_cost_savings_dollars` | Gauge | | Total monthly savings |
+| `hybernate_cost_estimated_savings_dollars` | Gauge | | Estimated monthly savings (requires autoscaler for realization) |
 | `hybernate_cost_estimated_dollars` | Gauge | | Total estimated monthly cost |
-| `hybernate_cost_without_management_dollars` | Gauge | | Cost without Hybernate |
+| `hybernate_cost_estimated_without_management_dollars` | Gauge | | Estimated cost without Hybernate |
+| `hybernate_resource_reduction_cpu_millicores` | Gauge | | Total CPU millicores freed by Hybernate |
+| `hybernate_resource_reduction_memory_bytes` | Gauge | | Total memory bytes freed by Hybernate |
 
 ## Tier 2: Operational Insight
 
@@ -80,8 +82,8 @@ The `hybernate_prediction_phase` gauge uses numeric values:
 # Total workloads by phase
 hybernate_workloads_total
 
-# Monthly savings trend
-hybernate_cost_savings_dollars
+# Estimated monthly savings trend
+hybernate_cost_estimated_savings_dollars
 
 # Workloads with low prediction confidence
 hybernate_prediction_confidence_percent{season="daily"} < 70

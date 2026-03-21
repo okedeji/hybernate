@@ -80,7 +80,7 @@ func (s *Scanner) Scan(ctx context.Context, namespace string, kinds []v1alpha1.T
 	}
 
 	sort.Slice(all, func(i, j int) bool {
-		return all[i].EstimatedSavings > all[j].EstimatedSavings
+		return all[i].EstimatedPotentialSavings > all[j].EstimatedPotentialSavings
 	})
 	if len(all) > maxDiscovered {
 		all = all[:maxDiscovered]
@@ -231,6 +231,6 @@ func buildSummary(discovered []v1alpha1.DiscoveredWorkload, totalCost, totalSavi
 		}
 	}
 	s.EstimatedMonthlyCost = cost.FormatDollars(totalCost)
-	s.EstimatedMonthlySavings = cost.FormatDollars(totalSavings)
+	s.EstimatedPotentialSavings = cost.FormatDollars(totalSavings)
 	return s
 }

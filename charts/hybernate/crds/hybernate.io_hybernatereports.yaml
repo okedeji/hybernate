@@ -21,7 +21,7 @@ spec:
     - jsonPath: .status.estimatedMonthlyCost
       name: Cost
       type: string
-    - jsonPath: .status.totalMonthlySavings
+    - jsonPath: .status.estimatedTotalSavings
       name: Savings
       type: string
     name: v1alpha1
@@ -54,11 +54,13 @@ spec:
             properties:
               activeWorkloads:
                 type: integer
-              costWithoutManagement:
-                type: string
               destroyedWorkloads:
                 type: integer
+              estimatedCostWithoutManagement:
+                type: string
               estimatedMonthlyCost:
+                type: string
+              estimatedTotalSavings:
                 type: string
               lastUpdated:
                 format: date-time
@@ -79,8 +81,29 @@ spec:
                 - type: string
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
-              totalMonthlySavings:
-                type: string
+              totalResourceReduction:
+                description: TotalResourceReduction aggregates resources freed across
+                  all managed workloads.
+                properties:
+                  cpuMillis:
+                    description: CPUMillis is the total CPU millicores freed by removing
+                      pods.
+                    format: int64
+                    type: integer
+                  memoryBytes:
+                    description: MemoryBytes is the total memory bytes freed by removing
+                      pods.
+                    format: int64
+                    type: integer
+                  replicas:
+                    description: Replicas is the number of pod replicas removed.
+                    format: int32
+                    type: integer
+                required:
+                - cpuMillis
+                - memoryBytes
+                - replicas
+                type: object
               totalStorageHours:
                 anyOf:
                 - type: integer
@@ -89,14 +112,14 @@ spec:
                 x-kubernetes-int-or-string: true
             required:
             - activeWorkloads
-            - costWithoutManagement
             - destroyedWorkloads
+            - estimatedCostWithoutManagement
             - estimatedMonthlyCost
+            - estimatedTotalSavings
             - pausedWorkloads
             - totalCPUHours
             - totalManagedWorkloads
             - totalMemoryHours
-            - totalMonthlySavings
             - totalStorageHours
             type: object
         required:

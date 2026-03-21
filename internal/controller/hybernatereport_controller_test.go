@@ -95,18 +95,18 @@ func TestReportReconciler_CountsByPhase(t *testing.T) {
 func TestReportReconciler_AggregatesCosts(t *testing.T) {
 	r := reportReconciler(t,
 		managedWorkload("api-1", v1alpha1.PhaseRunning, &v1alpha1.CostStatus{
-			CurrentMonthCPUHours:     *resource.NewMilliQuantity(10000, resource.DecimalSI),
-			CurrentMonthMemoryHours:  *resource.NewMilliQuantity(20000, resource.DecimalSI),
-			CurrentMonthStorageHours: *resource.NewMilliQuantity(5000, resource.DecimalSI),
-			MonthlySavings:           "$10.00",
-			CostWithoutManagement:    "$50.00",
+			CurrentMonthCPUHours:           *resource.NewMilliQuantity(10000, resource.DecimalSI),
+			CurrentMonthMemoryHours:        *resource.NewMilliQuantity(20000, resource.DecimalSI),
+			CurrentMonthStorageHours:       *resource.NewMilliQuantity(5000, resource.DecimalSI),
+			EstimatedMonthlySavings:        "$10.00",
+			EstimatedCostWithoutManagement: "$50.00",
 		}),
 		managedWorkload("api-2", v1alpha1.PhasePaused, &v1alpha1.CostStatus{
-			CurrentMonthCPUHours:     *resource.NewMilliQuantity(3000, resource.DecimalSI),
-			CurrentMonthMemoryHours:  *resource.NewMilliQuantity(8000, resource.DecimalSI),
-			CurrentMonthStorageHours: *resource.NewMilliQuantity(15000, resource.DecimalSI),
-			MonthlySavings:           "$25.00",
-			CostWithoutManagement:    "$30.00",
+			CurrentMonthCPUHours:           *resource.NewMilliQuantity(3000, resource.DecimalSI),
+			CurrentMonthMemoryHours:        *resource.NewMilliQuantity(8000, resource.DecimalSI),
+			CurrentMonthStorageHours:       *resource.NewMilliQuantity(15000, resource.DecimalSI),
+			EstimatedMonthlySavings:        "$25.00",
+			EstimatedCostWithoutManagement: "$30.00",
 		}),
 	)
 
@@ -116,13 +116,51 @@ func TestReportReconciler_AggregatesCosts(t *testing.T) {
 	var report v1alpha1.HybernateReport
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: reportSingletonName}, &report))
 
-	assert.Equal(t, "$35.00", report.Status.TotalMonthlySavings)
-	assert.Equal(t, "$80.00", report.Status.CostWithoutManagement)
+	assert.Equal(t, "$35.00", report.Status.EstimatedTotalSavings)
+	assert.Equal(t, "$80.00", report.Status.EstimatedCostWithoutManagement)
 	assert.Equal(t, "$45.00", report.Status.EstimatedMonthlyCost)
 	assert.InDelta(t, 13.0, report.Status.TotalCPUHours.AsApproximateFloat64(), 0.01)
 	assert.InDelta(t, 28.0, report.Status.TotalMemoryHours.AsApproximateFloat64(), 0.01)
 	assert.InDelta(t, 20.0, report.Status.TotalStorageHours.AsApproximateFloat64(), 0.01)
 	assert.NotNil(t, report.Status.LastUpdated)
+}
+
+func TestReportReconciler_AggregatesResourceReduction(t *testing.T) {
+	r := reportReconciler(t,
+		managedWorkload("api-1", v1alpha1.PhasePaused, &v1alpha1.CostStatus{
+			EstimatedMonthlySavings:        "$10.00",
+			EstimatedCostWithoutManagement: "$50.00",
+			ResourceReduction: &v1alpha1.ResourceReduction{
+				CPUMillis:   2000,
+				MemoryBytes: 4 * 1024 * 1024 * 1024,
+				Replicas:    2,
+			},
+		}),
+		managedWorkload("api-2", v1alpha1.PhasePaused, &v1alpha1.CostStatus{
+			EstimatedMonthlySavings:        "$5.00",
+			EstimatedCostWithoutManagement: "$20.00",
+			ResourceReduction: &v1alpha1.ResourceReduction{
+				CPUMillis:   1000,
+				MemoryBytes: 2 * 1024 * 1024 * 1024,
+				Replicas:    1,
+			},
+		}),
+		managedWorkload("api-3", v1alpha1.PhaseRunning, &v1alpha1.CostStatus{
+			EstimatedMonthlySavings:        "$0.00",
+			EstimatedCostWithoutManagement: "$30.00",
+		}),
+	)
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	var report v1alpha1.HybernateReport
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: reportSingletonName}, &report))
+
+	require.NotNil(t, report.Status.TotalResourceReduction)
+	assert.Equal(t, int64(3000), report.Status.TotalResourceReduction.CPUMillis)
+	assert.Equal(t, int64(6*1024*1024*1024), report.Status.TotalResourceReduction.MemoryBytes)
+	assert.Equal(t, int32(3), report.Status.TotalResourceReduction.Replicas)
 }
 
 func TestReportReconciler_EmptyCluster(t *testing.T) {
@@ -144,8 +182,8 @@ func TestReportReconciler_UpdatesExistingReport(t *testing.T) {
 	r := reportReconciler(t,
 		existing,
 		managedWorkload("api", v1alpha1.PhaseRunning, &v1alpha1.CostStatus{
-			MonthlySavings:        "$5.00",
-			CostWithoutManagement: "$20.00",
+			EstimatedMonthlySavings:        "$5.00",
+			EstimatedCostWithoutManagement: "$20.00",
 		}),
 	)
 
@@ -155,5 +193,5 @@ func TestReportReconciler_UpdatesExistingReport(t *testing.T) {
 	var report v1alpha1.HybernateReport
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: reportSingletonName}, &report))
 	assert.Equal(t, 1, report.Status.TotalManagedWorkloads)
-	assert.Equal(t, "$5.00", report.Status.TotalMonthlySavings)
+	assert.Equal(t, "$5.00", report.Status.EstimatedTotalSavings)
 }

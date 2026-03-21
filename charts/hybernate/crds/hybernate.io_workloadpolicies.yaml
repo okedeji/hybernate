@@ -35,7 +35,7 @@ spec:
     - jsonPath: .status.summary.estimatedMonthlyCost
       name: Projected Cost
       type: string
-    - jsonPath: .status.summary.estimatedMonthlySavings
+    - jsonPath: .status.summary.estimatedPotentialSavings
       name: Projected Savings
       type: string
     name: v1alpha1
@@ -110,6 +110,18 @@ spec:
                         x-kubernetes-int-or-string: true
                     type: object
                 type: object
+              cpuIdleThreshold:
+                default: 50
+                description: CPU millis below which a workload is classified as Idle.
+                minimum: 0
+                type: integer
+              cpuWastefulThreshold:
+                default: 30
+                description: CPU utilization percentage below which a non-idle workload
+                  is Wasteful.
+                maximum: 100
+                minimum: 0
+                type: integer
               destroy:
                 default:
                   pvcRetention: 168h0m0s
@@ -139,8 +151,9 @@ spec:
                 default:
                   action: pause
                   autoResume: true
+                  cpuIdleThreshold: 50
                   gracePeriod: 5m0s
-                  idleThreshold: 50
+                  memoryIdleThreshold: 104857600
                 description: Default idle policy copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
@@ -159,6 +172,12 @@ spec:
                       AutoResume re-enables the workload when idle detection clears
                       (i.e. signals no longer confirm idle).
                     type: boolean
+                  cpuIdleThreshold:
+                    default: 50
+                    description: |-
+                      CPUIdleThreshold is the CPU usage in millicores below which the workload
+                      is considered potentially idle (e.g. 50 means 50m).
+                    type: integer
                   gracePeriod:
                     description: |-
                       GracePeriod is how long signals must continuously confirm idle before
@@ -166,11 +185,13 @@ spec:
                       a false idle.
                     format: duration
                     type: string
-                  idleThreshold:
-                    default: 50
+                  memoryIdleThreshold:
+                    default: 104857600
                     description: |-
-                      IdleThreshold is the CPU usage in millicores below which the workload
-                      is considered potentially idle (e.g. 50 means 50m).
+                      MemoryIdleThreshold is the memory usage in bytes below which the
+                      workload is considered potentially idle. Both CPU and memory must be
+                      below their respective thresholds for idle detection to confirm.
+                    format: int64
                     type: integer
                   signals:
                     description: |-
@@ -203,9 +224,20 @@ spec:
                 required:
                 - action
                 type: object
-              idleThreshold:
-                default: 50
-                description: CPU millis below which a workload is classified as Idle.
+              memoryIdleThreshold:
+                default: 104857600
+                description: |-
+                  Memory usage in bytes below which a workload is classified as Idle.
+                  Both CPU and memory must be below their respective thresholds.
+                format: int64
+                type: integer
+              memoryWastefulThreshold:
+                default: 30
+                description: |-
+                  Memory utilization percentage below which a non-idle workload is Wasteful.
+                  A workload is Wasteful if either CPU or memory utilization is below
+                  its respective threshold.
+                maximum: 100
                 minimum: 0
                 type: integer
               mode:
@@ -436,13 +468,6 @@ spec:
                   - StatefulSet
                   type: string
                 type: array
-              wastefulThreshold:
-                default: 30
-                description: CPU utilization percentage below which a non-idle workload
-                  is Wasteful.
-                maximum: 100
-                minimum: 0
-                type: integer
             type: object
           status:
             description: WorkloadPolicyStatus reports the results of the most recent
@@ -527,7 +552,7 @@ spec:
                       type: integer
                     estimatedMonthlyCost:
                       type: string
-                    estimatedSavings:
+                    estimatedPotentialSavings:
                       type: string
                     ignored:
                       type: boolean
@@ -543,6 +568,8 @@ spec:
                       type: integer
                     memoryUsageBytes:
                       format: int64
+                      type: integer
+                    memoryUtilizationPercent:
                       type: integer
                     name:
                       type: string
@@ -576,7 +603,7 @@ spec:
                     type: integer
                   estimatedMonthlyCost:
                     type: string
-                  estimatedMonthlySavings:
+                  estimatedPotentialSavings:
                     type: string
                   idle:
                     type: integer

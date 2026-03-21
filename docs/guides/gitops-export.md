@@ -23,8 +23,8 @@ metadata:
   namespace: staging
 spec:
   mode: suggest
-  idleThreshold: 50
-  wastefulThreshold: 30
+  cpuIdleThreshold: 50
+  cpuWastefulThreshold: 30
 ```
 
 ```bash
@@ -82,7 +82,7 @@ spec:
     name: idle-worker
   idlePolicy:
     action: pause
-    idleThreshold: 50
+    cpuIdleThreshold: 50
     gracePeriod: "5m"
     autoResume: true
   # ... other defaults from the policy

@@ -80,7 +80,7 @@ func TestAccumulateCost_RunningAccumulatesUsage(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 
@@ -111,7 +111,7 @@ func TestAccumulateCost_PausedAccumulatesStorageAndSavings(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Pause = &v1alpha1.PauseStatus{
@@ -133,7 +133,7 @@ func TestAccumulateCost_PausedAccumulatesStorageAndSavings(t *testing.T) {
 	assert.InDelta(t, 0.0, cpuHours, 0.001, "paused workload has no compute")
 	assert.InDelta(t, 20.0, storageHours, 0.01, "PVCs still cost while paused")
 
-	savings := parseDollarAmount(w.Status.Cost.MonthlySavings)
+	savings := parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
 	assert.Greater(t, savings, 0.0, "should show savings from paused compute")
 }
 
@@ -147,7 +147,7 @@ func TestAccumulateCost_DestroyedWithRetainedPVCs(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Destroy = &v1alpha1.DestroyStatus{
@@ -166,7 +166,7 @@ func TestAccumulateCost_DestroyedWithRetainedPVCs(t *testing.T) {
 	storageHours := w.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64()
 	assert.InDelta(t, 50.0, storageHours, 0.01, "retained PVCs still cost")
 
-	savings := parseDollarAmount(w.Status.Cost.MonthlySavings)
+	savings := parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
 	assert.Greater(t, savings, 0.0, "compute savings from destroyed workload")
 }
 
@@ -180,7 +180,7 @@ func TestAccumulateCost_DestroyedPVCsCleanedUp(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Destroy = &v1alpha1.DestroyStatus{
@@ -199,7 +199,7 @@ func TestAccumulateCost_DestroyedPVCsCleanedUp(t *testing.T) {
 	storageHours := w.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64()
 	assert.InDelta(t, 0.0, storageHours, 0.001, "PVCs cleaned up, no storage cost")
 
-	savings := parseDollarAmount(w.Status.Cost.MonthlySavings)
+	savings := parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
 	assert.Greater(t, savings, 0.0, "savings include storage after cleanup")
 }
 
@@ -212,7 +212,7 @@ func TestAccumulateCost_MonthlyReset(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(50000, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(30000, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(10000, resource.DecimalSI),
-		MonthlySavings:           "$42.00",
+		EstimatedMonthlySavings:  "$42.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 
@@ -234,7 +234,7 @@ func TestAccumulateCost_EstimatedCostPendingDay1(t *testing.T) {
 	assert.Equal(t, "pending", w.Status.Cost.EstimatedMonthlyCost)
 }
 
-func TestAccumulateCost_CostWithoutManagement(t *testing.T) {
+func TestAccumulateCost_EstimatedCostWithoutManagement(t *testing.T) {
 	lastAccumulated := fixedTime.Add(-1 * time.Hour)
 	lastMeta := metav1.NewTime(lastAccumulated)
 
@@ -243,7 +243,7 @@ func TestAccumulateCost_CostWithoutManagement(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Pause = &v1alpha1.PauseStatus{
@@ -259,7 +259,7 @@ func TestAccumulateCost_CostWithoutManagement(t *testing.T) {
 	r := costReconciler(fixedTime, &stubMetrics{})
 	r.accumulateCost(context.Background(), w)
 
-	costWithout := parseDollarAmount(w.Status.Cost.CostWithoutManagement)
+	costWithout := parseDollarAmount(w.Status.Cost.EstimatedCostWithoutManagement)
 	assert.Greater(t, costWithout, 0.0, "should show what it would cost unmanaged")
 }
 
@@ -276,7 +276,7 @@ func TestAccumulateCost_CustomRates(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 
@@ -284,7 +284,7 @@ func TestAccumulateCost_CustomRates(t *testing.T) {
 	r := costReconciler(fixedTime, m)
 	r.accumulateCost(context.Background(), w)
 
-	costWithout := parseDollarAmount(w.Status.Cost.CostWithoutManagement)
+	costWithout := parseDollarAmount(w.Status.Cost.EstimatedCostWithoutManagement)
 	assert.Greater(t, costWithout, 0.0)
 
 	// With default rate ($0.031/cpu-hour) 1 core × 1h = $0.031
@@ -295,13 +295,13 @@ func TestAccumulateCost_CustomRates(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		MonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 
 	r2 := costReconciler(fixedTime, m)
 	r2.accumulateCost(context.Background(), wDefault)
 
-	defaultCost := parseDollarAmount(wDefault.Status.Cost.CostWithoutManagement)
+	defaultCost := parseDollarAmount(wDefault.Status.Cost.EstimatedCostWithoutManagement)
 	assert.Greater(t, costWithout, defaultCost, "custom rate ($0.10) should cost more than default ($0.031)")
 }

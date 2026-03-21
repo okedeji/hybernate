@@ -60,9 +60,9 @@ var (
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 10),
 	}, []string{"action"})
 
-	CostSavingsDollars = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_savings_dollars",
-		Help: "Total monthly savings across all managed workloads.",
+	CostEstimatedSavingsDollars = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_cost_estimated_savings_dollars",
+		Help: "Total estimated monthly savings across all managed workloads. Only realized when freed resources lead to node removal.",
 	})
 
 	CostEstimatedDollars = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -70,9 +70,19 @@ var (
 		Help: "Total estimated monthly cost across all managed workloads.",
 	})
 
-	CostWithoutManagementDollars = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_without_management_dollars",
-		Help: "What all managed workloads would cost without Hybernate.",
+	CostEstimatedWithoutManagementDollars = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_cost_estimated_without_management_dollars",
+		Help: "Estimated cost of all managed workloads without Hybernate.",
+	})
+
+	ResourceReductionCPUMillis = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_resource_reduction_cpu_millicores",
+		Help: "Total CPU millicores freed by Hybernate actions across all managed workloads.",
+	})
+
+	ResourceReductionMemoryBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_resource_reduction_memory_bytes",
+		Help: "Total memory bytes freed by Hybernate actions across all managed workloads.",
 	})
 )
 
@@ -219,9 +229,11 @@ func init() {
 		ReconcileErrors,
 		LifecycleTransitions,
 		LifecycleActionDuration,
-		CostSavingsDollars,
+		CostEstimatedSavingsDollars,
 		CostEstimatedDollars,
-		CostWithoutManagementDollars,
+		CostEstimatedWithoutManagementDollars,
+		ResourceReductionCPUMillis,
+		ResourceReductionMemoryBytes,
 
 		// Tier 2
 		PredictionConfidence,

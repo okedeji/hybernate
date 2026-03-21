@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-03-21
+
+### Added
+
+- Memory-aware idle detection: workloads must have both CPU and memory below thresholds to be classified as idle
+- `memoryIdleThreshold` field on ManagedWorkload and WorkloadPolicy CRDs (default 100Mi)
+- `memoryWastefulThreshold` field on WorkloadPolicy CRD (default 30%)
+- `ResourceReduction` in CostStatus tracking concrete CPU, memory, and replicas freed by Hybernate actions
+- `TotalResourceReduction` in HybernateReport for cluster-wide resource reduction aggregation
+- Prometheus metrics: `hybernate_resource_reduction_cpu_millicores`, `hybernate_resource_reduction_memory_bytes`
+
+### Changed
+
+- Renamed `idleThreshold` to `cpuIdleThreshold` and `wastefulThreshold` to `cpuWastefulThreshold` for clarity
+- Renamed `monthlySavings` to `estimatedMonthlySavings` to reflect that savings depend on cluster autoscaler node removal
+- Renamed `costWithoutManagement` to `estimatedCostWithoutManagement`
+- Renamed `totalMonthlySavings` to `estimatedTotalSavings` in HybernateReport
+- Renamed `estimatedSavings` to `estimatedPotentialSavings` in WorkloadPolicy discovery
+- Prometheus metric `hybernate_cost_savings_dollars` renamed to `hybernate_cost_estimated_savings_dollars`
+- Prometheus metric `hybernate_cost_without_management_dollars` renamed to `hybernate_cost_estimated_without_management_dollars`
+- Wasteful classification now considers memory utilization (CPU OR memory below threshold)
+
 ## [0.1.1] - 2026-03-19
 
 ### Added
@@ -56,6 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cosign image signing and SBOM generation
 - Release workflow with cross-platform builds and Helm chart publishing
 
-[Unreleased]: https://github.com/okedeji/hybernate/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/okedeji/hybernate/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/okedeji/hybernate/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/okedeji/hybernate/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/okedeji/hybernate/releases/tag/v0.1.0

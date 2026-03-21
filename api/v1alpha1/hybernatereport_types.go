@@ -26,7 +26,7 @@ import (
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Managed",type=integer,JSONPath=`.status.totalManagedWorkloads`
 // +kubebuilder:printcolumn:name="Cost",type=string,JSONPath=`.status.estimatedMonthlyCost`
-// +kubebuilder:printcolumn:name="Savings",type=string,JSONPath=`.status.totalMonthlySavings`
+// +kubebuilder:printcolumn:name="Savings",type=string,JSONPath=`.status.estimatedTotalSavings`
 
 // HybernateReport is a cluster-scoped singleton that aggregates cost and
 // lifecycle data across all ManagedWorkloads.
@@ -62,9 +62,13 @@ type HybernateReportStatus struct {
 	TotalMemoryHours  resource.Quantity `json:"totalMemoryHours"`
 	TotalStorageHours resource.Quantity `json:"totalStorageHours"`
 
-	EstimatedMonthlyCost  string `json:"estimatedMonthlyCost"`
-	TotalMonthlySavings   string `json:"totalMonthlySavings"`
-	CostWithoutManagement string `json:"costWithoutManagement"`
+	EstimatedMonthlyCost           string `json:"estimatedMonthlyCost"`
+	EstimatedTotalSavings          string `json:"estimatedTotalSavings"`
+	EstimatedCostWithoutManagement string `json:"estimatedCostWithoutManagement"`
+
+	// TotalResourceReduction aggregates resources freed across all managed workloads.
+	// +optional
+	TotalResourceReduction *ResourceReduction `json:"totalResourceReduction,omitempty"`
 
 	// +optional
 	LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`

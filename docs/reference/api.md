@@ -14,7 +14,8 @@
 | `desiredState` | `Running` \| `Paused` \| `Destroyed` | No | | Manual lifecycle override |
 | `idlePolicy` | `IdlePolicySpec` | No | | Idle detection configuration |
 | `idlePolicy.action` | `auto` \| `pause` \| `destroy` | No | `auto` | Action on idle confirmation |
-| `idlePolicy.idleThreshold` | int | No | `50` | CPU millicores threshold |
+| `idlePolicy.cpuIdleThreshold` | int | No | `50` | CPU millicores threshold |
+| `idlePolicy.memoryIdleThreshold` | int64 | No | `104857600` | Memory bytes threshold (100Mi) |
 | `idlePolicy.gracePeriod` | duration | No | | Continuous idle confirmation period |
 | `idlePolicy.autoResume` | bool | No | `false` | Resume when signals clear |
 | `idlePolicy.signals[]` | `ProbeSpec` | No | | Additional signal checks |
@@ -88,8 +89,12 @@
 | `cost.currentMonthMemoryHours` | quantity | GiB-hours this month |
 | `cost.currentMonthStorageHours` | quantity | GiB-hours storage this month |
 | `cost.estimatedMonthlyCost` | string | Projected monthly cost |
-| `cost.monthlySavings` | string | Savings this month |
-| `cost.costWithoutManagement` | string | Cost without Hybernate |
+| `cost.estimatedMonthlySavings` | string | Estimated savings this month (requires autoscaler for realization) |
+| `cost.estimatedCostWithoutManagement` | string | Estimated cost without Hybernate |
+| `cost.resourceReduction` | `ResourceReduction` | Concrete resources freed by Hybernate actions |
+| `cost.resourceReduction.cpuMillis` | int64 | CPU millicores freed |
+| `cost.resourceReduction.memoryBytes` | int64 | Memory bytes freed |
+| `cost.resourceReduction.replicas` | int32 | Pod replicas removed |
 | `lastActedAt` | time | Last workload mutation |
 | `lastTransitionTime` | time | Last phase change |
 
@@ -110,8 +115,10 @@
 | `targetKinds[]` | `TargetKind` | No | `[Deployment, StatefulSet]` | Kinds to scan |
 | `mode` | `suggest` \| `auto-manage` | No | `suggest` | Operating mode |
 | `scanInterval` | duration | No | `10m` | Re-scan frequency |
-| `idleThreshold` | int | No | `50` | CPU millis for Idle classification |
-| `wastefulThreshold` | int (0-100) | No | `30` | Utilization % for Wasteful |
+| `cpuIdleThreshold` | int | No | `50` | CPU millis for Idle classification |
+| `memoryIdleThreshold` | int64 | No | `104857600` | Memory bytes for Idle classification (100Mi) |
+| `cpuWastefulThreshold` | int (0-100) | No | `30` | CPU utilization % for Wasteful |
+| `memoryWastefulThreshold` | int (0-100) | No | `30` | Memory utilization % for Wasteful |
 | `rightSizeTarget` | int (1-100) | No | `70` | Target utilization for savings |
 | `dryRun` | bool | No | `true` | Default for auto-created CRs |
 | `rates` | `CostRates` | No | AWS defaults | Cost rates |
@@ -133,7 +140,7 @@
 | `summary.wasteful` | int | Wasteful workloads |
 | `summary.managed` | int | Already-managed workloads |
 | `summary.estimatedMonthlyCost` | string | Total estimated cost |
-| `summary.estimatedMonthlySavings` | string | Total potential savings |
+| `summary.estimatedPotentialSavings` | string | Total potential savings |
 | `lastScanAt` | time | Last scan timestamp |
 | `conditions[]` | `Condition` | Standard K8s conditions |
 | `discovered[]` | `DiscoveredWorkload` | Per-workload results (max 500) |
@@ -157,6 +164,7 @@ A singleton resource that aggregates data across all ManagedWorkloads. The opera
 | `totalCPUHours` | quantity | Aggregate CPU hours |
 | `totalMemoryHours` | quantity | Aggregate memory hours |
 | `totalStorageHours` | quantity | Aggregate storage hours |
-| `estimatedCost` | string | Total estimated cost |
-| `totalSavings` | string | Total savings |
-| `costWithoutManagement` | string | Total cost without Hybernate |
+| `estimatedMonthlyCost` | string | Total estimated cost |
+| `estimatedTotalSavings` | string | Estimated total savings (requires autoscaler for realization) |
+| `estimatedCostWithoutManagement` | string | Estimated total cost without Hybernate |
+| `totalResourceReduction` | `ResourceReduction` | Aggregate resources freed across all workloads |

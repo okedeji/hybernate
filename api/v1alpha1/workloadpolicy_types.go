@@ -56,14 +56,29 @@ type WorkloadPolicySpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=50
 	// +optional
-	IdleThreshold int `json:"idleThreshold,omitempty"`
+	CPUIdleThreshold int `json:"cpuIdleThreshold,omitempty"`
+
+	// Memory usage in bytes below which a workload is classified as Idle.
+	// Both CPU and memory must be below their respective thresholds.
+	// +kubebuilder:default=104857600
+	// +optional
+	MemoryIdleThreshold int64 `json:"memoryIdleThreshold,omitempty"`
 
 	// CPU utilization percentage below which a non-idle workload is Wasteful.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=30
 	// +optional
-	WastefulThreshold int `json:"wastefulThreshold,omitempty"`
+	CPUWastefulThreshold int `json:"cpuWastefulThreshold,omitempty"`
+
+	// Memory utilization percentage below which a non-idle workload is Wasteful.
+	// A workload is Wasteful if either CPU or memory utilization is below
+	// its respective threshold.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=30
+	// +optional
+	MemoryWastefulThreshold int `json:"memoryWastefulThreshold,omitempty"`
 
 	// Target utilization percentage for right-sizing savings estimates.
 	// +kubebuilder:validation:Minimum=1
@@ -81,7 +96,7 @@ type WorkloadPolicySpec struct {
 	DryRun bool `json:"dryRun,omitempty"`
 
 	// Default idle policy copied into exported/auto-created ManagedWorkloads.
-	// +kubebuilder:default={"action":"pause","idleThreshold":50,"gracePeriod":"5m0s","autoResume":true}
+	// +kubebuilder:default={"action":"pause","cpuIdleThreshold":50,"memoryIdleThreshold":104857600,"gracePeriod":"5m0s","autoResume":true}
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
 	// Default scaling policy copied into exported/auto-created ManagedWorkloads.
@@ -129,30 +144,31 @@ type WorkloadPolicyStatus struct {
 }
 
 type DiscoverySummary struct {
-	Total                   int    `json:"total"`
-	Active                  int    `json:"active"`
-	Idle                    int    `json:"idle"`
-	Wasteful                int    `json:"wasteful"`
-	Managed                 int    `json:"managed"`
-	EstimatedMonthlyCost    string `json:"estimatedMonthlyCost,omitempty"`
-	EstimatedMonthlySavings string `json:"estimatedMonthlySavings,omitempty"`
+	Total                     int    `json:"total"`
+	Active                    int    `json:"active"`
+	Idle                      int    `json:"idle"`
+	Wasteful                  int    `json:"wasteful"`
+	Managed                   int    `json:"managed"`
+	EstimatedMonthlyCost      string `json:"estimatedMonthlyCost,omitempty"`
+	EstimatedPotentialSavings string `json:"estimatedPotentialSavings,omitempty"`
 }
 
 type DiscoveredWorkload struct {
-	Name                 string         `json:"name"`
-	Kind                 TargetKind     `json:"kind"`
-	Classification       Classification `json:"classification"`
-	CPUUsageMillis       int64          `json:"cpuUsageMillis"`
-	CPURequestMillis     int64          `json:"cpuRequestMillis"`
-	Replicas             int32          `json:"replicas"`
-	MemoryUsageBytes     int64          `json:"memoryUsageBytes"`
-	MemoryRequestBytes   int64          `json:"memoryRequestBytes"`
-	StorageBytes         int64          `json:"storageBytes,omitempty"`
-	UtilizationPercent   int            `json:"utilizationPercent"`
-	EstimatedMonthlyCost string         `json:"estimatedMonthlyCost,omitempty"`
-	EstimatedSavings     string         `json:"estimatedSavings,omitempty"`
-	Managed              bool           `json:"managed"`
-	Ignored              bool           `json:"ignored,omitempty"`
+	Name                      string         `json:"name"`
+	Kind                      TargetKind     `json:"kind"`
+	Classification            Classification `json:"classification"`
+	CPUUsageMillis            int64          `json:"cpuUsageMillis"`
+	CPURequestMillis          int64          `json:"cpuRequestMillis"`
+	Replicas                  int32          `json:"replicas"`
+	MemoryUsageBytes          int64          `json:"memoryUsageBytes"`
+	MemoryRequestBytes        int64          `json:"memoryRequestBytes"`
+	StorageBytes              int64          `json:"storageBytes,omitempty"`
+	UtilizationPercent        int            `json:"utilizationPercent"`
+	MemoryUtilizationPercent  int            `json:"memoryUtilizationPercent,omitempty"`
+	EstimatedMonthlyCost      string         `json:"estimatedMonthlyCost,omitempty"`
+	EstimatedPotentialSavings string         `json:"estimatedPotentialSavings,omitempty"`
+	Managed                   bool           `json:"managed"`
+	Ignored                   bool           `json:"ignored,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -163,7 +179,7 @@ type DiscoveredWorkload struct {
 // +kubebuilder:printcolumn:name="Idle",type=integer,JSONPath=`.status.summary.idle`
 // +kubebuilder:printcolumn:name="Wasteful",type=integer,JSONPath=`.status.summary.wasteful`
 // +kubebuilder:printcolumn:name="Projected Cost",type=string,JSONPath=`.status.summary.estimatedMonthlyCost`
-// +kubebuilder:printcolumn:name="Projected Savings",type=string,JSONPath=`.status.summary.estimatedMonthlySavings`
+// +kubebuilder:printcolumn:name="Projected Savings",type=string,JSONPath=`.status.summary.estimatedPotentialSavings`
 // +kubebuilder:resource:shortName=wp
 
 // WorkloadPolicy scans its own namespace for workloads that are candidates

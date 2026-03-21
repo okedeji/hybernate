@@ -35,6 +35,7 @@ const (
 // MetricsReader reads current resource usage for a workload.
 type MetricsReader interface {
 	CPUUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error)
+	MemoryUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error)
 }
 
 // Internal implements Checker by reading CPU from the K8s Metrics API
@@ -62,33 +63,62 @@ func (i *Internal) Check(ctx context.Context, namespace, name string) (Result, e
 	if err != nil {
 		return Result{}, fmt.Errorf("reading cpu usage for %s/%s: %w", namespace, name, err)
 	}
+	return compareQuantity("cpu", cpu, i.Threshold, i.Mode)
+}
 
-	cmp := cpu.Cmp(i.Threshold)
+// MemoryInternal implements Checker by reading memory from the K8s Metrics API
+// and comparing against a threshold.
+type MemoryInternal struct {
+	Metrics   MetricsReader
+	Workload  *v1alpha1.ManagedWorkload
+	Threshold resource.Quantity
+	Mode      CompareMode
+}
 
-	switch i.Mode {
+func NewMemoryInternal(metrics MetricsReader, workload *v1alpha1.ManagedWorkload, threshold resource.Quantity, mode CompareMode) *MemoryInternal {
+	return &MemoryInternal{
+		Metrics:   metrics,
+		Workload:  workload,
+		Threshold: threshold,
+		Mode:      mode,
+	}
+}
+
+func (m *MemoryInternal) Check(ctx context.Context, namespace, name string) (Result, error) {
+	mem, err := m.Metrics.MemoryUsage(ctx, m.Workload)
+	if err != nil {
+		return Result{}, fmt.Errorf("reading memory usage for %s/%s: %w", namespace, name, err)
+	}
+	return compareQuantity("memory", mem, m.Threshold, m.Mode)
+}
+
+func compareQuantity(kind string, usage, threshold resource.Quantity, mode CompareMode) (Result, error) {
+	cmp := usage.Cmp(threshold)
+
+	switch mode {
 	case Below:
-		if cmp < 0 || cmp == 0 {
+		if cmp <= 0 {
 			return Result{
 				Confirm: true,
-				Reason:  fmt.Sprintf("cpu %s <= threshold %s", &cpu, &i.Threshold),
+				Reason:  fmt.Sprintf("%s %s <= threshold %s", kind, &usage, &threshold),
 			}, nil
 		}
 		return Result{
 			Confirm: false,
-			Reason:  fmt.Sprintf("cpu %s > threshold %s", &cpu, &i.Threshold),
+			Reason:  fmt.Sprintf("%s %s > threshold %s", kind, &usage, &threshold),
 		}, nil
 	case Above:
 		if cmp > 0 {
 			return Result{
 				Confirm: true,
-				Reason:  fmt.Sprintf("cpu %s > threshold %s", &cpu, &i.Threshold),
+				Reason:  fmt.Sprintf("%s %s > threshold %s", kind, &usage, &threshold),
 			}, nil
 		}
 		return Result{
 			Confirm: false,
-			Reason:  fmt.Sprintf("cpu %s <= threshold %s", &cpu, &i.Threshold),
+			Reason:  fmt.Sprintf("%s %s <= threshold %s", kind, &usage, &threshold),
 		}, nil
 	default:
-		return Result{}, fmt.Errorf("unknown compare mode %d", i.Mode)
+		return Result{}, fmt.Errorf("unknown compare mode %d", mode)
 	}
 }

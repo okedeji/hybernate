@@ -80,13 +80,23 @@ func resolveIdleAction(workload *v1alpha1.ManagedWorkload) v1alpha1.IdleAction {
 	return v1alpha1.IdleActionPause
 }
 
-const defaultIdleThreshold = 50
+const (
+	defaultCPUIdleThreshold    = 50
+	defaultMemoryIdleThreshold = 104857600 // 100Mi
+)
 
-func idleThresholdFor(workload *v1alpha1.ManagedWorkload) float64 {
-	if workload.Spec.IdlePolicy != nil && workload.Spec.IdlePolicy.IdleThreshold > 0 {
-		return float64(workload.Spec.IdlePolicy.IdleThreshold)
+func cpuIdleThresholdFor(workload *v1alpha1.ManagedWorkload) float64 {
+	if workload.Spec.IdlePolicy != nil && workload.Spec.IdlePolicy.CPUIdleThreshold > 0 {
+		return float64(workload.Spec.IdlePolicy.CPUIdleThreshold)
 	}
-	return defaultIdleThreshold
+	return defaultCPUIdleThreshold
+}
+
+func memoryIdleThresholdFor(workload *v1alpha1.ManagedWorkload) int64 {
+	if workload.Spec.IdlePolicy != nil && workload.Spec.IdlePolicy.MemoryIdleThreshold > 0 {
+		return workload.Spec.IdlePolicy.MemoryIdleThreshold
+	}
+	return defaultMemoryIdleThreshold
 }
 
 func idleGracePeriod(workload *v1alpha1.ManagedWorkload) time.Duration {
@@ -181,9 +191,11 @@ func seasonPhases(phase forecast.Phase) (daily, weekly string) {
 }
 
 func (r *Reconciler) buildIdleSignals(workload *v1alpha1.ManagedWorkload) []signal.Checker {
-	threshold := resource.NewMilliQuantity(int64(idleThresholdFor(workload)), resource.DecimalSI)
+	cpuThreshold := resource.NewMilliQuantity(int64(cpuIdleThresholdFor(workload)), resource.DecimalSI)
+	memThreshold := resource.NewQuantity(memoryIdleThresholdFor(workload), resource.BinarySI)
 	checkers := []signal.Checker{
-		signal.NewInternal(r.metrics, workload, *threshold, signal.Below),
+		signal.NewInternal(r.metrics, workload, *cpuThreshold, signal.Below),
+		signal.NewMemoryInternal(r.metrics, workload, *memThreshold, signal.Below),
 	}
 	return r.appendUserSignals(checkers, workload.Spec.IdlePolicy.Signals)
 }

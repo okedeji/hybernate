@@ -50,6 +50,7 @@ type forecaster interface {
 
 type metricsReader interface {
 	CPUUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error)
+	MemoryUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error)
 	TotalCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 	CPURequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 	TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
@@ -219,7 +220,7 @@ func (r *Reconciler) reconcileAutoResume(ctx context.Context, workload *v1alpha1
 
 	dryRun := enginePhase == forecast.DailySuggesting || workload.Spec.DryRun
 	predicted := engine.Predict(0, r.now())
-	threshold := idleThresholdFor(workload)
+	threshold := cpuIdleThresholdFor(workload)
 
 	if predicted < threshold {
 		return nil, nil
@@ -283,11 +284,11 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 	case eval.SignalsConfirm():
 		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(2)
 		predicted := engine.Predict(0, r.now())
-		if predicted >= idleThresholdFor(workload) {
+		if predicted >= cpuIdleThresholdFor(workload) {
 			opmetrics.IdleFlukes.WithLabelValues(ns, name).Inc()
 			r.emitEvent(workload, dryRun, "Normal", ReasonIdleFluke,
 				"signals confirm idle but prediction disagrees (predicted demand %.0fm, threshold %.0fm), rechecking",
-				predicted, idleThresholdFor(workload))
+				predicted, cpuIdleThresholdFor(workload))
 			result := ctrl.Result{RequeueAfter: 5 * time.Minute}
 			return &result, nil
 		}

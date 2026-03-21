@@ -30,6 +30,7 @@ import (
 
 type fakeMetrics struct {
 	cpu resource.Quantity
+	mem resource.Quantity
 	err error
 }
 
@@ -38,6 +39,13 @@ func (f *fakeMetrics) CPUUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (
 		return resource.Quantity{}, f.err
 	}
 	return f.cpu, nil
+}
+
+func (f *fakeMetrics) MemoryUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
+	if f.err != nil {
+		return resource.Quantity{}, f.err
+	}
+	return f.mem, nil
 }
 
 var testWorkload = &v1alpha1.ManagedWorkload{}

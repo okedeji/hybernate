@@ -173,11 +173,18 @@ type IdlePolicySpec struct {
 	// +kubebuilder:default=auto
 	Action IdleAction `json:"action"`
 
-	// IdleThreshold is the CPU usage in millicores below which the workload
+	// CPUIdleThreshold is the CPU usage in millicores below which the workload
 	// is considered potentially idle (e.g. 50 means 50m).
 	// +optional
 	// +kubebuilder:default=50
-	IdleThreshold int `json:"idleThreshold,omitempty"`
+	CPUIdleThreshold int `json:"cpuIdleThreshold,omitempty"`
+
+	// MemoryIdleThreshold is the memory usage in bytes below which the
+	// workload is considered potentially idle. Both CPU and memory must be
+	// below their respective thresholds for idle detection to confirm.
+	// +optional
+	// +kubebuilder:default=104857600
+	MemoryIdleThreshold int64 `json:"memoryIdleThreshold,omitempty"`
 
 	// Signals are additional checks that must all confirm before the workload
 	// is considered idle. An internal CPU usage check runs automatically;
@@ -489,15 +496,37 @@ type CostStatus struct {
 	// on current usage patterns. Set to "pending" on day 1 of the month.
 	EstimatedMonthlyCost string `json:"estimatedMonthlyCost"`
 
-	// MonthlySavings is the dollar amount saved by Hybernate actions
-	// (pause, scale-down, destroy) this month.
-	MonthlySavings string `json:"monthlySavings"`
+	// EstimatedMonthlySavings is the projected dollar amount saved by Hybernate
+	// actions (pause, scale-down, destroy) this month. These savings are only
+	// realized when freed resources lead to node removal by a cluster autoscaler.
+	EstimatedMonthlySavings string `json:"estimatedMonthlySavings"`
 
-	// CostWithoutManagement is what this workload would have cost without
-	// Hybernate — the sum of estimated cost and savings.
-	CostWithoutManagement string `json:"costWithoutManagement"`
+	// EstimatedCostWithoutManagement is what this workload would have cost
+	// without Hybernate — the sum of estimated cost and estimated savings.
+	EstimatedCostWithoutManagement string `json:"estimatedCostWithoutManagement"`
+
+	// ResourceReduction tracks the concrete resources freed by Hybernate actions.
+	// Unlike cost estimates, these values are always accurate regardless of
+	// whether a cluster autoscaler removes the underlying nodes.
+	// +optional
+	ResourceReduction *ResourceReduction `json:"resourceReduction,omitempty"`
 
 	// LastAccumulatedAt is when costs were last accumulated.
 	// +optional
 	LastAccumulatedAt *metav1.Time `json:"lastAccumulatedAt,omitempty"`
+}
+
+// ResourceReduction tracks the workload-level resources freed by Hybernate
+// actions (pause, scale-down, destroy). These resources are released on the
+// node when pods are removed, but the node itself is only removed if a
+// cluster autoscaler determines it is underutilized.
+type ResourceReduction struct {
+	// CPUMillis is the total CPU millicores freed by removing pods.
+	CPUMillis int64 `json:"cpuMillis"`
+
+	// MemoryBytes is the total memory bytes freed by removing pods.
+	MemoryBytes int64 `json:"memoryBytes"`
+
+	// Replicas is the number of pod replicas removed.
+	Replicas int32 `json:"replicas"`
 }
