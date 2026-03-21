@@ -55,9 +55,9 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 	}
 
 	snap := cost.Snapshot{
-		CPUHours:     workload.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64(),
-		MemoryHours:  workload.Status.Cost.CurrentMonthMemoryHours.AsApproximateFloat64(),
-		StorageHours: workload.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64(),
+		CPUHours:           workload.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64(),
+		MemoryHours:        workload.Status.Cost.CurrentMonthMemoryHours.AsApproximateFloat64(),
+		StorageHours:       workload.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64(),
 		EstimatedSavedCost: parseDollarAmount(workload.Status.Cost.EstimatedMonthlySavings),
 	}
 

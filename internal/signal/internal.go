@@ -92,7 +92,7 @@ func (m *MemoryInternal) Check(ctx context.Context, namespace, name string) (Res
 	return compareQuantity("memory", mem, m.Threshold, m.Mode)
 }
 
-func compareQuantity(resource string, usage, threshold resource.Quantity, mode CompareMode) (Result, error) {
+func compareQuantity(kind string, usage, threshold resource.Quantity, mode CompareMode) (Result, error) {
 	cmp := usage.Cmp(threshold)
 
 	switch mode {
@@ -100,23 +100,23 @@ func compareQuantity(resource string, usage, threshold resource.Quantity, mode C
 		if cmp <= 0 {
 			return Result{
 				Confirm: true,
-				Reason:  fmt.Sprintf("%s %s <= threshold %s", resource, &usage, &threshold),
+				Reason:  fmt.Sprintf("%s %s <= threshold %s", kind, &usage, &threshold),
 			}, nil
 		}
 		return Result{
 			Confirm: false,
-			Reason:  fmt.Sprintf("%s %s > threshold %s", resource, &usage, &threshold),
+			Reason:  fmt.Sprintf("%s %s > threshold %s", kind, &usage, &threshold),
 		}, nil
 	case Above:
 		if cmp > 0 {
 			return Result{
 				Confirm: true,
-				Reason:  fmt.Sprintf("%s %s > threshold %s", resource, &usage, &threshold),
+				Reason:  fmt.Sprintf("%s %s > threshold %s", kind, &usage, &threshold),
 			}, nil
 		}
 		return Result{
 			Confirm: false,
-			Reason:  fmt.Sprintf("%s %s <= threshold %s", resource, &usage, &threshold),
+			Reason:  fmt.Sprintf("%s %s <= threshold %s", kind, &usage, &threshold),
 		}, nil
 	default:
 		return Result{}, fmt.Errorf("unknown compare mode %d", mode)

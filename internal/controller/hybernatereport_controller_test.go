@@ -95,18 +95,18 @@ func TestReportReconciler_CountsByPhase(t *testing.T) {
 func TestReportReconciler_AggregatesCosts(t *testing.T) {
 	r := reportReconciler(t,
 		managedWorkload("api-1", v1alpha1.PhaseRunning, &v1alpha1.CostStatus{
-			CurrentMonthCPUHours:     *resource.NewMilliQuantity(10000, resource.DecimalSI),
-			CurrentMonthMemoryHours:  *resource.NewMilliQuantity(20000, resource.DecimalSI),
-			CurrentMonthStorageHours: *resource.NewMilliQuantity(5000, resource.DecimalSI),
-			EstimatedMonthlySavings:           "$10.00",
-			EstimatedCostWithoutManagement:    "$50.00",
+			CurrentMonthCPUHours:           *resource.NewMilliQuantity(10000, resource.DecimalSI),
+			CurrentMonthMemoryHours:        *resource.NewMilliQuantity(20000, resource.DecimalSI),
+			CurrentMonthStorageHours:       *resource.NewMilliQuantity(5000, resource.DecimalSI),
+			EstimatedMonthlySavings:        "$10.00",
+			EstimatedCostWithoutManagement: "$50.00",
 		}),
 		managedWorkload("api-2", v1alpha1.PhasePaused, &v1alpha1.CostStatus{
-			CurrentMonthCPUHours:     *resource.NewMilliQuantity(3000, resource.DecimalSI),
-			CurrentMonthMemoryHours:  *resource.NewMilliQuantity(8000, resource.DecimalSI),
-			CurrentMonthStorageHours: *resource.NewMilliQuantity(15000, resource.DecimalSI),
-			EstimatedMonthlySavings:           "$25.00",
-			EstimatedCostWithoutManagement:    "$30.00",
+			CurrentMonthCPUHours:           *resource.NewMilliQuantity(3000, resource.DecimalSI),
+			CurrentMonthMemoryHours:        *resource.NewMilliQuantity(8000, resource.DecimalSI),
+			CurrentMonthStorageHours:       *resource.NewMilliQuantity(15000, resource.DecimalSI),
+			EstimatedMonthlySavings:        "$25.00",
+			EstimatedCostWithoutManagement: "$30.00",
 		}),
 	)
 

@@ -144,31 +144,31 @@ type WorkloadPolicyStatus struct {
 }
 
 type DiscoverySummary struct {
-	Total                   int    `json:"total"`
-	Active                  int    `json:"active"`
-	Idle                    int    `json:"idle"`
-	Wasteful                int    `json:"wasteful"`
-	Managed                 int    `json:"managed"`
-	EstimatedMonthlyCost           string `json:"estimatedMonthlyCost,omitempty"`
-	EstimatedPotentialSavings      string `json:"estimatedPotentialSavings,omitempty"`
+	Total                     int    `json:"total"`
+	Active                    int    `json:"active"`
+	Idle                      int    `json:"idle"`
+	Wasteful                  int    `json:"wasteful"`
+	Managed                   int    `json:"managed"`
+	EstimatedMonthlyCost      string `json:"estimatedMonthlyCost,omitempty"`
+	EstimatedPotentialSavings string `json:"estimatedPotentialSavings,omitempty"`
 }
 
 type DiscoveredWorkload struct {
-	Name                 string         `json:"name"`
-	Kind                 TargetKind     `json:"kind"`
-	Classification       Classification `json:"classification"`
-	CPUUsageMillis       int64          `json:"cpuUsageMillis"`
-	CPURequestMillis     int64          `json:"cpuRequestMillis"`
-	Replicas             int32          `json:"replicas"`
-	MemoryUsageBytes     int64          `json:"memoryUsageBytes"`
-	MemoryRequestBytes   int64          `json:"memoryRequestBytes"`
-	StorageBytes         int64          `json:"storageBytes,omitempty"`
-	UtilizationPercent       int            `json:"utilizationPercent"`
-	MemoryUtilizationPercent int            `json:"memoryUtilizationPercent,omitempty"`
-	EstimatedMonthlyCost      string `json:"estimatedMonthlyCost,omitempty"`
-	EstimatedPotentialSavings string `json:"estimatedPotentialSavings,omitempty"`
-	Managed              bool           `json:"managed"`
-	Ignored              bool           `json:"ignored,omitempty"`
+	Name                      string         `json:"name"`
+	Kind                      TargetKind     `json:"kind"`
+	Classification            Classification `json:"classification"`
+	CPUUsageMillis            int64          `json:"cpuUsageMillis"`
+	CPURequestMillis          int64          `json:"cpuRequestMillis"`
+	Replicas                  int32          `json:"replicas"`
+	MemoryUsageBytes          int64          `json:"memoryUsageBytes"`
+	MemoryRequestBytes        int64          `json:"memoryRequestBytes"`
+	StorageBytes              int64          `json:"storageBytes,omitempty"`
+	UtilizationPercent        int            `json:"utilizationPercent"`
+	MemoryUtilizationPercent  int            `json:"memoryUtilizationPercent,omitempty"`
+	EstimatedMonthlyCost      string         `json:"estimatedMonthlyCost,omitempty"`
+	EstimatedPotentialSavings string         `json:"estimatedPotentialSavings,omitempty"`
+	Managed                   bool           `json:"managed"`
+	Ignored                   bool           `json:"ignored,omitempty"`
 }
 
 // +kubebuilder:object:root=true

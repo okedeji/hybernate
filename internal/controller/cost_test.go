@@ -80,7 +80,7 @@ func TestAccumulateCost_RunningAccumulatesUsage(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 
@@ -111,7 +111,7 @@ func TestAccumulateCost_PausedAccumulatesStorageAndSavings(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Pause = &v1alpha1.PauseStatus{
@@ -147,7 +147,7 @@ func TestAccumulateCost_DestroyedWithRetainedPVCs(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Destroy = &v1alpha1.DestroyStatus{
@@ -180,7 +180,7 @@ func TestAccumulateCost_DestroyedPVCsCleanedUp(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Destroy = &v1alpha1.DestroyStatus{
@@ -212,7 +212,7 @@ func TestAccumulateCost_MonthlyReset(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(50000, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(30000, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(10000, resource.DecimalSI),
-		EstimatedMonthlySavings:           "$42.00",
+		EstimatedMonthlySavings:  "$42.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 
@@ -243,7 +243,7 @@ func TestAccumulateCost_EstimatedCostWithoutManagement(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 	w.Status.Pause = &v1alpha1.PauseStatus{
@@ -276,7 +276,7 @@ func TestAccumulateCost_CustomRates(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 
@@ -295,7 +295,7 @@ func TestAccumulateCost_CustomRates(t *testing.T) {
 		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:           "$0.00",
+		EstimatedMonthlySavings:  "$0.00",
 		LastAccumulatedAt:        &lastMeta,
 	}
 

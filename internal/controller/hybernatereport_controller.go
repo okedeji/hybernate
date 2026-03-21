@@ -130,14 +130,14 @@ func (r *HybernateReportReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	now := metav1.Now()
 	report.Status = v1alpha1.HybernateReportStatus{
-		TotalManagedWorkloads: len(workloads.Items),
-		ActiveWorkloads:       active,
-		PausedWorkloads:       paused,
-		DestroyedWorkloads:    destroyed,
-		TotalCPUHours:         *resource.NewMilliQuantity(int64(totalCPU*1000), resource.DecimalSI),
-		TotalMemoryHours:      *resource.NewMilliQuantity(int64(totalMem*1000), resource.DecimalSI),
-		TotalStorageHours:     *resource.NewMilliQuantity(int64(totalStorage*1000), resource.DecimalSI),
-		EstimatedMonthlyCost:  cost.FormatDollars(totalEstimated),
+		TotalManagedWorkloads:          len(workloads.Items),
+		ActiveWorkloads:                active,
+		PausedWorkloads:                paused,
+		DestroyedWorkloads:             destroyed,
+		TotalCPUHours:                  *resource.NewMilliQuantity(int64(totalCPU*1000), resource.DecimalSI),
+		TotalMemoryHours:               *resource.NewMilliQuantity(int64(totalMem*1000), resource.DecimalSI),
+		TotalStorageHours:              *resource.NewMilliQuantity(int64(totalStorage*1000), resource.DecimalSI),
+		EstimatedMonthlyCost:           cost.FormatDollars(totalEstimated),
 		EstimatedTotalSavings:          cost.FormatDollars(totalSavings),
 		EstimatedCostWithoutManagement: cost.FormatDollars(totalCostWithout),
 		LastUpdated:                    &now,

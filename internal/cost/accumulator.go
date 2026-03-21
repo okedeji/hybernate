@@ -47,10 +47,10 @@ var DefaultRates = Rates{
 
 // Snapshot holds accumulated resource consumption for a billing period.
 type Snapshot struct {
-	CPUHours     float64
-	MemoryHours  float64
-	StorageHours float64
-	EstimatedSavedCost    float64
+	CPUHours           float64
+	MemoryHours        float64
+	StorageHours       float64
+	EstimatedSavedCost float64
 }
 
 const maxElapsed = 2 * time.Hour
