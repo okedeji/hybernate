@@ -140,7 +140,7 @@ func TestAccumulateSavings(t *testing.T) {
 		},
 		{
 			name:      "accumulates on existing savings",
-			initial:   Snapshot{SavedCost: 5.0},
+			initial:   Snapshot{EstimatedSavedCost: 5.0},
 			cpuCores:  2,
 			memoryGiB: 8,
 			elapsed:   1 * time.Hour,
@@ -151,7 +151,7 @@ func TestAccumulateSavings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := AccumulateSavings(tt.initial, tt.cpuCores, tt.memoryGiB, tt.storageGiB, tt.elapsed, rates)
-			assert.InDelta(t, tt.wantSaved, got.SavedCost, 0.0001)
+			assert.InDelta(t, tt.wantSaved, got.EstimatedSavedCost, 0.0001)
 		})
 	}
 }
@@ -164,10 +164,10 @@ func TestTotalCost(t *testing.T) {
 	assert.InDelta(t, want, got, 0.0001)
 }
 
-func TestCostWithoutManagement(t *testing.T) {
+func TestEstimatedCostWithoutManagement(t *testing.T) {
 	rates := DefaultRates
-	s := Snapshot{CPUHours: 100, MemoryHours: 400, StorageHours: 200, SavedCost: 10.0}
-	got := CostWithoutManagement(s, rates)
+	s := Snapshot{CPUHours: 100, MemoryHours: 400, StorageHours: 200, EstimatedSavedCost: 10.0}
+	got := EstimatedCostWithoutManagement(s, rates)
 	want := TotalCost(s, rates) + 10.0
 	assert.InDelta(t, want, got, 0.0001)
 }

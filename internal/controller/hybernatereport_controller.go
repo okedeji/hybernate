@@ -59,6 +59,8 @@ func (r *HybernateReportReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	var active, paused, destroyed int
 	var totalSavings, totalCostWithout float64
 	var totalCPU, totalMem, totalStorage float64
+	var totalFreedCPU, totalFreedMem int64
+	var totalFreedReplicas int32
 
 	for i := range workloads.Items {
 		w := &workloads.Items[i]
@@ -76,11 +78,17 @@ func (r *HybernateReportReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if w.Status.Cost == nil {
 			continue
 		}
-		totalSavings += parseDollarAmount(w.Status.Cost.MonthlySavings)
-		totalCostWithout += parseDollarAmount(w.Status.Cost.CostWithoutManagement)
+		totalSavings += parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
+		totalCostWithout += parseDollarAmount(w.Status.Cost.EstimatedCostWithoutManagement)
 		totalCPU += w.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64()
 		totalMem += w.Status.Cost.CurrentMonthMemoryHours.AsApproximateFloat64()
 		totalStorage += w.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64()
+
+		if w.Status.Cost.ResourceReduction != nil {
+			totalFreedCPU += w.Status.Cost.ResourceReduction.CPUMillis
+			totalFreedMem += w.Status.Cost.ResourceReduction.MemoryBytes
+			totalFreedReplicas += w.Status.Cost.ResourceReduction.Replicas
+		}
 	}
 
 	totalEstimated := totalCostWithout - totalSavings
@@ -97,9 +105,11 @@ func (r *HybernateReportReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	opmetrics.ActiveWorkloads.Set(float64(active))
 	opmetrics.PausedWorkloads.Set(float64(paused))
 	opmetrics.DestroyedWorkloads.Set(float64(destroyed))
-	opmetrics.CostSavingsDollars.Set(totalSavings)
+	opmetrics.CostEstimatedSavingsDollars.Set(totalSavings)
 	opmetrics.CostEstimatedDollars.Set(totalEstimated)
-	opmetrics.CostWithoutManagementDollars.Set(totalCostWithout)
+	opmetrics.CostEstimatedWithoutManagementDollars.Set(totalCostWithout)
+	opmetrics.ResourceReductionCPUMillis.Set(float64(totalFreedCPU))
+	opmetrics.ResourceReductionMemoryBytes.Set(float64(totalFreedMem))
 	opmetrics.CostCPUHours.Set(totalCPU)
 	opmetrics.CostMemoryHours.Set(totalMem)
 	opmetrics.CostStorageHours.Set(totalStorage)
@@ -128,9 +138,17 @@ func (r *HybernateReportReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		TotalMemoryHours:      *resource.NewMilliQuantity(int64(totalMem*1000), resource.DecimalSI),
 		TotalStorageHours:     *resource.NewMilliQuantity(int64(totalStorage*1000), resource.DecimalSI),
 		EstimatedMonthlyCost:  cost.FormatDollars(totalEstimated),
-		TotalMonthlySavings:   cost.FormatDollars(totalSavings),
-		CostWithoutManagement: cost.FormatDollars(totalCostWithout),
-		LastUpdated:           &now,
+		EstimatedTotalSavings:          cost.FormatDollars(totalSavings),
+		EstimatedCostWithoutManagement: cost.FormatDollars(totalCostWithout),
+		LastUpdated:                    &now,
+	}
+
+	if totalFreedCPU > 0 || totalFreedMem > 0 {
+		report.Status.TotalResourceReduction = &v1alpha1.ResourceReduction{
+			CPUMillis:   totalFreedCPU,
+			MemoryBytes: totalFreedMem,
+			Replicas:    totalFreedReplicas,
+		}
 	}
 
 	if err := r.Status().Update(ctx, report); err != nil {

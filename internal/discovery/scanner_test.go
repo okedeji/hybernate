@@ -187,7 +187,7 @@ func TestScanner_Scan_EmptyNamespace(t *testing.T) {
 
 	assert.Equal(t, 0, result.Summary.Total)
 	assert.Empty(t, result.Discovered)
-	assert.Equal(t, "$0.00", result.Summary.EstimatedMonthlySavings)
+	assert.Equal(t, "$0.00", result.Summary.EstimatedPotentialSavings)
 }
 
 func TestScanner_Scan_SortsBySavingsDescending(t *testing.T) {

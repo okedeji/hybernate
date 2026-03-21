@@ -58,7 +58,7 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 		CPUHours:     workload.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64(),
 		MemoryHours:  workload.Status.Cost.CurrentMonthMemoryHours.AsApproximateFloat64(),
 		StorageHours: workload.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64(),
-		SavedCost:    parseDollarAmount(workload.Status.Cost.MonthlySavings),
+		EstimatedSavedCost: parseDollarAmount(workload.Status.Cost.EstimatedMonthlySavings),
 	}
 
 	phase := workload.Status.Phase
@@ -136,7 +136,7 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 	workload.Status.Cost.CurrentMonthCPUHours = *resource.NewMilliQuantity(int64(snap.CPUHours*1000), resource.DecimalSI)
 	workload.Status.Cost.CurrentMonthMemoryHours = *resource.NewMilliQuantity(int64(snap.MemoryHours*1000), resource.DecimalSI)
 	workload.Status.Cost.CurrentMonthStorageHours = *resource.NewMilliQuantity(int64(snap.StorageHours*1000), resource.DecimalSI)
-	workload.Status.Cost.MonthlySavings = cost.FormatDollars(snap.SavedCost)
+	workload.Status.Cost.EstimatedMonthlySavings = cost.FormatDollars(snap.EstimatedSavedCost)
 	workload.Status.Cost.LastAccumulatedAt = &nowMeta
 
 	estimate := cost.EstimateMonthlyCost(snap, rates, now.Day(), daysInMonth(now))
@@ -146,7 +146,31 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 		workload.Status.Cost.EstimatedMonthlyCost = cost.FormatDollars(estimate)
 	}
 
-	workload.Status.Cost.CostWithoutManagement = cost.FormatDollars(cost.CostWithoutManagement(snap, rates))
+	workload.Status.Cost.EstimatedCostWithoutManagement = cost.FormatDollars(cost.EstimatedCostWithoutManagement(snap, rates))
+
+	// Populate resource reduction from the snapshot captured at pause/destroy time.
+	switch phase {
+	case v1alpha1.PhasePaused:
+		if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
+			rs := workload.Status.Pause.Resources
+			workload.Status.Cost.ResourceReduction = &v1alpha1.ResourceReduction{
+				CPUMillis:   rs.CPUMillis * int64(rs.Replicas),
+				MemoryBytes: rs.MemoryBytes * int64(rs.Replicas),
+				Replicas:    rs.Replicas,
+			}
+		}
+	case v1alpha1.PhaseDestroyed:
+		if workload.Status.Destroy != nil && workload.Status.Destroy.Resources != nil {
+			rs := workload.Status.Destroy.Resources
+			workload.Status.Cost.ResourceReduction = &v1alpha1.ResourceReduction{
+				CPUMillis:   rs.CPUMillis * int64(rs.Replicas),
+				MemoryBytes: rs.MemoryBytes * int64(rs.Replicas),
+				Replicas:    rs.Replicas,
+			}
+		}
+	default:
+		workload.Status.Cost.ResourceReduction = nil
+	}
 }
 
 func daysInMonth(t time.Time) int {

@@ -34,7 +34,7 @@ metadata:
 spec:
   mode: auto-manage
   scanInterval: 10m
-  idleThreshold: 50
+  cpuIdleThreshold: 50
   dryRun: true
 ```
 

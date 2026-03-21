@@ -39,9 +39,9 @@
       "gridPos": { "h": 4, "w": 5, "x": 4, "y": 1 },
       "id": 2,
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "title": "Monthly Savings",
+      "title": "Estimated Monthly Savings",
       "targets": [
-        { "expr": "hybernate_cost_savings_dollars", "legendFormat": "" }
+        { "expr": "hybernate_cost_estimated_savings_dollars", "legendFormat": "" }
       ],
       "type": "stat"
     },
@@ -67,9 +67,9 @@
       "gridPos": { "h": 4, "w": 5, "x": 14, "y": 1 },
       "id": 4,
       "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "title": "Cost Without Management",
+      "title": "Estimated Cost Without Management",
       "targets": [
-        { "expr": "hybernate_cost_without_management_dollars", "legendFormat": "" }
+        { "expr": "hybernate_cost_estimated_without_management_dollars", "legendFormat": "" }
       ],
       "type": "stat"
     },
@@ -299,9 +299,9 @@
       "id": 19,
       "title": "Savings Trend",
       "targets": [
-        { "expr": "hybernate_cost_savings_dollars", "legendFormat": "Savings" },
+        { "expr": "hybernate_cost_estimated_savings_dollars", "legendFormat": "Savings" },
         { "expr": "hybernate_cost_estimated_dollars", "legendFormat": "Estimated" },
-        { "expr": "hybernate_cost_without_management_dollars", "legendFormat": "Without Mgmt" }
+        { "expr": "hybernate_cost_estimated_without_management_dollars", "legendFormat": "Without Mgmt" }
       ],
       "type": "timeseries"
     },

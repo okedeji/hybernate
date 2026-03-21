@@ -76,6 +76,13 @@ func (m *stubMetrics) CPUUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (
 	return *resource.NewMilliQuantity(int64(m.cpuMillis), resource.DecimalSI), nil
 }
 
+func (m *stubMetrics) MemoryUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
+	if m.err != nil {
+		return resource.Quantity{}, m.err
+	}
+	return *resource.NewQuantity(int64(m.memoryBytes), resource.BinarySI), nil
+}
+
 func (m *stubMetrics) TotalCPUMillis(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
 	return m.cpuMillis, m.err
 }
@@ -264,7 +271,7 @@ func TestAutomation_SuggestingEmitsDryRunEvents(t *testing.T) {
 
 	engine := &stubForecaster{
 		phase:        forecast.DailySuggesting,
-		predictValue: 10.0, // below idleThreshold
+		predictValue: 10.0, // below cpuIdleThreshold
 	}
 	idle := &stubIdleEvaluator{
 		eval: policy.IdleEvaluation{
@@ -380,7 +387,7 @@ func TestAutomation_ActiveIdleFlukePredictionDisagrees(t *testing.T) {
 
 	engine := &stubForecaster{
 		phase:        forecast.DailyActive,
-		predictValue: 500.0, // well above idleThreshold — prediction disagrees
+		predictValue: 500.0, // well above cpuIdleThreshold — prediction disagrees
 	}
 	idle := &stubIdleEvaluator{
 		eval: policy.IdleEvaluation{Status: policy.IdleStatusSignalsConfirm},

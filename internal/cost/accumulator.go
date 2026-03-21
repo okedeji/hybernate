@@ -50,7 +50,7 @@ type Snapshot struct {
 	CPUHours     float64
 	MemoryHours  float64
 	StorageHours float64
-	SavedCost    float64
+	EstimatedSavedCost    float64
 }
 
 const maxElapsed = 2 * time.Hour
@@ -65,12 +65,12 @@ func Accumulate(s Snapshot, cpuCores, memoryGiB, storageGiB float64, elapsed tim
 	return s
 }
 
-// AccumulateSavings adds savings for a workload that Hybernate has acted on.
+// AccumulateSavings adds estimated savings for a workload that Hybernate has acted on.
 // For paused workloads, storageGiB should be 0 since PVCs persist while paused.
 // For destroyed workloads with cleaned-up PVCs, include storageGiB.
 func AccumulateSavings(s Snapshot, cpuCores, memoryGiB, storageGiB float64, elapsed time.Duration, rates Rates) Snapshot {
 	hours := clampElapsed(elapsed)
-	s.SavedCost += (cpuCores*rates.CPUPerHour + memoryGiB*rates.MemoryPerHour + storageGiB*storageHourlyRate(rates)) * hours
+	s.EstimatedSavedCost += (cpuCores*rates.CPUPerHour + memoryGiB*rates.MemoryPerHour + storageGiB*storageHourlyRate(rates)) * hours
 	return s
 }
 
@@ -92,10 +92,10 @@ func EstimateMonthlyCost(s Snapshot, rates Rates, dayOfMonth, daysInMonth int) f
 	return costSoFar / float64(dayOfMonth) * float64(daysInMonth)
 }
 
-// CostWithoutManagement returns what the workload would have cost if
-// Hybernate hadn't acted — current spend plus everything we saved.
-func CostWithoutManagement(s Snapshot, rates Rates) float64 {
-	return TotalCost(s, rates) + s.SavedCost
+// EstimatedCostWithoutManagement returns what the workload would have cost if
+// Hybernate hadn't acted — current spend plus estimated savings.
+func EstimatedCostWithoutManagement(s Snapshot, rates Rates) float64 {
+	return TotalCost(s, rates) + s.EstimatedSavedCost
 }
 
 // FormatDollars formats a cost value as a dollar string.

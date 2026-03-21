@@ -126,7 +126,7 @@ func (r *WorkloadPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	r.Recorder.Event(&policy, "Normal", "ScanCompleted",
 		fmt.Sprintf("Discovered %d workloads: %d active, %d idle, %d wasteful (cost: %s, savings: %s)",
 			result.Summary.Total, result.Summary.Active, result.Summary.Idle, result.Summary.Wasteful,
-			result.Summary.EstimatedMonthlyCost, result.Summary.EstimatedMonthlySavings))
+			result.Summary.EstimatedMonthlyCost, result.Summary.EstimatedPotentialSavings))
 
 	return ctrl.Result{RequeueAfter: requeueInterval(policy.Spec)}, nil
 }
@@ -188,11 +188,17 @@ func (r *WorkloadPolicyReconciler) autoManage(ctx context.Context, policy *v1alp
 
 func thresholdsFromSpec(spec v1alpha1.WorkloadPolicySpec) discovery.Thresholds {
 	th := discovery.DefaultThresholds()
-	if spec.IdleThreshold > 0 {
-		th.IdleMillis = spec.IdleThreshold
+	if spec.CPUIdleThreshold > 0 {
+		th.IdleMillis = spec.CPUIdleThreshold
 	}
-	if spec.WastefulThreshold > 0 {
-		th.WastefulPercent = spec.WastefulThreshold
+	if spec.MemoryIdleThreshold > 0 {
+		th.MemoryIdleBytes = spec.MemoryIdleThreshold
+	}
+	if spec.CPUWastefulThreshold > 0 {
+		th.WastefulPercent = spec.CPUWastefulThreshold
+	}
+	if spec.MemoryWastefulThreshold > 0 {
+		th.MemoryWastefulPercent = spec.MemoryWastefulThreshold
 	}
 	if spec.RightSizeTarget > 0 {
 		th.RightSizePercent = spec.RightSizeTarget

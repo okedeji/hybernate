@@ -17,7 +17,7 @@ Hybernate has been installed in namespace {{ .Release.Namespace }}.
        kind: Deployment
        name: my-app
      idlePolicy:
-       idleThreshold: 10m
+       cpuIdleThreshold: 50
        action: Pause
    EOF
 

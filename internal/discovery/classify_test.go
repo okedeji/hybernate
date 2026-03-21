@@ -196,7 +196,7 @@ func TestBuildDiscovered(t *testing.T) {
 		Kind:               v1alpha1.TargetKindDeployment,
 		CPUUsageMillis:     30,
 		CPURequestMillis:   1000,
-		MemoryUsageBytes:   256 << 20,
+		MemoryUsageBytes:   50 << 20, // 50Mi, below 100Mi idle threshold
 		MemoryRequestBytes: 1 << 30,
 		Replicas:           2,
 		Managed:            false,
@@ -211,5 +211,5 @@ func TestBuildDiscovered(t *testing.T) {
 	assert.Equal(t, 3, d.UtilizationPercent)
 	assert.False(t, d.Managed)
 	assert.NotEmpty(t, d.EstimatedMonthlyCost)
-	assert.NotEmpty(t, d.EstimatedSavings)
+	assert.NotEmpty(t, d.EstimatedPotentialSavings)
 }

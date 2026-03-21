@@ -26,7 +26,7 @@ Signals are independent checks that answer one question: "Is this workload idle 
 
 ### Internal Signal (automatic)
 
-Every ManagedWorkload with an `idlePolicy` gets an automatic CPU threshold check. It reads aggregate pod CPU usage from the Kubernetes Metrics API and compares it against `idlePolicy.idleThreshold` (default: 50 millicores).
+Every ManagedWorkload with an `idlePolicy` gets automatic CPU and memory threshold checks. They read aggregate pod resource usage from the Kubernetes Metrics API and compare against `idlePolicy.cpuIdleThreshold` (default: 50 millicores) and `idlePolicy.memoryIdleThreshold` (default: 100Mi). Both must be below their thresholds for idle detection to confirm.
 
 - CPU below threshold → confirms idle
 - CPU at or above threshold → denies idle

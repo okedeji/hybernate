@@ -25,19 +25,23 @@ const hoursPerMonth = 730
 
 // Thresholds holds classification parameters extracted from a WorkloadPolicy spec.
 type Thresholds struct {
-	IdleMillis       int
-	WastefulPercent  int
-	RightSizePercent int
-	Rates            cost.Rates
+	IdleMillis            int
+	MemoryIdleBytes       int64
+	WastefulPercent       int
+	MemoryWastefulPercent int
+	RightSizePercent      int
+	Rates                 cost.Rates
 }
 
 // DefaultThresholds returns classification parameters matching the CRD defaults.
 func DefaultThresholds() Thresholds {
 	return Thresholds{
-		IdleMillis:       50,
-		WastefulPercent:  30,
-		RightSizePercent: 70,
-		Rates:            cost.DefaultRates,
+		IdleMillis:            50,
+		MemoryIdleBytes:       104857600, // 100Mi
+		WastefulPercent:       30,
+		MemoryWastefulPercent: 30,
+		RightSizePercent:      70,
+		Rates:                 cost.DefaultRates,
 	}
 }
 
@@ -56,16 +60,32 @@ type WorkloadInfo struct {
 }
 
 // Classify determines whether a workload is Active, Idle, or Wasteful.
+// Idle requires both CPU and memory to be below their thresholds.
+// Wasteful triggers when either CPU or memory utilization is below its threshold.
 func Classify(w WorkloadInfo, t Thresholds) v1alpha1.Classification {
-	if w.CPUUsageMillis <= int64(t.IdleMillis) {
+	cpuIdle := w.CPUUsageMillis <= int64(t.IdleMillis)
+	memIdle := w.MemoryUsageBytes <= t.MemoryIdleBytes
+
+	if cpuIdle && memIdle {
 		return v1alpha1.ClassificationIdle
 	}
+
+	cpuWasteful := false
 	if w.CPURequestMillis > 0 {
-		util := float64(w.CPUUsageMillis) / float64(w.CPURequestMillis) * 100
-		if util < float64(t.WastefulPercent) {
-			return v1alpha1.ClassificationWasteful
-		}
+		cpuUtil := float64(w.CPUUsageMillis) / float64(w.CPURequestMillis) * 100
+		cpuWasteful = cpuUtil < float64(t.WastefulPercent)
 	}
+
+	memWasteful := false
+	if t.MemoryWastefulPercent > 0 && w.MemoryRequestBytes > 0 {
+		memUtil := float64(w.MemoryUsageBytes) / float64(w.MemoryRequestBytes) * 100
+		memWasteful = memUtil < float64(t.MemoryWastefulPercent)
+	}
+
+	if cpuWasteful || memWasteful {
+		return v1alpha1.ClassificationWasteful
+	}
+
 	return v1alpha1.ClassificationActive
 }
 
@@ -143,9 +163,10 @@ func BuildDiscovered(w WorkloadInfo, t Thresholds) v1alpha1.DiscoveredWorkload {
 		MemoryUsageBytes:     w.MemoryUsageBytes,
 		MemoryRequestBytes:   w.MemoryRequestBytes,
 		StorageBytes:         w.StorageBytes,
-		UtilizationPercent:   UtilizationPercent(w.CPUUsageMillis, w.CPURequestMillis),
+		UtilizationPercent:       UtilizationPercent(w.CPUUsageMillis, w.CPURequestMillis),
+		MemoryUtilizationPercent: UtilizationPercent(w.MemoryUsageBytes, w.MemoryRequestBytes),
 		EstimatedMonthlyCost: cost.FormatDollars(EstimateMonthlyCost(w, t.Rates)),
-		EstimatedSavings:     cost.FormatDollars(EstimateSavings(w, class, t)),
+		EstimatedPotentialSavings:     cost.FormatDollars(EstimateSavings(w, class, t)),
 		Managed:              w.Managed,
 		Ignored:              w.Ignored,
 	}

@@ -22,8 +22,8 @@ This configures Prometheus to scrape the operator's metrics endpoint.
 # Are workloads being managed?
 hybernate_workloads_total
 
-# Is the operator saving money?
-hybernate_cost_savings_dollars
+# Estimated savings (requires cluster autoscaler for realization)
+hybernate_cost_estimated_savings_dollars
 
 # Are there errors?
 rate(hybernate_reconcile_errors_total[5m]) > 0

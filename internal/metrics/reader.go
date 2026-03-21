@@ -108,6 +108,15 @@ func (r *Reader) CPURequestPerReplica(ctx context.Context, workload *v1alpha1.Ma
 	return total, nil
 }
 
+// MemoryUsage returns aggregate memory usage across all pods for a workload.
+func (r *Reader) MemoryUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
+	bytes, err := r.TotalMemoryBytes(ctx, workload)
+	if err != nil {
+		return resource.Quantity{}, err
+	}
+	return *resource.NewQuantity(int64(bytes), resource.BinarySI), nil
+}
+
 // TotalMemoryBytes returns aggregate memory usage in bytes across all pods
 // for the workload.
 func (r *Reader) TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
