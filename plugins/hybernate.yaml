@@ -3,7 +3,7 @@ kind: Plugin
 metadata:
   name: hybernate
 spec:
-  version: v0.1.0
+  version: v0.1.2
   homepage: https://github.com/okedeji/hybernate
   shortDescription: Export and manage workload lifecycle policies
   description: |
@@ -21,27 +21,27 @@ spec:
         matchLabels:
           os: linux
           arch: amd64
-      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.0/kubectl-hybernate-linux-amd64.tar.gz
+      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.2/kubectl-hybernate-linux-amd64.tar.gz
       sha256: "PLACEHOLDER"
       bin: kubectl-hybernate-linux-amd64
     - selector:
         matchLabels:
           os: linux
           arch: arm64
-      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.0/kubectl-hybernate-linux-arm64.tar.gz
+      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.2/kubectl-hybernate-linux-arm64.tar.gz
       sha256: "PLACEHOLDER"
       bin: kubectl-hybernate-linux-arm64
     - selector:
         matchLabels:
           os: darwin
           arch: amd64
-      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.0/kubectl-hybernate-darwin-amd64.tar.gz
+      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.2/kubectl-hybernate-darwin-amd64.tar.gz
       sha256: "PLACEHOLDER"
       bin: kubectl-hybernate-darwin-amd64
     - selector:
         matchLabels:
           os: darwin
           arch: arm64
-      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.0/kubectl-hybernate-darwin-arm64.tar.gz
+      uri: https://github.com/okedeji/hybernate/releases/download/v0.1.2/kubectl-hybernate-darwin-arm64.tar.gz
       sha256: "PLACEHOLDER"
       bin: kubectl-hybernate-darwin-arm64
