@@ -142,7 +142,7 @@ jobs:
 
       - name: Push Helm chart to GHCR
         run: |
-          helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}
+          helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 
       - name: Extract changelog for release
         id: changelog
