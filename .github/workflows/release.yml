@@ -136,12 +136,13 @@ jobs:
         run: |
           make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
 
-      - name: Package Helm chart
+      - name: Package and push Helm chart
         run: |
           helm package charts/hybernate --version ${{ steps.version.outputs.tag }} --app-version ${{ steps.version.outputs.tag }}
+          helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 
-      - name: Push Helm chart to GHCR
-        run: |
+          # Push a latest tag so `helm install` works without --version
+          helm package charts/hybernate --version latest --app-version ${{ steps.version.outputs.tag }}
           helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 
       - name: Extract changelog for release

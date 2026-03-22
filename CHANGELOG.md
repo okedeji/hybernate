@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-03-22
+
+### Fixed
+
+- Helm chart now pushes to separate GHCR path (`ghcr.io/okedeji/charts/hybernate`) to avoid collision with Docker image package
+- Helm chart publishes a `latest` tag so `helm install` works without `--version`
+- Fixed Helm install URLs across README and docs
+
+### Added
+
+- OSS community files: LICENSE (Apache 2.0), CODE_OF_CONDUCT.md, SECURITY.md, CONTRIBUTING.md
+- README rewrite with improved pitch, corrected Quick Start YAML, and architecture overview
+
 ## [0.1.2] - 2026-03-21
 
 ### Added

@@ -14,7 +14,7 @@
     Install directly from the OCI registry:
 
     ```bash
-    helm install hybernate oci://ghcr.io/okedeji/hybernate/charts/hybernate \
+    helm install hybernate oci://ghcr.io/okedeji/charts/hybernate \
       --namespace hybernate-system \
       --create-namespace
     ```
