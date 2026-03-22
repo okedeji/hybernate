@@ -4,30 +4,71 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.26+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 
-**Intelligent Kubernetes workload lifecycle management.**
+**Your Kubernetes workloads are running 24/7. Your users aren't.**
 
-Hybernate is a Kubernetes operator that automatically pauses, scales, and destroys workloads based on real-time idle detection and demand forecasting, saving you money without manual intervention.
+Hybernate is a Kubernetes operator that detects idle workloads, learns their demand patterns, and automatically pauses, scales, or destroys them. It brings them back before traffic returns, turning your non-production clusters from always-on cost centers into pay-for-what-you-use environments.
 
-## Features
+## Why Hybernate?
 
-- **Demand Forecasting**: Holt-Winters double seasonal model learns daily and weekly traffic patterns per workload
-- **Multi-Signal Idle Detection**: CPU metrics + Prometheus queries with consensus-based confirmation and configurable grace periods
-- **Prediction-Driven Scaling**: replica counts adjust based on forecasted demand with stabilization windows, step limits, and guard probes
-- **Pause & Destroy Lifecycle**: scale to zero with automatic expiry, resume, and PVC retention
-- **Cost Tracking**: per-workload resource cost and savings calculation with cluster-wide aggregation
-- **Auto-Discovery**: scan namespaces, classify workloads as Active/Idle/Wasteful, auto-create management resources
-- **GitOps Export**: `kubectl hybernate export` generates manifests for ArgoCD/Flux workflows
-- **Dry Run Mode**: observe what Hybernate would do without it taking action
-- **Full Observability**: 30+ Prometheus metrics, Grafana dashboards, and alerting rules included
+Most staging, dev, and test workloads sit idle 60-80% of the time: nights, weekends, holidays. You're paying for compute that nobody is using.
+
+Hybernate fixes this by:
+
+- **Detecting idle workloads** using CPU + memory metrics and optional Prometheus signals, with a consensus model that prevents false positives
+- **Learning demand patterns** via a per-workload Holt-Winters forecasting model that tracks daily and weekly seasonality
+- **Acting automatically** by pausing idle workloads, scaling based on predicted demand, and resuming proactively before users arrive
+- **Tracking savings** with per-workload cost accounting, resource reduction metrics, and cluster-wide aggregation
+
+## How It Works
+
+![How It Works](docs/assets/how-it-works.png)
+
+1. You point Hybernate at a Deployment or StatefulSet
+2. The operator monitors CPU, memory, and optional Prometheus signals
+3. A per-workload forecast model learns when the workload is typically busy
+4. When all signals confirm idle and the forecast agrees, the workload is paused
+5. Before the next busy period, the forecast triggers an automatic resume
 
 ## Quick Start
 
-```bash
-# Install the operator
-kubectl apply -f https://github.com/okedeji/hybernate/releases/latest/download/install.yaml
+**Install:**
 
-# Create a ManagedWorkload
-cat <<EOF | kubectl apply -f -
+```bash
+helm install hybernate oci://ghcr.io/okedeji/hybernate \
+  --namespace hybernate-system \
+  --create-namespace
+```
+
+**Discover and manage idle workloads in a namespace:**
+
+```yaml
+apiVersion: hybernate.io/v1alpha1
+kind: WorkloadPolicy
+metadata:
+  name: staging-policy
+  namespace: staging
+spec:
+  mode: auto-manage
+  cpuIdleThreshold: 50
+  memoryIdleThreshold: 104857600
+  dryRun: true
+```
+
+```bash
+kubectl apply -f workloadpolicy.yaml
+kubectl get workloadpolicy staging-policy -n staging
+```
+
+```
+NAME             MODE          DISCOVERED   ACTIVE   IDLE   WASTEFUL   PROJECTED COST   PROJECTED SAVINGS
+staging-policy   auto-manage   12           8        2      2          $340.00           $89.00
+```
+
+Start with `dryRun: true` to observe. When you're confident, set it to `false` to enable automation.
+
+**Or manage a single workload directly:**
+
+```yaml
 apiVersion: hybernate.io/v1alpha1
 kind: ManagedWorkload
 metadata:
@@ -38,54 +79,66 @@ spec:
     kind: Deployment
     name: my-api
   idlePolicy:
-    cpuThreshold: "50m"
+    cpuIdleThreshold: 50
     gracePeriod: "5m"
-  pause:
-    expireAfter: "24h"
-    expireAction: Resume
+    autoResume: true
   prediction:
     confidence: 85
-  costTracking:
-    enabled: true
   dryRun: true
-EOF
-
-# Watch what happens
-kubectl describe managedworkload my-api -n staging
 ```
+
+## Features
+
+### Core
+
+- **Multi-signal idle detection** using CPU + memory thresholds with Prometheus PromQL signals, consensus-based confirmation, and configurable grace periods
+- **Demand forecasting** via a Holt-Winters double seasonal model that learns daily and weekly patterns per workload, with confidence scoring and anomaly detection
+- **Prediction-driven scaling** where replica counts adjust based on forecasted demand with stabilization windows, step limits, and guard probes
+- **Pause, resume, and destroy** with scale to zero, automatic expiry, forecast-driven resume, and PVC retention
+
+### Operations
+
+- **Auto-discovery** lets WorkloadPolicy scan namespaces, classify workloads as Active/Idle/Wasteful, and optionally auto-create ManagedWorkloads
+- **GitOps export** via `kubectl hybernate export` generates ManagedWorkload manifests for ArgoCD/Flux workflows
+- **Cost tracking** with per-workload resource consumption, estimated savings, and concrete resource reduction metrics
+- **Dry-run mode** to observe every decision the operator would make without it taking action
+
+### Observability
+
+- **30+ Prometheus metrics** across three tiers: cluster health, operational insight, and debugging
+- **Grafana dashboard** included with cost, lifecycle, and prediction panels
+- **Kubernetes events** for every state change, visible in `kubectl describe`
+
+## Architecture
+
+![Architecture](docs/assets/architecture.png)
+
+| Component | Description |
+|-----------|-------------|
+| **ManagedWorkload** | Per-workload CR that defines idle policy, scale policy, pause/destroy behavior, and cost tracking |
+| **WorkloadPolicy** | Namespace-scoped scanner that discovers, classifies, and optionally auto-manages workloads |
+| **HybernateReport** | Cluster-wide singleton that aggregates cost, savings, and resource reduction across all workloads |
+| **Forecast Engine** | Per-workload Holt-Winters model that learns demand patterns, gates idle detection, and drives scaling |
 
 ## Documentation
 
-Full documentation is available at [okedeji.io/hybernate](https://okedeji.io/hybernate).
+Full docs at **[okedeji.io/hybernate](https://okedeji.io/hybernate)**
 
-| Section | Description |
-|---------|-------------|
-| [Installation](https://okedeji.io/hybernate/getting-started/installation/) | Helm, kubectl, and source install |
-| [Quickstart](https://okedeji.io/hybernate/getting-started/quickstart/) | Manage your first workload in 5 minutes |
-| [Architecture](https://okedeji.io/hybernate/concepts/architecture/) | System overview and components |
-| [ManagedWorkload Guide](https://okedeji.io/hybernate/guides/managed-workload/) | Full spec reference with examples |
-| [API Reference](https://okedeji.io/hybernate/reference/api/) | Complete CRD field reference |
-| [Metrics](https://okedeji.io/hybernate/reference/metrics/) | Prometheus metrics reference |
-
-## How It Works
-
-```
-ManagedWorkload CR ──► Reconciler Loop ──► Idle Detection
-                                      ──► Forecast Engine (Holt-Winters)
-                                      ──► Scaling Constraints
-                                      ──► Pause / Resume / Destroy
-                                      ──► Cost Tracking
-```
-
-1. You declare a `ManagedWorkload` pointing at a Deployment or StatefulSet
-2. The operator monitors CPU usage and optional Prometheus signals
-3. A per-workload Holt-Winters model learns daily and weekly demand patterns
-4. When the workload is confirmed idle (signals + prediction + grace period), it's paused
-5. Cost savings are tracked and reported via Prometheus metrics and the `HybernateReport` singleton
+- [Installation](https://okedeji.io/hybernate/getting-started/installation/): Helm, kubectl, and source
+- [Quickstart](https://okedeji.io/hybernate/getting-started/quickstart/): manage your first workload
+- [Idle Detection](https://okedeji.io/hybernate/concepts/idle-detection/): how signals, forecasts, and grace periods work
+- [Forecasting](https://okedeji.io/hybernate/concepts/forecasting/): the Holt-Winters prediction engine
+- [Cost Tracking](https://okedeji.io/hybernate/concepts/cost-tracking/): resource reduction vs. estimated savings
+- [API Reference](https://okedeji.io/hybernate/reference/api/): complete CRD field reference
+- [Metrics Reference](https://okedeji.io/hybernate/reference/metrics/): all Prometheus metrics
 
 ## Contributing
 
-See [CONTRIBUTING](https://okedeji.io/hybernate/contributing/) for development setup, testing, and PR guidelines.
+We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and PR guidelines.
+
+## Security
+
+To report a security vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 
