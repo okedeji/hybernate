@@ -141,10 +141,6 @@ jobs:
           helm package charts/hybernate --version ${{ steps.version.outputs.tag }} --app-version ${{ steps.version.outputs.tag }}
           helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 
-          # Push a latest tag so `helm install` works without --version
-          helm package charts/hybernate --version latest --app-version ${{ steps.version.outputs.tag }}
-          helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
-
       - name: Extract changelog for release
         id: changelog
         run: |

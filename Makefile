@@ -107,17 +107,18 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Versioning
 
 .PHONY: bump
-bump: ## Bump version across Chart.yaml and Krew manifest. Usage: make bump VERSION=0.1.2
+bump: ## Bump version across Chart.yaml, Krew manifest, and docs. Usage: make bump VERSION=0.1.2
 	@if [ -z "$(VERSION)" ]; then echo "VERSION is required. Usage: make bump VERSION=0.1.2"; exit 1; fi
 	@perl -pi -e 's/^version:.*/version: $(VERSION)/' charts/hybernate/Chart.yaml
 	@perl -pi -e 's/^appVersion:.*/appVersion: "$(VERSION)"/' charts/hybernate/Chart.yaml
 	@perl -pi -e 's|version: v[\d]+\.[\d]+\.[\d]+|version: v$(VERSION)|' plugins/hybernate.yaml
 	@perl -pi -e 's|/download/v[\d]+\.[\d]+\.[\d]+/|/download/v$(VERSION)/|g' plugins/hybernate.yaml
+	@perl -pi -e 's|--version v[\d]+\.[\d]+\.[\d]+|--version v$(VERSION)|g' README.md docs/getting-started/installation.md docs/reference/helm-values.md
 	@echo "Bumped to $(VERSION)"
 
 .PHONY: release
 release: bump ## Bump version, commit, and tag. Usage: make release VERSION=0.1.2
-	@git add charts/hybernate/Chart.yaml plugins/hybernate.yaml
+	@git add charts/hybernate/Chart.yaml plugins/hybernate.yaml README.md docs/getting-started/installation.md docs/reference/helm-values.md
 	@git commit -m "chore(release): bump version to v$(VERSION)"
 	@git tag -a v$(VERSION) -m "v$(VERSION)"
 	@echo "Tagged v$(VERSION). Run 'git push origin main v$(VERSION)' to release."

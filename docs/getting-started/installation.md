@@ -15,6 +15,7 @@
 
     ```bash
     helm install hybernate oci://ghcr.io/okedeji/charts/hybernate \
+      --version v0.1.4 \
       --namespace hybernate-system \
       --create-namespace
     ```
