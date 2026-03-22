@@ -550,6 +550,8 @@ spec:
                     cpuUsageMillis:
                       format: int64
                       type: integer
+                    cpuUtilizationPercent:
+                      type: integer
                     estimatedMonthlyCost:
                       type: string
                     estimatedPotentialSavings:
@@ -579,19 +581,17 @@ spec:
                     storageBytes:
                       format: int64
                       type: integer
-                    utilizationPercent:
-                      type: integer
                   required:
                   - classification
                   - cpuRequestMillis
                   - cpuUsageMillis
+                  - cpuUtilizationPercent
                   - kind
                   - managed
                   - memoryRequestBytes
                   - memoryUsageBytes
                   - name
                   - replicas
-                  - utilizationPercent
                   type: object
                 type: array
               lastScanAt:

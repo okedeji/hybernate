@@ -52,13 +52,26 @@ func TestClassify(t *testing.T) {
 			want: v1alpha1.ClassificationIdle,
 		},
 		{
-			name: "wasteful when utilization below wasteful threshold",
+			name: "wasteful when both CPU and memory utilization below wasteful threshold",
 			workload: WorkloadInfo{
-				CPUUsageMillis:   200,
-				CPURequestMillis: 1000,
-				Replicas:         1,
+				CPUUsageMillis:     200,
+				CPURequestMillis:   1000,
+				MemoryUsageBytes:   20 << 20,
+				MemoryRequestBytes: 256 << 20,
+				Replicas:           1,
 			},
 			want: v1alpha1.ClassificationWasteful,
+		},
+		{
+			name: "active when CPU low but memory high",
+			workload: WorkloadInfo{
+				CPUUsageMillis:     200,
+				CPURequestMillis:   1000,
+				MemoryUsageBytes:   200 << 20,
+				MemoryRequestBytes: 256 << 20,
+				Replicas:           1,
+			},
+			want: v1alpha1.ClassificationActive,
 		},
 		{
 			name: "active when utilization above wasteful threshold",
@@ -208,7 +221,7 @@ func TestBuildDiscovered(t *testing.T) {
 	assert.Equal(t, v1alpha1.TargetKindDeployment, d.Kind)
 	assert.Equal(t, v1alpha1.ClassificationIdle, d.Classification)
 	assert.Equal(t, int32(2), d.Replicas)
-	assert.Equal(t, 3, d.UtilizationPercent)
+	assert.Equal(t, 3, d.CPUUtilizationPercent)
 	assert.False(t, d.Managed)
 	assert.NotEmpty(t, d.EstimatedMonthlyCost)
 	assert.NotEmpty(t, d.EstimatedPotentialSavings)

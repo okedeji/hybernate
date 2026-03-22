@@ -163,7 +163,7 @@ type DiscoveredWorkload struct {
 	MemoryUsageBytes          int64          `json:"memoryUsageBytes"`
 	MemoryRequestBytes        int64          `json:"memoryRequestBytes"`
 	StorageBytes              int64          `json:"storageBytes,omitempty"`
-	UtilizationPercent        int            `json:"utilizationPercent"`
+	CPUUtilizationPercent     int            `json:"cpuUtilizationPercent"`
 	MemoryUtilizationPercent  int            `json:"memoryUtilizationPercent,omitempty"`
 	EstimatedMonthlyCost      string         `json:"estimatedMonthlyCost,omitempty"`
 	EstimatedPotentialSavings string         `json:"estimatedPotentialSavings,omitempty"`

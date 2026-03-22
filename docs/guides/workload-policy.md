@@ -60,12 +60,15 @@ spec:
 !!! warning
     Start with `dryRun: true` when using `auto-manage`. This creates the ManagedWorkloads but they won't take action until you set `dryRun: false` on each one individually.
 
+!!! note "Forecast engine starts fresh"
+    When you switch from `suggest` to `auto-manage`, newly created ManagedWorkloads have no forecast history. The Holt-Winters engine begins in its Observing phase and needs time to learn the workload's demand patterns before it can gate idle detection or drive scaling. In `suggest` mode, no forecast engines run because no ManagedWorkloads exist. Plan for a warm-up period after switching modes.
+
 ## Classification Thresholds
 
 | Classification | Condition |
 |---------------|-----------|
 | **Idle** | CPU usage < `cpuIdleThreshold` AND memory usage < `memoryIdleThreshold` |
-| **Wasteful** | CPU utilization < `cpuWastefulThreshold` OR memory utilization < `memoryWastefulThreshold` |
+| **Wasteful** | CPU utilization < `cpuWastefulThreshold` AND memory utilization < `memoryWastefulThreshold` |
 | **Active** | Everything else |
 
 **Utilization** is calculated as `(usage / request) x 100%`. A workload requesting 1000m CPU but using 200m has 20% utilization, which is classified as Wasteful.
@@ -129,7 +132,7 @@ kubectl get workloadpolicy staging-policy -n staging -o jsonpath='{.status.disco
 Each entry includes:
 
 - `name`, `kind`, `classification`
-- `cpuUsageMillis`, `cpuRequestMillis`, `utilizationPercent`
+- `cpuUsageMillis`, `cpuRequestMillis`, `cpuUtilizationPercent`
 - `memoryUsageBytes`, `memoryRequestBytes`
 - `storageBytes`
 - `estimatedMonthlyCost`, `estimatedPotentialSavings`

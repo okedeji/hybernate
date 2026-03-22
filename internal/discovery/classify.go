@@ -61,7 +61,7 @@ type WorkloadInfo struct {
 
 // Classify determines whether a workload is Active, Idle, or Wasteful.
 // Idle requires both CPU and memory to be below their thresholds.
-// Wasteful triggers when either CPU or memory utilization is below its threshold.
+// Wasteful requires both CPU and memory utilization to be below their thresholds.
 func Classify(w WorkloadInfo, t Thresholds) v1alpha1.Classification {
 	cpuIdle := w.CPUUsageMillis <= int64(t.IdleMillis)
 	memIdle := w.MemoryUsageBytes <= t.MemoryIdleBytes
@@ -82,7 +82,7 @@ func Classify(w WorkloadInfo, t Thresholds) v1alpha1.Classification {
 		memWasteful = memUtil < float64(t.MemoryWastefulPercent)
 	}
 
-	if cpuWasteful || memWasteful {
+	if cpuWasteful && memWasteful {
 		return v1alpha1.ClassificationWasteful
 	}
 
@@ -163,7 +163,7 @@ func BuildDiscovered(w WorkloadInfo, t Thresholds) v1alpha1.DiscoveredWorkload {
 		MemoryUsageBytes:          w.MemoryUsageBytes,
 		MemoryRequestBytes:        w.MemoryRequestBytes,
 		StorageBytes:              w.StorageBytes,
-		UtilizationPercent:        UtilizationPercent(w.CPUUsageMillis, w.CPURequestMillis),
+		CPUUtilizationPercent:     UtilizationPercent(w.CPUUsageMillis, w.CPURequestMillis),
 		MemoryUtilizationPercent:  UtilizationPercent(w.MemoryUsageBytes, w.MemoryRequestBytes),
 		EstimatedMonthlyCost:      cost.FormatDollars(EstimateMonthlyCost(w, t.Rates)),
 		EstimatedPotentialSavings: cost.FormatDollars(EstimateSavings(w, class, t)),
