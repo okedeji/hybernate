@@ -12,8 +12,8 @@ spec:
     - StatefulSet
   mode: suggest
   scanInterval: 10m
-  cpuIdleThreshold: 50
-  memoryIdleThreshold: 104857600
+  cpuIdleThreshold: 10
+  memoryIdleThreshold: 10
   cpuWastefulThreshold: 30
   memoryWastefulThreshold: 30
   rightSizeTarget: 70

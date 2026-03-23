@@ -11,8 +11,8 @@ spec:
     kind: Deployment
     name: api-server
   idlePolicy:
-    cpuIdleThreshold: 50
-    memoryIdleThreshold: "100Mi"
+    cpuIdleThreshold: 10
+    memoryIdleThreshold: 10
     gracePeriod: "5m"
     autoResume: true
   prediction:

@@ -34,22 +34,37 @@ func TestClassify(t *testing.T) {
 		want     v1alpha1.Classification
 	}{
 		{
-			name: "idle when CPU below threshold",
+			name: "idle when both CPU and memory below threshold",
 			workload: WorkloadInfo{
-				CPUUsageMillis:   30,
-				CPURequestMillis: 1000,
-				Replicas:         1,
+				CPUUsageMillis:     30,
+				CPURequestMillis:   1000,
+				MemoryUsageBytes:   50 << 20,
+				MemoryRequestBytes: 1 << 30,
+				Replicas:           1,
 			},
 			want: v1alpha1.ClassificationIdle,
 		},
 		{
-			name: "idle at exactly threshold",
+			name: "idle when both dimensions below threshold",
 			workload: WorkloadInfo{
-				CPUUsageMillis:   50,
-				CPURequestMillis: 1000,
-				Replicas:         1,
+				CPUUsageMillis:     50,
+				CPURequestMillis:   1000,
+				MemoryUsageBytes:   50 << 20,
+				MemoryRequestBytes: 1 << 30,
+				Replicas:           1,
 			},
 			want: v1alpha1.ClassificationIdle,
+		},
+		{
+			name: "not idle at exactly threshold boundary",
+			workload: WorkloadInfo{
+				CPUUsageMillis:     100,
+				CPURequestMillis:   1000,
+				MemoryUsageBytes:   50 << 20,
+				MemoryRequestBytes: 1 << 30,
+				Replicas:           1,
+			},
+			want: v1alpha1.ClassificationWasteful,
 		},
 		{
 			name: "wasteful when both CPU and memory utilization below wasteful threshold",
@@ -103,11 +118,22 @@ func TestClassify(t *testing.T) {
 		{
 			name: "zero CPU usage is idle",
 			workload: WorkloadInfo{
-				CPUUsageMillis:   0,
+				CPUUsageMillis:     0,
+				CPURequestMillis:   1000,
+				MemoryUsageBytes:   0,
+				MemoryRequestBytes: 1 << 30,
+				Replicas:           1,
+			},
+			want: v1alpha1.ClassificationIdle,
+		},
+		{
+			name: "active when CPU idle but no memory request",
+			workload: WorkloadInfo{
+				CPUUsageMillis:   30,
 				CPURequestMillis: 1000,
 				Replicas:         1,
 			},
-			want: v1alpha1.ClassificationIdle,
+			want: v1alpha1.ClassificationActive,
 		},
 	}
 
@@ -209,7 +235,7 @@ func TestBuildDiscovered(t *testing.T) {
 		Kind:               v1alpha1.TargetKindDeployment,
 		CPUUsageMillis:     30,
 		CPURequestMillis:   1000,
-		MemoryUsageBytes:   50 << 20, // 50Mi, below 100Mi idle threshold
+		MemoryUsageBytes:   50 << 20, // 50Mi/1Gi ≈ 4.9%, below 10% idle threshold
 		MemoryRequestBytes: 1 << 30,
 		Replicas:           2,
 		Managed:            false,

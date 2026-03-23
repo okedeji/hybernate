@@ -35,7 +35,8 @@ spec:
 
   idlePolicy:
     action: pause
-    cpuIdleThreshold: 50
+    cpuIdleThreshold: 10
+    memoryIdleThreshold: 10
     gracePeriod: "10m"
     autoResume: true
     signals:
@@ -104,8 +105,8 @@ See [Idle Detection](../concepts/idle-detection.md) for how the detection pipeli
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `action` | `auto`, `pause`, `destroy` | `auto` | What to do when idle is confirmed |
-| `cpuIdleThreshold` | int (millicores) | `50` | CPU usage below this = potentially idle |
-| `memoryIdleThreshold` | int64 (bytes) | `104857600` (100Mi) | Memory usage below this = potentially idle |
+| `cpuIdleThreshold` | int (percent) | `10` | CPU utilization % of request below which workload is potentially idle (0-100) |
+| `memoryIdleThreshold` | int (percent) | `10` | Memory utilization % of request below which workload is potentially idle (0-100) |
 | `gracePeriod` | duration | _(none)_ | How long signals must continuously confirm before acting |
 | `autoResume` | bool | `false` | Auto-resume when signals clear |
 | `signals` | list of ProbeSpec | _(none)_ | Additional Prometheus checks |

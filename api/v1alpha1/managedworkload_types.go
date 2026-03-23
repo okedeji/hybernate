@@ -173,18 +173,24 @@ type IdlePolicySpec struct {
 	// +kubebuilder:default=auto
 	Action IdleAction `json:"action"`
 
-	// CPUIdleThreshold is the CPU usage in millicores below which the workload
-	// is considered potentially idle (e.g. 50 means 50m).
+	// CPUIdleThreshold is the CPU utilization percentage of request below
+	// which the workload is considered potentially idle (e.g. 10 means idle
+	// if CPU usage < 10% of CPU request).
 	// +optional
-	// +kubebuilder:default=50
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=10
 	CPUIdleThreshold int `json:"cpuIdleThreshold,omitempty"`
 
-	// MemoryIdleThreshold is the memory usage in bytes below which the
-	// workload is considered potentially idle. Both CPU and memory must be
-	// below their respective thresholds for idle detection to confirm.
+	// MemoryIdleThreshold is the memory utilization percentage of request
+	// below which the workload is considered potentially idle. Both CPU and
+	// memory must be below their respective thresholds for idle detection
+	// to confirm.
 	// +optional
-	// +kubebuilder:default=104857600
-	MemoryIdleThreshold int64 `json:"memoryIdleThreshold,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=10
+	MemoryIdleThreshold int `json:"memoryIdleThreshold,omitempty"`
 
 	// Signals are additional checks that must all confirm before the workload
 	// is considered idle. An internal CPU usage check runs automatically;

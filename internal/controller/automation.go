@@ -53,6 +53,8 @@ type metricsReader interface {
 	MemoryUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error)
 	TotalCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 	CPURequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
+	MemoryRequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
+	Replicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error)
 	TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 	TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 }
@@ -220,14 +222,26 @@ func (r *Reconciler) reconcileAutoResume(ctx context.Context, workload *v1alpha1
 
 	dryRun := enginePhase == forecast.DailySuggesting || workload.Spec.DryRun
 	predicted := engine.Predict(0, r.now())
-	threshold := cpuIdleThresholdFor(workload)
+	cpuPercent := cpuIdlePercentFor(workload)
 
-	if predicted < threshold {
+	// Use the paused resource snapshot to convert predicted millicores to
+	// a percentage of total request — the workload is scaled to zero so we
+	// cannot query live metrics. Predicted value is total across all replicas.
+	var totalRequest float64
+	if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
+		totalRequest = float64(workload.Status.Pause.Resources.CPUMillis) * float64(workload.Status.Pause.PreviousReplicas)
+	}
+	predictedPercent := 0.0
+	if totalRequest > 0 {
+		predictedPercent = predicted / totalRequest * 100
+	}
+
+	if predictedPercent < float64(cpuPercent) {
 		return nil, nil
 	}
 
 	r.emitEvent(workload, dryRun, "Normal", ReasonAutoResume,
-		"prediction expects demand %.0fm (threshold %.0fm), resuming", predicted, threshold)
+		"prediction expects %.0f%% utilization (threshold %d%%), resuming", predictedPercent, cpuPercent)
 
 	if dryRun {
 		return nil, nil
@@ -238,7 +252,7 @@ func (r *Reconciler) reconcileAutoResume(ctx context.Context, workload *v1alpha1
 }
 
 func (r *Reconciler) reconcileAutomationPolicies(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, dryRun bool) (*ctrl.Result, error) {
-	if workload.Spec.IdlePolicy != nil {
+	if workload.Spec.IdlePolicy != nil && r.metrics != nil {
 		result, err := r.reconcileIdleAction(ctx, workload, engine, dryRun)
 		if err != nil {
 			return nil, err
@@ -270,7 +284,10 @@ func (r *Reconciler) reconcileAutomationPolicies(ctx context.Context, workload *
 }
 
 func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, dryRun bool) (*ctrl.Result, error) {
-	signals := r.buildIdleSignals(workload)
+	signals, err := r.buildIdleSignals(ctx, workload)
+	if err != nil {
+		return nil, fmt.Errorf("building idle signals: %w", err)
+	}
 	eval, err := r.idle.Evaluate(ctx, workload.Namespace, workload.Spec.Target.Name, signals, idleGracePeriod(workload))
 	if err != nil {
 		r.emitEvent(workload, dryRun, "Warning", ReasonIdleConsensus,
@@ -279,16 +296,30 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 	}
 
 	ns, name := workload.Namespace, workload.Name
+	cpuPercent := cpuIdlePercentFor(workload)
 
 	switch {
 	case eval.SignalsConfirm():
 		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(2)
 		predicted := engine.Predict(0, r.now())
-		if predicted >= cpuIdleThresholdFor(workload) {
+		cpuPerReplica, err := r.metrics.CPURequestPerReplica(ctx, workload)
+		if err != nil {
+			return nil, fmt.Errorf("reading cpu request for prediction check: %w", err)
+		}
+		replicas, err := r.metrics.Replicas(ctx, workload)
+		if err != nil {
+			return nil, fmt.Errorf("reading replicas for prediction check: %w", err)
+		}
+		totalRequest := cpuPerReplica * float64(replicas)
+		predictedPercent := 0.0
+		if totalRequest > 0 {
+			predictedPercent = predicted / totalRequest * 100
+		}
+		if predictedPercent >= float64(cpuPercent) {
 			opmetrics.IdleFlukes.WithLabelValues(ns, name).Inc()
 			r.emitEvent(workload, dryRun, "Normal", ReasonIdleFluke,
-				"signals confirm idle but prediction disagrees (predicted demand %.0fm, threshold %.0fm), rechecking",
-				predicted, cpuIdleThresholdFor(workload))
+				"signals confirm idle but prediction disagrees (predicted %.0f%% utilization, threshold %d%%), rechecking",
+				predictedPercent, cpuPercent)
 			result := ctrl.Result{RequeueAfter: 5 * time.Minute}
 			return &result, nil
 		}

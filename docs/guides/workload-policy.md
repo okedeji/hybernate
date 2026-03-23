@@ -13,7 +13,8 @@ metadata:
 spec:
   mode: suggest
   scanInterval: "10m"
-  cpuIdleThreshold: 50
+  cpuIdleThreshold: 10
+  memoryIdleThreshold: 10
   cpuWastefulThreshold: 30
   rightSizeTarget: 70
 ```
@@ -67,7 +68,7 @@ spec:
 
 | Classification | Condition |
 |---------------|-----------|
-| **Idle** | CPU usage < `cpuIdleThreshold` AND memory usage < `memoryIdleThreshold` |
+| **Idle** | CPU usage < `cpuIdleThreshold`% of request AND memory usage < `memoryIdleThreshold`% of request |
 | **Wasteful** | CPU utilization < `cpuWastefulThreshold` AND memory utilization < `memoryWastefulThreshold` |
 | **Active** | Everything else |
 
@@ -83,7 +84,8 @@ WorkloadPolicy sets defaults for ManagedWorkloads it creates (in auto-manage mod
 spec:
   idlePolicy:
     action: pause
-    cpuIdleThreshold: 50
+    cpuIdleThreshold: 10
+    memoryIdleThreshold: 10
     gracePeriod: "5m"
     autoResume: true
 
@@ -148,8 +150,8 @@ Results are capped at 500 entries, sorted by estimated savings descending.
 | `targetKinds` | list | `[Deployment, StatefulSet]` | Which kinds to scan |
 | `mode` | `suggest` or `auto-manage` | `suggest` | Reporting only or auto-create ManagedWorkloads |
 | `scanInterval` | duration | `10m` | How often to re-scan |
-| `cpuIdleThreshold` | int (millicores) | `50` | CPU below this = Idle |
-| `memoryIdleThreshold` | int64 (bytes) | `104857600` (100Mi) | Memory below this = Idle |
+| `cpuIdleThreshold` | int (percent) | `10` | CPU utilization % of request below which workload is Idle (0-100) |
+| `memoryIdleThreshold` | int (percent) | `10` | Memory utilization % of request below which workload is Idle (0-100) |
 | `cpuWastefulThreshold` | int (percent) | `30` | CPU utilization below this = Wasteful |
 | `memoryWastefulThreshold` | int (percent) | `30` | Memory utilization below this = Wasteful |
 | `rightSizeTarget` | int (percent) | `70` | Target utilization for savings estimates |

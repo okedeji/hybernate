@@ -23,7 +23,8 @@ metadata:
   namespace: staging
 spec:
   mode: suggest
-  cpuIdleThreshold: 50
+  cpuIdleThreshold: 10
+  memoryIdleThreshold: 10
   cpuWastefulThreshold: 30
 ```
 
@@ -82,7 +83,8 @@ spec:
     name: idle-worker
   idlePolicy:
     action: pause
-    cpuIdleThreshold: 50
+    cpuIdleThreshold: 10
+    memoryIdleThreshold: 10
     gracePeriod: "5m"
     autoResume: true
   # ... other defaults from the policy

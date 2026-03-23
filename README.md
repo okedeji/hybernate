@@ -50,8 +50,8 @@ metadata:
   namespace: staging
 spec:
   mode: auto-manage
-  cpuIdleThreshold: 50
-  memoryIdleThreshold: 104857600
+  cpuIdleThreshold: 10
+  memoryIdleThreshold: 10
   dryRun: true
 ```
 
@@ -80,7 +80,8 @@ spec:
     kind: Deployment
     name: my-api
   idlePolicy:
-    cpuIdleThreshold: 50
+    cpuIdleThreshold: 10
+    memoryIdleThreshold: 10
     gracePeriod: "5m"
     autoResume: true
   prediction:
