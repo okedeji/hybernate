@@ -35,7 +35,7 @@ Hybernate fixes this by:
 
 ```bash
 helm install hybernate oci://ghcr.io/okedeji/charts/hybernate \
-  --version v0.1.5 \
+  --version v0.1.6 \
   --namespace hybernate-system \
   --create-namespace
 ```

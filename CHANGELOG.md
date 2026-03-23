@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-03-23
+
+### Changed
+
+- Idle thresholds are now percentages of resource request instead of absolute values (cpuIdleThreshold default: 10%, memoryIdleThreshold default: 10%), making idle detection scale-fair across workloads of all sizes
+- Added `Replicas()` and `MemoryRequestPerReplica()` to metrics reader for replica-aware threshold computation
+- Signal checker thresholds now account for replica count to match total usage comparison
+- Prediction cross-checks convert predicted demand to percentage of total request
+- kubectl plugin installation docs now show curl download first, Krew second
+
+### Fixed
+
+- Prediction safety net in idle detection no longer silently bypassed on metrics errors
+- Auto-resume percentage calculation now correctly uses total request (per-replica x replicas) from paused snapshot
+
 ## [0.1.5] - 2026-03-22
 
 ### Fixed
@@ -98,7 +113,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cosign image signing and SBOM generation
 - Release workflow with cross-platform builds and Helm chart publishing
 
-[Unreleased]: https://github.com/okedeji/hybernate/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/okedeji/hybernate/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/okedeji/hybernate/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/okedeji/hybernate/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/okedeji/hybernate/compare/v0.1.2...v0.1.4
 [0.1.2]: https://github.com/okedeji/hybernate/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/okedeji/hybernate/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/okedeji/hybernate/releases/tag/v0.1.0
