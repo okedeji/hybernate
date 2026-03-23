@@ -34,7 +34,8 @@ metadata:
 spec:
   mode: auto-manage
   scanInterval: 10m
-  cpuIdleThreshold: 50
+  cpuIdleThreshold: 10
+  memoryIdleThreshold: 10
   dryRun: true
 ```
 
@@ -159,7 +160,7 @@ kubectl patch managedworkload my-api -n sandbox \
 
 Hybernate will now:
 
-- Monitor CPU usage against the 50m threshold
+- Monitor CPU and memory usage against their percentage-of-request thresholds
 - Wait for all signals to confirm idle
 - Apply the grace period
 - Check the forecast engine before acting

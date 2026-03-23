@@ -52,17 +52,20 @@ type WorkloadPolicySpec struct {
 	// +optional
 	ScanInterval *metav1.Duration `json:"scanInterval,omitempty"`
 
-	// CPU millis below which a workload is classified as Idle.
+	// CPU utilization percentage of request below which a workload is Idle.
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=50
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=10
 	// +optional
 	CPUIdleThreshold int `json:"cpuIdleThreshold,omitempty"`
 
-	// Memory usage in bytes below which a workload is classified as Idle.
+	// Memory utilization percentage of request below which a workload is Idle.
 	// Both CPU and memory must be below their respective thresholds.
-	// +kubebuilder:default=104857600
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=10
 	// +optional
-	MemoryIdleThreshold int64 `json:"memoryIdleThreshold,omitempty"`
+	MemoryIdleThreshold int `json:"memoryIdleThreshold,omitempty"`
 
 	// CPU utilization percentage below which a non-idle workload is Wasteful.
 	// +kubebuilder:validation:Minimum=0
@@ -96,7 +99,7 @@ type WorkloadPolicySpec struct {
 	DryRun bool `json:"dryRun,omitempty"`
 
 	// Default idle policy copied into exported/auto-created ManagedWorkloads.
-	// +kubebuilder:default={"action":"pause","cpuIdleThreshold":50,"memoryIdleThreshold":104857600,"gracePeriod":"5m0s","autoResume":true}
+	// +kubebuilder:default={"action":"pause","cpuIdleThreshold":10,"memoryIdleThreshold":10,"gracePeriod":"5m0s","autoResume":true}
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
 	// Default scaling policy copied into exported/auto-created ManagedWorkloads.

@@ -14,8 +14,8 @@
 | `desiredState` | `Running` \| `Paused` \| `Destroyed` | No | | Manual lifecycle override |
 | `idlePolicy` | `IdlePolicySpec` | No | | Idle detection configuration |
 | `idlePolicy.action` | `auto` \| `pause` \| `destroy` | No | `auto` | Action on idle confirmation |
-| `idlePolicy.cpuIdleThreshold` | int | No | `50` | CPU millicores threshold |
-| `idlePolicy.memoryIdleThreshold` | int64 | No | `104857600` | Memory bytes threshold (100Mi) |
+| `idlePolicy.cpuIdleThreshold` | int | No | `10` | CPU utilization percentage of request below which workload is idle (0-100) |
+| `idlePolicy.memoryIdleThreshold` | int | No | `10` | Memory utilization percentage of request below which workload is idle (0-100) |
 | `idlePolicy.gracePeriod` | duration | No | | Continuous idle confirmation period |
 | `idlePolicy.autoResume` | bool | No | `false` | Resume when signals clear |
 | `idlePolicy.signals[]` | `ProbeSpec` | No | | Additional signal checks |
@@ -115,8 +115,8 @@
 | `targetKinds[]` | `TargetKind` | No | `[Deployment, StatefulSet]` | Kinds to scan |
 | `mode` | `suggest` \| `auto-manage` | No | `suggest` | Operating mode |
 | `scanInterval` | duration | No | `10m` | Re-scan frequency |
-| `cpuIdleThreshold` | int | No | `50` | CPU millis for Idle classification |
-| `memoryIdleThreshold` | int64 | No | `104857600` | Memory bytes for Idle classification (100Mi) |
+| `cpuIdleThreshold` | int | No | `10` | CPU utilization % of request for Idle classification (0-100) |
+| `memoryIdleThreshold` | int | No | `10` | Memory utilization % of request for Idle classification (0-100) |
 | `cpuWastefulThreshold` | int (0-100) | No | `30` | CPU utilization % for Wasteful |
 | `memoryWastefulThreshold` | int (0-100) | No | `30` | Memory utilization % for Wasteful |
 | `rightSizeTarget` | int (1-100) | No | `70` | Target utilization for savings |

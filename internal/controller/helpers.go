@@ -81,22 +81,22 @@ func resolveIdleAction(workload *v1alpha1.ManagedWorkload) v1alpha1.IdleAction {
 }
 
 const (
-	defaultCPUIdleThreshold    = 50
-	defaultMemoryIdleThreshold = 104857600 // 100Mi
+	defaultCPUIdlePercent    = 10
+	defaultMemoryIdlePercent = 10
 )
 
-func cpuIdleThresholdFor(workload *v1alpha1.ManagedWorkload) float64 {
+func cpuIdlePercentFor(workload *v1alpha1.ManagedWorkload) int {
 	if workload.Spec.IdlePolicy != nil && workload.Spec.IdlePolicy.CPUIdleThreshold > 0 {
-		return float64(workload.Spec.IdlePolicy.CPUIdleThreshold)
+		return workload.Spec.IdlePolicy.CPUIdleThreshold
 	}
-	return defaultCPUIdleThreshold
+	return defaultCPUIdlePercent
 }
 
-func memoryIdleThresholdFor(workload *v1alpha1.ManagedWorkload) int64 {
+func memoryIdlePercentFor(workload *v1alpha1.ManagedWorkload) int {
 	if workload.Spec.IdlePolicy != nil && workload.Spec.IdlePolicy.MemoryIdleThreshold > 0 {
 		return workload.Spec.IdlePolicy.MemoryIdleThreshold
 	}
-	return defaultMemoryIdleThreshold
+	return defaultMemoryIdlePercent
 }
 
 func idleGracePeriod(workload *v1alpha1.ManagedWorkload) time.Duration {
@@ -190,14 +190,37 @@ func seasonPhases(phase forecast.Phase) (daily, weekly string) {
 	}
 }
 
-func (r *Reconciler) buildIdleSignals(workload *v1alpha1.ManagedWorkload) []signal.Checker {
-	cpuThreshold := resource.NewMilliQuantity(int64(cpuIdleThresholdFor(workload)), resource.DecimalSI)
-	memThreshold := resource.NewQuantity(memoryIdleThresholdFor(workload), resource.BinarySI)
+func (r *Reconciler) buildIdleSignals(ctx context.Context, workload *v1alpha1.ManagedWorkload) ([]signal.Checker, error) {
+	cpuPercent := cpuIdlePercentFor(workload)
+	memPercent := memoryIdlePercentFor(workload)
+
+	cpuPerReplica, err := r.metrics.CPURequestPerReplica(ctx, workload)
+	if err != nil {
+		return nil, fmt.Errorf("reading cpu request: %w", err)
+	}
+	memPerReplica, err := r.metrics.MemoryRequestPerReplica(ctx, workload)
+	if err != nil {
+		return nil, fmt.Errorf("reading memory request: %w", err)
+	}
+	replicas, err := r.metrics.Replicas(ctx, workload)
+	if err != nil {
+		return nil, fmt.Errorf("reading replicas: %w", err)
+	}
+
+	// Signal checkers compare against total usage across all pods, so
+	// the absolute threshold must account for all replicas.
+	n := float64(replicas)
+	cpuAbsolute := int64(cpuPerReplica * n * float64(cpuPercent) / 100)
+	memAbsolute := int64(memPerReplica * n * float64(memPercent) / 100)
+
+	cpuThreshold := resource.NewMilliQuantity(cpuAbsolute, resource.DecimalSI)
+	memThreshold := resource.NewQuantity(memAbsolute, resource.BinarySI)
+
 	checkers := []signal.Checker{
 		signal.NewInternal(r.metrics, workload, *cpuThreshold, signal.Below),
 		signal.NewMemoryInternal(r.metrics, workload, *memThreshold, signal.Below),
 	}
-	return r.appendUserSignals(checkers, workload.Spec.IdlePolicy.Signals)
+	return r.appendUserSignals(checkers, workload.Spec.IdlePolicy.Signals), nil
 }
 
 func (r *Reconciler) buildScaleDownGuards(workload *v1alpha1.ManagedWorkload, targetCapacity float64) []signal.Checker {

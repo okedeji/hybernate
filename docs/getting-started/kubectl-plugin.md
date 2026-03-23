@@ -4,17 +4,7 @@ Hybernate provides a `kubectl hybernate` plugin for exporting discovered workloa
 
 ## Installation
 
-=== "Krew"
-
-    ```bash
-    kubectl krew install --manifest-url \
-      https://github.com/okedeji/hybernate/releases/latest/download/krew-hybernate.yaml
-    ```
-
-    !!! note
-        This uses a custom manifest URL. Once the plugin is accepted into the [krew-index](https://github.com/kubernetes-sigs/krew-index), you'll be able to install with just `kubectl krew install hybernate`.
-
-=== "Binary"
+=== "curl"
 
     Download the binary from the [releases page](https://github.com/okedeji/hybernate/releases) and place it in your `PATH`:
 
@@ -31,6 +21,16 @@ Hybernate provides a `kubectl hybernate` plugin for exporting discovered workloa
     chmod +x kubectl-hybernate-linux-amd64
     mv kubectl-hybernate-linux-amd64 /usr/local/bin/kubectl-hybernate
     ```
+
+=== "Krew"
+
+    ```bash
+    kubectl krew install --manifest-url \
+      https://github.com/okedeji/hybernate/releases/latest/download/krew-hybernate.yaml
+    ```
+
+    !!! note
+        This uses a custom manifest URL. Once the plugin is accepted into the [krew-index](https://github.com/kubernetes-sigs/krew-index), you'll be able to install with just `kubectl krew install hybernate`.
 
 === "Source"
 

@@ -152,10 +152,13 @@ spec:
                       (i.e. signals no longer confirm idle).
                     type: boolean
                   cpuIdleThreshold:
-                    default: 50
+                    default: 10
                     description: |-
-                      CPUIdleThreshold is the CPU usage in millicores below which the workload
-                      is considered potentially idle (e.g. 50 means 50m).
+                      CPUIdleThreshold is the CPU utilization percentage of request below
+                      which the workload is considered potentially idle (e.g. 10 means idle
+                      if CPU usage < 10% of CPU request).
+                    maximum: 100
+                    minimum: 0
                     type: integer
                   gracePeriod:
                     description: |-
@@ -165,12 +168,14 @@ spec:
                     format: duration
                     type: string
                   memoryIdleThreshold:
-                    default: 104857600
+                    default: 10
                     description: |-
-                      MemoryIdleThreshold is the memory usage in bytes below which the
-                      workload is considered potentially idle. Both CPU and memory must be
-                      below their respective thresholds for idle detection to confirm.
-                    format: int64
+                      MemoryIdleThreshold is the memory utilization percentage of request
+                      below which the workload is considered potentially idle. Both CPU and
+                      memory must be below their respective thresholds for idle detection
+                      to confirm.
+                    maximum: 100
+                    minimum: 0
                     type: integer
                   signals:
                     description: |-

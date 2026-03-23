@@ -61,13 +61,14 @@ spec:
     name: my-api
   idlePolicy:
     action: auto
-    cpuIdleThreshold: 50
+    cpuIdleThreshold: 10
+    memoryIdleThreshold: 10
     gracePeriod: 10m
   prediction:
     confidence: 85
 ```
 
-This watches the `my-api` Deployment and pauses it when CPU stays below 50 millicores for 10 minutes. The forecast engine learns daily and weekly patterns and must agree before any action is taken.
+This watches the `my-api` Deployment and pauses it when both CPU and memory stay below 10% of their respective requests for 10 minutes. The forecast engine learns daily and weekly patterns and must agree before any action is taken.
 
 For scaling policies, custom PromQL signals, cost rate overrides, and the full spec, see the [ManagedWorkload Guide](guides/managed-workload.md).
 

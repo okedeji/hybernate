@@ -189,10 +189,10 @@ func (r *WorkloadPolicyReconciler) autoManage(ctx context.Context, policy *v1alp
 func thresholdsFromSpec(spec v1alpha1.WorkloadPolicySpec) discovery.Thresholds {
 	th := discovery.DefaultThresholds()
 	if spec.CPUIdleThreshold > 0 {
-		th.IdleMillis = spec.CPUIdleThreshold
+		th.IdlePercent = spec.CPUIdleThreshold
 	}
 	if spec.MemoryIdleThreshold > 0 {
-		th.MemoryIdleBytes = spec.MemoryIdleThreshold
+		th.MemoryIdlePercent = spec.MemoryIdleThreshold
 	}
 	if spec.CPUWastefulThreshold > 0 {
 		th.WastefulPercent = spec.CPUWastefulThreshold

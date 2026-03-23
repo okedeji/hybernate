@@ -108,6 +108,28 @@ func (r *Reader) CPURequestPerReplica(ctx context.Context, workload *v1alpha1.Ma
 	return total, nil
 }
 
+// MemoryRequestPerReplica returns the total memory request (in bytes) for one
+// replica by summing requests across all containers in the pod template.
+func (r *Reader) MemoryRequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	target, err := r.getTarget(ctx, workload)
+	if err != nil {
+		return 0, err
+	}
+
+	var total float64
+	for _, c := range containersFromTarget(target) {
+		if mem := c.Resources.Requests.Memory(); mem != nil {
+			total += float64(mem.Value())
+		}
+	}
+
+	if total == 0 {
+		return 0, fmt.Errorf("no memory requests found in pod template for %s %s", workload.Spec.Target.Kind, workload.Spec.Target.Name)
+	}
+
+	return total, nil
+}
+
 // MemoryUsage returns aggregate memory usage across all pods for a workload.
 func (r *Reader) MemoryUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
 	bytes, err := r.TotalMemoryBytes(ctx, workload)
@@ -181,6 +203,29 @@ func (r *Reader) TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWo
 		}
 	}
 	return total, nil
+}
+
+// Replicas returns the current spec.replicas for the target workload.
+func (r *Reader) Replicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error) {
+	target, err := r.getTarget(ctx, workload)
+	if err != nil {
+		return 0, err
+	}
+	return replicasFromTarget(target), nil
+}
+
+func replicasFromTarget(obj client.Object) int32 {
+	switch t := obj.(type) {
+	case *appsv1.Deployment:
+		if t.Spec.Replicas != nil {
+			return *t.Spec.Replicas
+		}
+	case *appsv1.StatefulSet:
+		if t.Spec.Replicas != nil {
+			return *t.Spec.Replicas
+		}
+	}
+	return 1
 }
 
 func (r *Reader) getTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (client.Object, error) {

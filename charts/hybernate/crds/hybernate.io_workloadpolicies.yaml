@@ -111,8 +111,10 @@ spec:
                     type: object
                 type: object
               cpuIdleThreshold:
-                default: 50
-                description: CPU millis below which a workload is classified as Idle.
+                default: 10
+                description: CPU utilization percentage of request below which a workload
+                  is Idle.
+                maximum: 100
                 minimum: 0
                 type: integer
               cpuWastefulThreshold:
@@ -151,9 +153,9 @@ spec:
                 default:
                   action: pause
                   autoResume: true
-                  cpuIdleThreshold: 50
+                  cpuIdleThreshold: 10
                   gracePeriod: 5m0s
-                  memoryIdleThreshold: 104857600
+                  memoryIdleThreshold: 10
                 description: Default idle policy copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
@@ -173,10 +175,13 @@ spec:
                       (i.e. signals no longer confirm idle).
                     type: boolean
                   cpuIdleThreshold:
-                    default: 50
+                    default: 10
                     description: |-
-                      CPUIdleThreshold is the CPU usage in millicores below which the workload
-                      is considered potentially idle (e.g. 50 means 50m).
+                      CPUIdleThreshold is the CPU utilization percentage of request below
+                      which the workload is considered potentially idle (e.g. 10 means idle
+                      if CPU usage < 10% of CPU request).
+                    maximum: 100
+                    minimum: 0
                     type: integer
                   gracePeriod:
                     description: |-
@@ -186,12 +191,14 @@ spec:
                     format: duration
                     type: string
                   memoryIdleThreshold:
-                    default: 104857600
+                    default: 10
                     description: |-
-                      MemoryIdleThreshold is the memory usage in bytes below which the
-                      workload is considered potentially idle. Both CPU and memory must be
-                      below their respective thresholds for idle detection to confirm.
-                    format: int64
+                      MemoryIdleThreshold is the memory utilization percentage of request
+                      below which the workload is considered potentially idle. Both CPU and
+                      memory must be below their respective thresholds for idle detection
+                      to confirm.
+                    maximum: 100
+                    minimum: 0
                     type: integer
                   signals:
                     description: |-
@@ -225,11 +232,12 @@ spec:
                 - action
                 type: object
               memoryIdleThreshold:
-                default: 104857600
+                default: 10
                 description: |-
-                  Memory usage in bytes below which a workload is classified as Idle.
+                  Memory utilization percentage of request below which a workload is Idle.
                   Both CPU and memory must be below their respective thresholds.
-                format: int64
+                maximum: 100
+                minimum: 0
                 type: integer
               memoryWastefulThreshold:
                 default: 30

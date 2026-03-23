@@ -25,8 +25,8 @@ const hoursPerMonth = 730
 
 // Thresholds holds classification parameters extracted from a WorkloadPolicy spec.
 type Thresholds struct {
-	IdleMillis            int
-	MemoryIdleBytes       int64
+	IdlePercent           int
+	MemoryIdlePercent     int
 	WastefulPercent       int
 	MemoryWastefulPercent int
 	RightSizePercent      int
@@ -36,8 +36,8 @@ type Thresholds struct {
 // DefaultThresholds returns classification parameters matching the CRD defaults.
 func DefaultThresholds() Thresholds {
 	return Thresholds{
-		IdleMillis:            50,
-		MemoryIdleBytes:       104857600, // 100Mi
+		IdlePercent:           10,
+		MemoryIdlePercent:     10,
 		WastefulPercent:       30,
 		MemoryWastefulPercent: 30,
 		RightSizePercent:      70,
@@ -60,11 +60,21 @@ type WorkloadInfo struct {
 }
 
 // Classify determines whether a workload is Active, Idle, or Wasteful.
-// Idle requires both CPU and memory to be below their thresholds.
+// Idle requires both CPU and memory utilization to be below their percentage
+// thresholds relative to the workload's resource requests.
 // Wasteful requires both CPU and memory utilization to be below their thresholds.
 func Classify(w WorkloadInfo, t Thresholds) v1alpha1.Classification {
-	cpuIdle := w.CPUUsageMillis <= int64(t.IdleMillis)
-	memIdle := w.MemoryUsageBytes <= t.MemoryIdleBytes
+	cpuIdle := false
+	if w.CPURequestMillis > 0 {
+		cpuUtil := float64(w.CPUUsageMillis) / float64(w.CPURequestMillis) * 100
+		cpuIdle = cpuUtil < float64(t.IdlePercent)
+	}
+
+	memIdle := false
+	if w.MemoryRequestBytes > 0 {
+		memUtil := float64(w.MemoryUsageBytes) / float64(w.MemoryRequestBytes) * 100
+		memIdle = memUtil < float64(t.MemoryIdlePercent)
+	}
 
 	if cpuIdle && memIdle {
 		return v1alpha1.ClassificationIdle

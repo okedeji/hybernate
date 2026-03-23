@@ -93,7 +93,7 @@ func TestScanner_Scan_ClassifiesWorkloads(t *testing.T) {
 	th := DefaultThresholds()
 
 	objects := []runtime.Object{
-		// Idle: 10m CPU usage vs 50m threshold
+		// Idle: 10m/1000m = 1% CPU, 100Mi/1Gi ≈ 10% memory, both below 10%
 		makeDeployment("idle-app", ns, 1, "1000m", "1Gi", nil),
 		makePodMetrics("idle-app", ns, "10m", "100Mi"),
 

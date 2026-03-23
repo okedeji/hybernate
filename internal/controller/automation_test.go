@@ -62,11 +62,13 @@ func (f *stubForecaster) RegimeChanged() bool                { return f.regimeCh
 func (f *stubForecaster) AnomalyDetected() bool              { return f.anomalyDetected }
 
 type stubMetrics struct {
-	cpuMillis     float64
-	cpuPerReplica float64
-	memoryBytes   float64
-	pvcBytes      float64
-	err           error
+	cpuMillis        float64
+	cpuPerReplica    float64
+	memoryBytes      float64
+	memoryPerReplica float64
+	replicas         int32
+	pvcBytes         float64
+	err              error
 }
 
 func (m *stubMetrics) CPUUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
@@ -89,6 +91,17 @@ func (m *stubMetrics) TotalCPUMillis(_ context.Context, _ *v1alpha1.ManagedWorkl
 
 func (m *stubMetrics) CPURequestPerReplica(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
 	return m.cpuPerReplica, m.err
+}
+
+func (m *stubMetrics) MemoryRequestPerReplica(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
+	return m.memoryPerReplica, m.err
+}
+
+func (m *stubMetrics) Replicas(_ context.Context, _ *v1alpha1.ManagedWorkload) (int32, error) {
+	if m.replicas > 0 {
+		return m.replicas, m.err
+	}
+	return 1, m.err
 }
 
 func (m *stubMetrics) TotalMemoryBytes(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
@@ -271,7 +284,7 @@ func TestAutomation_SuggestingEmitsDryRunEvents(t *testing.T) {
 
 	engine := &stubForecaster{
 		phase:        forecast.DailySuggesting,
-		predictValue: 10.0, // below cpuIdleThreshold
+		predictValue: 10.0, // below idle threshold as percentage
 	}
 	idle := &stubIdleEvaluator{
 		eval: policy.IdleEvaluation{
@@ -279,7 +292,8 @@ func TestAutomation_SuggestingEmitsDryRunEvents(t *testing.T) {
 			IdleFor: 45 * time.Minute,
 		},
 	}
-	r := newAutomationReconciler(t, workload, engine, automationOpts{idle: idle})
+	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{idle: idle, metrics: metrics})
 
 	result, err := r.reconcileAutomation(context.Background(), workload)
 	require.NoError(t, err)
@@ -309,9 +323,11 @@ func TestAutomation_ActiveIdlePauses(t *testing.T) {
 		},
 	}
 	pauser := &stubPauser{pauseDone: true}
+	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{
-		idle:   idle,
-		pauser: pauser,
+		idle:    idle,
+		pauser:  pauser,
+		metrics: metrics,
 	})
 
 	_, err := r.reconcileAutomation(context.Background(), workload)
@@ -340,9 +356,11 @@ func TestAutomation_ActiveIdleDestroys(t *testing.T) {
 		},
 	}
 	destroyer := &stubDestroyer{destroyDone: true}
+	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{
 		idle:      idle,
 		destroyer: destroyer,
+		metrics:   metrics,
 	})
 
 	_, err := r.reconcileAutomation(context.Background(), workload)
@@ -367,9 +385,11 @@ func TestAutomation_ActiveNotIdleDoesNotAct(t *testing.T) {
 		eval: policy.IdleEvaluation{Status: policy.IdleStatusActive},
 	}
 	pauser := &stubPauser{}
+	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{
-		idle:   idle,
-		pauser: pauser,
+		idle:    idle,
+		pauser:  pauser,
+		metrics: metrics,
 	})
 
 	result, err := r.reconcileAutomation(context.Background(), workload)
@@ -387,15 +407,17 @@ func TestAutomation_ActiveIdleFlukePredictionDisagrees(t *testing.T) {
 
 	engine := &stubForecaster{
 		phase:        forecast.DailyActive,
-		predictValue: 500.0, // well above cpuIdleThreshold — prediction disagrees
+		predictValue: 500.0, // 50% of 1000m request — well above 10% idle threshold
 	}
 	idle := &stubIdleEvaluator{
 		eval: policy.IdleEvaluation{Status: policy.IdleStatusSignalsConfirm},
 	}
 	pauser := &stubPauser{}
+	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{
-		idle:   idle,
-		pauser: pauser,
+		idle:    idle,
+		pauser:  pauser,
+		metrics: metrics,
 	})
 
 	result, err := r.reconcileAutomation(context.Background(), workload)
