@@ -168,6 +168,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// --- Cost tracking ---
 	r.accumulateCost(ctx, &workload)
+	if err := r.Status().Update(ctx, &workload); err != nil {
+		return ctrl.Result{}, fmt.Errorf("persisting cost status: %w", err)
+	}
 
 	logger.Info("reconciled", "phase", workload.Status.Phase)
 	return ctrl.Result{}, nil
@@ -208,9 +211,10 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 	// Capture resource profile before scaling to zero for cost savings tracking.
 	if workload.Status.Pause == nil || workload.Status.Pause.Resources == nil {
 		snap := r.captureResourceSnapshot(ctx, workload)
-		if workload.Status.Pause != nil {
-			workload.Status.Pause.Resources = snap
+		if workload.Status.Pause == nil {
+			workload.Status.Pause = &v1alpha1.PauseStatus{}
 		}
+		workload.Status.Pause.Resources = snap
 	}
 
 	done, err := r.pauser.Pause(ctx, workload)

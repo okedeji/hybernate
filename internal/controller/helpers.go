@@ -72,6 +72,9 @@ func dryRunPrefix(dryRun bool) string {
 }
 
 func resolveIdleAction(workload *v1alpha1.ManagedWorkload) v1alpha1.IdleAction {
+	if workload.Spec.IdlePolicy == nil {
+		return v1alpha1.IdleActionPause
+	}
 	if workload.Spec.IdlePolicy.Action == v1alpha1.IdleActionDestroy {
 		return v1alpha1.IdleActionDestroy
 	}
