@@ -2,8 +2,8 @@ apiVersion: v2
 name: hybernate
 description: Intelligent Kubernetes workload lifecycle operator — idle detection, predictive scaling, cost tracking, and auto-discovery.
 type: application
-version: 0.1.6
-appVersion: "0.1.6"
+version: 0.1.7
+appVersion: "0.1.7"
 kubeVersion: ">=1.26.0"
 home: https://github.com/okedeji/hybernate
 sources:

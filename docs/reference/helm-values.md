@@ -3,13 +3,13 @@
 Complete reference for the Hybernate Helm chart. Install with:
 
 ```bash
-helm install hybernate oci://ghcr.io/okedeji/charts/hybernate --version v0.1.6
+helm install hybernate oci://ghcr.io/okedeji/charts/hybernate --version v0.1.7
 ```
 
 To see all defaults:
 
 ```bash
-helm show values oci://ghcr.io/okedeji/charts/hybernate --version v0.1.6
+helm show values oci://ghcr.io/okedeji/charts/hybernate --version v0.1.7
 ```
 
 ## Image
@@ -184,7 +184,7 @@ affinity:
 
 ```bash
 helm install hybernate oci://ghcr.io/okedeji/charts/hybernate \
-  --version v0.1.6 \
+  --version v0.1.7 \
   -f values-production.yaml \
   -n hybernate-system --create-namespace
 ```
