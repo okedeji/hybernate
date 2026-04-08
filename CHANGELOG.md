@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-04-08
+
+### Fixed
+
+- Reconciler now initializes the idle detector and scaler in `initDefaults`; without these, the first reconcile of any workload with an `IdlePolicy` or `ScalePolicy` panicked with a nil-pointer dereference in production (#10)
+- Cost status is now persisted after `accumulateCost`; previously the function mutated `Status.Cost` in memory but no caller called `Status().Update`, so cost data was silently dropped every reconcile
+- First-pause resource snapshot is no longer lost; `Status.Pause` is now initialized before the snapshot is assigned, restoring the baseline used for savings calculations
+- `resolveIdleAction` defensively nil-checks `IdlePolicy` to prevent the same class of panic from resurfacing via future callers
+- Monthly cost reset now compares year and month so cross-year boundaries or backward clock jumps roll the bucket over instead of appending to the prior month
+
 ## [0.1.6] - 2026-03-23
 
 ### Changed
@@ -113,7 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cosign image signing and SBOM generation
 - Release workflow with cross-platform builds and Helm chart publishing
 
-[Unreleased]: https://github.com/okedeji/hybernate/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/okedeji/hybernate/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/okedeji/hybernate/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/okedeji/hybernate/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/okedeji/hybernate/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/okedeji/hybernate/compare/v0.1.2...v0.1.4
