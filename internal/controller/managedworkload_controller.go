@@ -38,6 +38,7 @@ import (
 	"github.com/okedeji/hybernate/internal/forecast"
 	"github.com/okedeji/hybernate/internal/lifecycle"
 	"github.com/okedeji/hybernate/internal/metrics"
+	"github.com/okedeji/hybernate/internal/policy"
 )
 
 const (
@@ -743,6 +744,12 @@ func (r *Reconciler) initDefaults() {
 	}
 	if r.metrics == nil {
 		r.metrics = metrics.NewReader(r.Client)
+	}
+	if r.idle == nil {
+		r.idle = policy.NewIdleDetector()
+	}
+	if r.scale == nil {
+		r.scale = policy.NewScaler()
 	}
 	if r.engines == nil {
 		r.engines = newEngineRegistry(func(threshold int) forecaster {
