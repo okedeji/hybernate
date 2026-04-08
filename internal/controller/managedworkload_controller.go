@@ -542,12 +542,12 @@ func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedW
 	logger := log.FromContext(ctx)
 	logger.Info("replica drift detected", "expected", expected, "actual", actual)
 
-	policy := resolveConflictAction(workload)
-	metrics.DriftDetections.WithLabelValues(string(policy)).Inc()
+	action := resolveConflictAction(workload)
+	metrics.DriftDetections.WithLabelValues(string(action)).Inc()
 	r.emitEvent(workload, false, "Warning", ReasonDriftDetected,
-		"replicas changed externally from %d to %d, policy: %s", expected, actual, policy)
+		"replicas changed externally from %d to %d, policy: %s", expected, actual, action)
 
-	switch policy {
+	switch action {
 	case v1alpha1.ConflictActionEnforce:
 		if err := r.enforceReplicas(ctx, target, expected); err != nil {
 			return nil, fmt.Errorf("enforcing replicas: %w", err)
