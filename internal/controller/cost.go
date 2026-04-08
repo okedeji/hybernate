@@ -43,10 +43,13 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 		workload.Status.Cost = &v1alpha1.CostStatus{}
 	}
 
-	// Monthly reset.
-	if workload.Status.Cost.LastAccumulatedAt != nil &&
-		workload.Status.Cost.LastAccumulatedAt.Month() != now.Month() {
-		workload.Status.Cost = &v1alpha1.CostStatus{}
+	// Monthly reset. Compare year+month so a cross-year or backwards clock
+	// jump still rolls the bucket over instead of silently appending to the
+	// previous month's totals.
+	if last := workload.Status.Cost.LastAccumulatedAt; last != nil {
+		if last.Year() != now.Year() || last.Month() != now.Month() {
+			workload.Status.Cost = &v1alpha1.CostStatus{}
+		}
 	}
 
 	elapsed := time.Duration(0)
