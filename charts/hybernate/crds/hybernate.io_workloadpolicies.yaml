@@ -207,17 +207,15 @@ spec:
                       these signals are layered on top for application-level confirmation.
                     items:
                       description: |-
-                        ProbeSpec defines an external check used for idle detection signals or
-                        scale-down guards. For Prometheus probes, the PromQL query must return a
-                        non-zero value to confirm the action. An empty result or zero value denies it.
+                        ProbeSpec defines an external check used as an idle detection signal. For
+                        Prometheus probes, the PromQL query must return a non-zero value to confirm
+                        the workload is idle. An empty result or zero value denies it.
                       properties:
                         promQL:
                           description: |-
                             PromQL is an instant query evaluated against the configured Prometheus
-                            endpoint. The query must return a non-zero scalar to confirm the action.
-                            Examples:
-                              Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
-                              Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
+                            endpoint. The query must return a non-zero scalar to confirm idle.
+                            Example: rate(http_requests_total{service="api"}[10m]) == 0
                           type: string
                         source:
                           default: prometheus
@@ -333,136 +331,6 @@ spec:
                 maximum: 100
                 minimum: 1
                 type: integer
-              scalePolicy:
-                default:
-                  down:
-                    stabilization: 5m0s
-                  maxReplicas: 10
-                  minReplicas: 1
-                  up:
-                    stabilization: 2m0s
-                description: Default scaling policy copied into exported/auto-created
-                  ManagedWorkloads.
-                properties:
-                  down:
-                    description: |-
-                      Down configures scale-down behavior including stabilization, step
-                      limits, and guard probes.
-                    properties:
-                      guard:
-                        description: |-
-                          Guard probes that must all confirm before a scale-down proceeds.
-                          An internal CPU capacity check runs automatically; these probes
-                          add application-level safety gates (e.g. active connections, in-flight jobs).
-                        items:
-                          description: |-
-                            ProbeSpec defines an external check used for idle detection signals or
-                            scale-down guards. For Prometheus probes, the PromQL query must return a
-                            non-zero value to confirm the action. An empty result or zero value denies it.
-                          properties:
-                            promQL:
-                              description: |-
-                                PromQL is an instant query evaluated against the configured Prometheus
-                                endpoint. The query must return a non-zero scalar to confirm the action.
-                                Examples:
-                                  Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
-                                  Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
-                              type: string
-                            source:
-                              default: prometheus
-                              enum:
-                              - prometheus
-                              type: string
-                          required:
-                          - source
-                          type: object
-                        type: array
-                      maxStep:
-                        description: |-
-                          MaxStep limits how many replicas can be added or removed in a single
-                          reconciliation loop. Enables gradual ramp-up or ramp-down.
-                        minimum: 1
-                        type: integer
-                      stabilization:
-                        description: |-
-                          Stabilization is the cooldown period after a scale event in this
-                          direction. Prevents oscillation by blocking same-direction scaling
-                          until the window elapses.
-                        format: duration
-                        type: string
-                    type: object
-                  maxReplicas:
-                    description: |-
-                      MaxReplicas is the ceiling for scaling. The operator will never scale
-                      above this value.
-                    minimum: 1
-                    type: integer
-                  minReplicas:
-                    default: 1
-                    description: |-
-                      MinReplicas is the floor for scaling. The operator will never scale
-                      below this value.
-                    minimum: 0
-                    type: integer
-                  overrideReplicas:
-                    description: |-
-                      OverrideReplicas bypasses prediction and forces the operator to scale
-                      to this exact replica count (clamped to [minReplicas, maxReplicas]).
-                      Stabilization and step limits still apply. Remove the field to return
-                      to prediction-driven scaling.
-                    format: int32
-                    minimum: 0
-                    type: integer
-                  up:
-                    description: Up configures scale-up behavior including stabilization
-                      and step limits.
-                    properties:
-                      guard:
-                        description: |-
-                          Guard probes that must all confirm before a scale-down proceeds.
-                          An internal CPU capacity check runs automatically; these probes
-                          add application-level safety gates (e.g. active connections, in-flight jobs).
-                        items:
-                          description: |-
-                            ProbeSpec defines an external check used for idle detection signals or
-                            scale-down guards. For Prometheus probes, the PromQL query must return a
-                            non-zero value to confirm the action. An empty result or zero value denies it.
-                          properties:
-                            promQL:
-                              description: |-
-                                PromQL is an instant query evaluated against the configured Prometheus
-                                endpoint. The query must return a non-zero scalar to confirm the action.
-                                Examples:
-                                  Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
-                                  Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
-                              type: string
-                            source:
-                              default: prometheus
-                              enum:
-                              - prometheus
-                              type: string
-                          required:
-                          - source
-                          type: object
-                        type: array
-                      maxStep:
-                        description: |-
-                          MaxStep limits how many replicas can be added or removed in a single
-                          reconciliation loop. Enables gradual ramp-up or ramp-down.
-                        minimum: 1
-                        type: integer
-                      stabilization:
-                        description: |-
-                          Stabilization is the cooldown period after a scale event in this
-                          direction. Prevents oscillation by blocking same-direction scaling
-                          until the window elapses.
-                        format: duration
-                        type: string
-                    type: object
-                required:
-                - maxReplicas
-                - minReplicas
-                type: object
               scanInterval:
                 default: 10m
                 type: string
