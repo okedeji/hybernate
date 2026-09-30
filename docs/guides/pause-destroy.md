@@ -1,6 +1,6 @@
 # Pause & Destroy Guide
 
-Hybernate provides two lifecycle actions beyond scaling: **pause** (scale to zero) and **destroy** (delete the workload). Both include safety mechanisms for data preservation.
+Hybernate provides two lifecycle actions: **pause** (scale to zero) and **destroy** (delete the workload). Both include safety mechanisms for data preservation.
 
 ## Pause
 

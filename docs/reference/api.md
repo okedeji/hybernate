@@ -19,12 +19,6 @@
 | `idlePolicy.gracePeriod` | duration | No | | Continuous idle confirmation period |
 | `idlePolicy.autoResume` | bool | No | `false` | Resume when signals clear |
 | `idlePolicy.signals[]` | `ProbeSpec` | No | | Additional signal checks |
-| `scalePolicy` | `ScalePolicySpec` | No | | Scaling configuration |
-| `scalePolicy.minReplicas` | int | No | `1` | Minimum replicas |
-| `scalePolicy.maxReplicas` | int | Yes | | Maximum replicas |
-| `scalePolicy.overrideReplicas` | int | No | | Force specific replica count |
-| `scalePolicy.down` | `ScaleDirectionSpec` | No | | Scale-down constraints |
-| `scalePolicy.up` | `ScaleDirectionSpec` | No | | Scale-up constraints |
 | `pause` | `PauseSpec` | No | | Pause behavior |
 | `pause.expireAfter` | duration | No | | Max pause duration |
 | `pause.expireAction` | `resume` \| `destroy` | No | `destroy` | Action on expiry |
@@ -35,16 +29,8 @@
 | `prediction.confidence` | int (0-100) | No | `85` | Confidence threshold |
 | `costTracking` | `CostTrackingSpec` | No | | Custom cost rate overrides |
 | `costTracking.rates` | `CostRates` | No | AWS defaults | Custom cost rates |
-| `conflictAction` | `enforce` \| `warn` \| `defer` | No | `warn` | Drift handling |
+| `conflictAction` | `enforce` \| `warn` \| `defer` | No | `warn` | Handling of a paused workload scaled up externally |
 | `dryRun` | bool | No | `false` | Evaluate without acting |
-
-### ScaleDirectionSpec
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `stabilization` | duration | No | Cooldown after same-direction scale |
-| `maxStep` | int (>=1) | No | Max replicas to add/remove per reconcile |
-| `guard[]` | `ProbeSpec` | No | Prometheus safety checks (scale-down only) |
 
 ### ProbeSpec
 
@@ -71,10 +57,6 @@
 | `pause.previousReplicas` | int32 | Replicas before pause |
 | `pause.pausedAt` | time | When paused |
 | `pause.resources` | `ResourceSnapshot` | Resource profile at pause |
-| `scale` | `ScaleStatus` | Last scaling event |
-| `scale.previousReplicas` | int32 | Replicas before scale |
-| `scale.currentReplicas` | int32 | Replicas after scale |
-| `scale.scaledAt` | time | When scaled |
 | `destroy` | `DestroyStatus` | State after destroy |
 | `destroy.destroyedAt` | time | When destroyed |
 | `destroy.resources` | `ResourceSnapshot` | Resource profile at destroy |
@@ -100,7 +82,7 @@
 
 ### WorkloadPhase Values
 
-`Creating`, `Running`, `Idle`, `Scaling`, `Pausing`, `Paused`, `Resuming`, `Destroying`, `Destroyed`
+`Creating`, `Running`, `Idle`, `Pausing`, `Paused`, `Resuming`, `Destroying`, `Destroyed`
 
 ---
 
@@ -123,7 +105,6 @@
 | `dryRun` | bool | No | `true` | Default for auto-created CRs |
 | `rates` | `CostRates` | No | AWS defaults | Cost rates |
 | `idlePolicy` | `IdlePolicySpec` | No | See defaults | Default idle policy |
-| `scalePolicy` | `ScalePolicySpec` | No | See defaults | Default scale policy |
 | `pause` | `PauseSpec` | No | See defaults | Default pause behavior |
 | `destroy` | `DestroySpec` | No | See defaults | Default destroy behavior |
 | `prediction` | `PredictionSpec` | No | `{confidence: 85}` | Default prediction config |

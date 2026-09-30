@@ -95,8 +95,8 @@ kubectl describe managedworkload my-api -n sandbox
 At this point, Hybernate is already working. The forecast engine progresses through phases independently, regardless of `dryRun`:
 
 1. **Observing** — collecting data, no decisions yet. The engine needs at least 24 hours of data before it starts making predictions.
-2. **Suggesting** — the engine has enough data to predict daily patterns and starts evaluating idle and scale policies, but only logs what it would do. This is always dry run, even if `dryRun: false`.
-3. **Active** — the engine's confidence has crossed the threshold (default 85%). If `dryRun: false`, it now takes real action: pausing, scaling, or destroying workloads. If `dryRun: true`, it continues to log decisions without acting.
+2. **Suggesting** — the engine has enough data to predict daily patterns and starts evaluating the idle policy, but only logs what it would do. This is always dry run, even if `dryRun: false`.
+3. **Active** — the engine's confidence has crossed the threshold (default 85%). If `dryRun: false`, it now takes real action: pausing or destroying workloads. If `dryRun: true`, it continues to log decisions without acting.
 
 You can track which phase the engine is in:
 

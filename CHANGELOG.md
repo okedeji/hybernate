@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** prediction-driven replica scaling. `spec.scalePolicy` (min/max replicas, `overrideReplicas`, stabilization, step limits, and scale-down guards), `status.scale`, the `Scaling` phase, the `WorkloadPolicy` default `scalePolicy`, and the `hybernate_scale_events_total`, `hybernate_scale_replicas`, and `hybernate_scale_guard_blocked_total` metrics are gone. Sizing a running workload is left to HPA or KEDA; Hybernate pauses and resumes. Existing `scalePolicy` fields are dropped the next time a ManagedWorkload is written
+
 ### Changed
 
+- Drift detection only applies to paused workloads. Hybernate no longer owns the replica count of a running workload, so changes by its team or an autoscaler are not treated as drift; `conflictAction` now governs what happens when a paused workload is scaled up externally
 - Events are emitted through the `events.k8s.io/v1` API (`events.EventRecorder`) instead of the deprecated `record.EventRecorder`. Each event now carries an action (e.g. `Pause`, `EvaluateIdle`, `CheckDrift`). The operator's ClusterRole gains `create`/`patch` on `events.k8s.io` events; the Helm chart and kustomize RBAC include it
 
 ### Fixed

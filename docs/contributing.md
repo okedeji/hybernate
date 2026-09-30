@@ -56,7 +56,7 @@ cmd/kubectl-hybernate/main.go  # kubectl plugin
 api/v1alpha1/                  # CRD type definitions
 internal/controller/           # Reconcilers
 internal/forecast/             # Holt-Winters engine
-internal/policy/               # Idle and scale policy
+internal/policy/               # Idle detection and grace periods
 internal/signal/               # Signal interface and implementations
 internal/lifecycle/            # Pause, resume, scale, destroy
 internal/discovery/            # Workload scanning and classification

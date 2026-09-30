@@ -164,7 +164,6 @@ func (r *WorkloadPolicyReconciler) autoManage(ctx context.Context, policy *v1alp
 					return v1alpha1.PredictionSpec{}
 				}(),
 				IdlePolicy:     policy.Spec.IdlePolicy,
-				ScalePolicy:    policy.Spec.ScalePolicy,
 				Pause:          policy.Spec.Pause,
 				Destroy:        policy.Spec.Destroy,
 				CostTracking:   policy.Spec.CostTracking,

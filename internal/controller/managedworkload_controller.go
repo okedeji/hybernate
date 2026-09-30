@@ -59,15 +59,13 @@ type Reconciler struct {
 	Recorder      events.EventRecorder
 	PrometheusURL string
 
-	pauser          lifecyclePauser
-	destroyer       lifecycleDestroyer
-	lifecycleScaler lifecycleScaler
-	idle            idleEvaluator
-	scale           scaleEvaluator
-	metrics         metricsReader
-	engines         *engineRegistry
-	prometheusURL   string
-	clock           func() time.Time
+	pauser        lifecyclePauser
+	destroyer     lifecycleDestroyer
+	idle          idleEvaluator
+	metrics       metricsReader
+	engines       *engineRegistry
+	prometheusURL string
+	clock         func() time.Time
 }
 
 type lifecyclePauser interface {
@@ -560,62 +558,47 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 	return obj, nil
 }
 
-// checkDrift compares actual replicas on the target against what the operator
-// last set. When they differ, the conflict policy decides the response.
+// checkDrift handles a paused target that was scaled up outside Hybernate.
+// Paused is the only phase where Hybernate owns the replica count; while a
+// workload runs, its team or an autoscaler does.
 func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) { //nolint:unparam
-	expected, ok := r.expectedReplicas(workload)
-	if !ok {
+	if workload.Status.Phase != v1alpha1.PhasePaused {
 		return nil, nil
 	}
-
 	actual := replicasFromTarget(target)
-
-	if actual == expected {
+	if actual == 0 {
 		return nil, nil
 	}
 
-	logger := log.FromContext(ctx)
-	logger.Info("replica drift detected", "expected", expected, "actual", actual)
+	log.FromContext(ctx).Info("paused workload scaled externally",
+		"workload", workload.Name, "namespace", workload.Namespace, "replicas", actual)
 
 	action := resolveConflictAction(workload)
 	metrics.DriftDetections.WithLabelValues(string(action)).Inc()
 	r.emitEvent(workload, false, "Warning", ReasonDriftDetected, actionCheckDrift,
-		"replicas changed externally from %d to %d, policy: %s", expected, actual, action)
+		"paused workload scaled externally to %d replicas, policy: %s", actual, action)
 
 	switch action {
 	case v1alpha1.ConflictActionEnforce:
-		if err := r.enforceReplicas(ctx, target, expected); err != nil {
-			return nil, fmt.Errorf("enforcing replicas: %w", err)
+		if err := r.enforceReplicas(ctx, target, 0); err != nil {
+			return nil, fmt.Errorf("enforcing pause: %w", err)
 		}
 		r.stampLastActed(workload)
 		if err := r.Status().Update(ctx, workload); err != nil {
 			return nil, fmt.Errorf("updating status after drift correction: %w", err)
 		}
 		r.emitEvent(workload, false, "Normal", ReasonDriftCorrected, actionCorrectDrift,
-			"replicas corrected from %d back to %d", actual, expected)
+			"replicas corrected from %d back to 0", actual)
 
 	case v1alpha1.ConflictActionDefer:
-		r.acceptDrift(workload, actual)
+		workload.Status.Pause = nil
+		workload.Status.Phase = v1alpha1.PhaseRunning
 		if err := r.Status().Update(ctx, workload); err != nil {
 			return nil, fmt.Errorf("updating status after accepting drift: %w", err)
 		}
 	}
 
 	return nil, nil
-}
-
-func (r *Reconciler) expectedReplicas(workload *v1alpha1.ManagedWorkload) (int32, bool) {
-	switch workload.Status.Phase {
-	case v1alpha1.PhasePaused:
-		return 0, true
-	case v1alpha1.PhaseRunning, v1alpha1.PhaseIdle, v1alpha1.PhaseScaling:
-		if workload.Status.Scale != nil {
-			return workload.Status.Scale.CurrentReplicas, true
-		}
-		return 0, false
-	default:
-		return 0, false
-	}
 }
 
 func replicasFromTarget(obj client.Object) int32 {
@@ -640,16 +623,6 @@ func (r *Reconciler) enforceReplicas(ctx context.Context, target client.Object, 
 		t.Spec.Replicas = &desired
 	}
 	return r.Update(ctx, target)
-}
-
-func (r *Reconciler) acceptDrift(workload *v1alpha1.ManagedWorkload, actual int32) {
-	if workload.Status.Scale != nil {
-		workload.Status.Scale.CurrentReplicas = actual
-	}
-	if workload.Status.Phase == v1alpha1.PhasePaused && actual > 0 {
-		workload.Status.Pause = nil
-		workload.Status.Phase = v1alpha1.PhaseRunning
-	}
 }
 
 func (r *Reconciler) setCondition(workload *v1alpha1.ManagedWorkload, condType string, status metav1.ConditionStatus, reason, message string) {
@@ -828,17 +801,11 @@ func (r *Reconciler) initDefaults() {
 	if r.destroyer == nil {
 		r.destroyer = lifecycle.NewDestroyer(r.Client)
 	}
-	if r.lifecycleScaler == nil {
-		r.lifecycleScaler = lifecycle.NewScaler(r.Client)
-	}
 	if r.metrics == nil {
 		r.metrics = metrics.NewReader(r.Client)
 	}
 	if r.idle == nil {
 		r.idle = policy.NewIdleDetector()
-	}
-	if r.scale == nil {
-		r.scale = policy.NewScaler()
 	}
 	if r.engines == nil {
 		r.engines = newEngineRegistry(func(threshold int) forecaster {

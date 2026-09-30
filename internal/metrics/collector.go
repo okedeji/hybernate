@@ -31,7 +31,7 @@ var (
 
 	ActiveWorkloads = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "hybernate_active_workloads",
-		Help: "Number of workloads in a running state (Running, Idle, Scaling, Creating, Resuming).",
+		Help: "Number of workloads in a running state (Running, Idle, Creating, Resuming).",
 	})
 
 	PausedWorkloads = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -56,7 +56,7 @@ var (
 
 	LifecycleActionDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "hybernate_lifecycle_action_duration_seconds",
-		Help:    "Duration of lifecycle actions (pause, resume, destroy, scale).",
+		Help:    "Duration of lifecycle actions (pause, resume, destroy).",
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 10),
 	}, []string{"action"})
 
@@ -124,16 +124,6 @@ var (
 		Help: "Total GiB-hours of PVC storage provisioned this month across all workloads.",
 	})
 
-	ScaleEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_scale_events_total",
-		Help: "Total scaling events by direction.",
-	}, []string{"direction", "namespace", "workload"})
-
-	ScaleReplicas = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hybernate_scale_replicas",
-		Help: "Current replica count after scaling.",
-	}, []string{"namespace", "workload"})
-
 	IdleDetections = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_idle_detections_total",
 		Help: "Total idle detections by action taken.",
@@ -156,11 +146,6 @@ var (
 	IdleSignalResult = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hybernate_idle_signal_result",
 		Help: "Current idle signal evaluation status (1=active, 2=signals_confirm, 3=grace_period, 4=idle).",
-	}, []string{"namespace", "workload"})
-
-	ScaleGuardBlocked = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_scale_guard_blocked_total",
-		Help: "Total times a scale-down was blocked by a guard probe.",
 	}, []string{"namespace", "workload"})
 
 	IdleFlukes = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -243,15 +228,12 @@ func init() {
 		CostCPUHours,
 		CostMemoryHours,
 		CostStorageHours,
-		ScaleEvents,
-		ScaleReplicas,
 		IdleDetections,
 		PauseExpiryActions,
 		DriftDetections,
 
 		// Tier 3
 		IdleSignalResult,
-		ScaleGuardBlocked,
 		IdleFlukes,
 		PredictionRegimeChanges,
 		PVCRetentionRemaining,

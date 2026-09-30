@@ -62,7 +62,7 @@ spec:
     Start with `dryRun: true` when using `auto-manage`. This creates the ManagedWorkloads but they won't take action until you set `dryRun: false` on each one individually.
 
 !!! note "Forecast engine starts fresh"
-    When you switch from `suggest` to `auto-manage`, newly created ManagedWorkloads have no forecast history. The Holt-Winters engine begins in its Observing phase and needs time to learn the workload's demand patterns before it can gate idle detection or drive scaling. In `suggest` mode, no forecast engines run because no ManagedWorkloads exist. Plan for a warm-up period after switching modes.
+    When you switch from `suggest` to `auto-manage`, newly created ManagedWorkloads have no forecast history. The Holt-Winters engine begins in its Observing phase and needs time to learn the workload's demand patterns before it can confirm idle detection or wake workloads ahead of demand. In `suggest` mode, no forecast engines run because no ManagedWorkloads exist. Plan for a warm-up period after switching modes.
 
 ## Classification Thresholds
 
@@ -88,14 +88,6 @@ spec:
     memoryIdleThreshold: 10
     gracePeriod: "5m"
     autoResume: true
-
-  scalePolicy:
-    minReplicas: 1
-    maxReplicas: 10
-    down:
-      stabilization: "5m"
-    up:
-      stabilization: "2m"
 
   pause:
     expireAfter: "168h"

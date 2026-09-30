@@ -66,7 +66,7 @@ func (r *HybernateReportReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		w := &workloads.Items[i]
 
 		switch w.Status.Phase {
-		case v1alpha1.PhaseRunning, v1alpha1.PhaseIdle, v1alpha1.PhaseScaling,
+		case v1alpha1.PhaseRunning, v1alpha1.PhaseIdle,
 			v1alpha1.PhaseCreating, v1alpha1.PhaseResuming:
 			active++
 		case v1alpha1.PhasePaused, v1alpha1.PhasePausing:

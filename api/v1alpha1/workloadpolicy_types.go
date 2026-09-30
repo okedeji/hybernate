@@ -102,10 +102,6 @@ type WorkloadPolicySpec struct {
 	// +kubebuilder:default={"action":"pause","cpuIdleThreshold":10,"memoryIdleThreshold":10,"gracePeriod":"5m0s","autoResume":true}
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
-	// Default scaling policy copied into exported/auto-created ManagedWorkloads.
-	// +kubebuilder:default={"minReplicas":1,"maxReplicas":10,"down":{"stabilization":"5m0s"},"up":{"stabilization":"2m0s"}}
-	ScalePolicy *ScalePolicySpec `json:"scalePolicy,omitempty"`
-
 	// Default pause behavior copied into exported/auto-created ManagedWorkloads.
 	// +kubebuilder:default={"expireAfter":"168h0m0s","expireAction":"resume"}
 	Pause *PauseSpec `json:"pause,omitempty"`

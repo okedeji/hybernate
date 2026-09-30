@@ -12,7 +12,7 @@ Most workloads follow predictable patterns:
 Hybernate learns these two patterns independently by feeding hourly CPU observations into a Holt-Winters model. Once it has enough data and confidence, it uses the learned patterns to:
 
 - Confirm that a workload is genuinely idle (not just in a temporary lull)
-- Recommend how many replicas a workload needs in the next hour
+- Wake paused workloads ahead of predicted demand
 
 ## How It Works
 

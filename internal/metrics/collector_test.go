@@ -47,15 +47,12 @@ func TestAllMetricsRegistered(t *testing.T) {
 		"hybernate_cost_cpu_hours",
 		"hybernate_cost_memory_hours",
 		"hybernate_cost_storage_hours",
-		"hybernate_scale_events_total",
-		"hybernate_scale_replicas",
 		"hybernate_idle_detections_total",
 		"hybernate_pause_expiry_actions_total",
 		"hybernate_drift_detections_total",
 
 		// Tier 3
 		"hybernate_idle_signal_result",
-		"hybernate_scale_guard_blocked_total",
 		"hybernate_idle_fluke_total",
 		"hybernate_prediction_regime_changes_total",
 		"hybernate_pvc_retention_remaining_seconds",
@@ -88,13 +85,10 @@ func TestAllMetricsRegistered(t *testing.T) {
 	PredictionPhase.WithLabelValues("ns", "w").Set(1)
 	PredictionDataPoints.WithLabelValues("ns", "w").Set(10)
 	PredictionAnomalies.WithLabelValues("ns", "w").Inc()
-	ScaleEvents.WithLabelValues("up", "ns", "w").Inc()
-	ScaleReplicas.WithLabelValues("ns", "w").Set(3)
 	IdleDetections.WithLabelValues("pause", "ns", "w").Inc()
 	PauseExpiryActions.WithLabelValues("resume").Inc()
 	DriftDetections.WithLabelValues("adopt").Inc()
 	IdleSignalResult.WithLabelValues("ns", "w").Set(1)
-	ScaleGuardBlocked.WithLabelValues("ns", "w").Inc()
 	IdleFlukes.WithLabelValues("ns", "w").Inc()
 	PredictionRegimeChanges.WithLabelValues("ns", "w").Inc()
 	PVCRetentionRemaining.WithLabelValues("ns", "w").Set(3600)

@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"math"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -43,9 +42,6 @@ const (
 	ReasonIdleFluke            = "IdleFluke"
 	ReasonIdleGracePeriod      = "IdleGracePeriod"
 	ReasonIdleDetected         = "IdleDetected"
-	ReasonScalingUnavailable   = "ScalingUnavailable"
-	ReasonScaleDownGuarded     = "ScaleDownGuarded"
-	ReasonScaled               = "Scaled"
 	ReasonPaused               = "Paused"
 	ReasonResumed              = "Resumed"
 	ReasonDestroyed            = "Destroyed"
@@ -65,7 +61,6 @@ const (
 	actionForecast       = "Forecast"
 	actionEvaluate       = "EvaluateAutomation"
 	actionEvaluateIdle   = "EvaluateIdle"
-	actionScale          = "Scale"
 	actionPause          = "Pause"
 	actionResume         = "Resume"
 	actionDestroy        = "Destroy"
@@ -247,17 +242,6 @@ func (r *Reconciler) buildIdleSignals(ctx context.Context, workload *v1alpha1.Ma
 	return r.appendUserSignals(checkers, workload.Spec.IdlePolicy.Signals), nil
 }
 
-func (r *Reconciler) buildScaleDownGuards(workload *v1alpha1.ManagedWorkload, targetCapacity float64) []signal.Checker {
-	threshold := resource.NewMilliQuantity(int64(targetCapacity), resource.DecimalSI)
-	checkers := []signal.Checker{
-		signal.NewInternal(r.metrics, workload, *threshold, signal.Below),
-	}
-	if sp := workload.Spec.ScalePolicy; sp != nil && sp.Down != nil {
-		checkers = r.appendUserSignals(checkers, sp.Down.Guard)
-	}
-	return checkers
-}
-
 func (r *Reconciler) appendUserSignals(checkers []signal.Checker, specs []v1alpha1.ProbeSpec) []signal.Checker {
 	for _, s := range specs {
 		switch s.Source {
@@ -278,30 +262,6 @@ func resolveConflictAction(workload *v1alpha1.ManagedWorkload) v1alpha1.Conflict
 func (r *Reconciler) stampLastActed(workload *v1alpha1.ManagedWorkload) {
 	now := r.clockTime()
 	workload.Status.LastActedAt = &now
-}
-
-func clampInt32(v, min, max int32) int32 {
-	if v < min {
-		return min
-	}
-	if v > max {
-		return max
-	}
-	return v
-}
-
-func demandToReplicas(demand, cpuPerReplica float64, min, max int) int32 {
-	if demand <= 0 || cpuPerReplica <= 0 {
-		return int32(min)
-	}
-	replicas := int32(math.Ceil(demand / cpuPerReplica))
-	if replicas < int32(min) {
-		return int32(min)
-	}
-	if replicas > int32(max) {
-		return int32(max)
-	}
-	return replicas
 }
 
 func resolveCostRates(workload *v1alpha1.ManagedWorkload) cost.Rates {

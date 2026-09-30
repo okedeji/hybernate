@@ -1,6 +1,6 @@
 # Prometheus Signals Guide
 
-Prometheus signals let you add application-level checks to idle detection and scale-down guards. Instead of relying on CPU alone, you can query actual business metrics.
+Prometheus signals let you add application-level checks to idle detection. Instead of relying on CPU alone, you can query actual business metrics.
 
 ## How Prometheus Signals Work
 
@@ -13,7 +13,7 @@ The key insight: **write your PromQL so that a non-zero result means "yes, proce
 
 ## Configuration
 
-Prometheus signals appear in two places:
+Prometheus signals are configured on the idle policy:
 
 ### Idle Detection Signals
 
@@ -26,19 +26,6 @@ spec:
 ```
 
 The query above returns `1` (non-zero) when the request rate is zero, confirming idle.
-
-### Scale-Down Guards
-
-```yaml title="managedworkload.yaml" linenums="1"
-spec:
-  scalePolicy:
-    down:
-      guard:
-        - source: prometheus
-          promQL: 'sum(active_connections{service="my-api"}) < 10'
-```
-
-The query returns `1` when active connections are below 10, confirming it's safe to scale down.
 
 ## Prometheus Endpoint
 
@@ -66,15 +53,6 @@ If a workload uses Prometheus signals but no URL is configured, idle evaluation 
 | No active sessions | `sum(active_sessions{app="dashboard"}) == 0` | Confirms idle when no users |
 | No recent logins | `increase(login_total{app="auth"}[1h]) == 0` | Confirms idle when no logins in the last hour |
 | No Kafka consumer lag | `sum(kafka_consumer_lag{group="worker"}) == 0` | Confirms idle when consumer is caught up |
-
-### Scale-Down Guards
-
-| Use Case | PromQL | Logic |
-|----------|--------|-------|
-| Low connection count | `sum(active_connections{service="api"}) < 10` | Safe to scale when connections are low |
-| No in-flight jobs | `sum(in_flight_jobs{service="worker"}) == 0` | Safe when all jobs are complete |
-| Low memory pressure | `container_memory_working_set_bytes{pod=~"api-.*"} / container_spec_memory_limit_bytes{pod=~"api-.*"} < 0.7` | Safe when memory is below 70% |
-| Low request latency | `histogram_quantile(0.99, rate(request_duration_seconds_bucket{service="api"}[5m])) < 0.5` | Safe when p99 latency is under 500ms |
 
 ## Writing Good Signals
 

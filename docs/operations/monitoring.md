@@ -37,9 +37,6 @@ hybernate_prediction_confidence_percent{season="daily"}
 
 # Are workloads cycling too fast?
 rate(hybernate_lifecycle_transitions_total[1h])
-
-# Are scale-downs being blocked?
-rate(hybernate_scale_guard_blocked_total[1h])
 ```
 
 ## Grafana Dashboards
@@ -47,7 +44,7 @@ rate(hybernate_scale_guard_blocked_total[1h])
 Pre-built dashboards are available in `config/grafana/`:
 
 - **Hybernate Overview**: cluster-wide workload counts, cost savings, phase distribution
-- **Workload Detail**: per-workload prediction confidence, scaling history, idle detection state
+- **Workload Detail**: per-workload prediction confidence, lifecycle history, idle detection state
 
 Import them via Grafana's dashboard import feature or deploy them as ConfigMaps if using the Grafana sidecar.
 
@@ -105,8 +102,7 @@ kubectl logs -n hybernate-system deployment/hybernate-controller-manager -f
 
 Key log entries to watch for:
 
-- `"pool scaled"`: scaling events with before/after counts
 - `"phase transition"`: lifecycle state changes
 - `"idle confirmed"`: idle detection results
 - `"regime change"`: prediction engine pattern shifts
-- `"drift detected"`: external replica changes
+- `"paused workload scaled externally"`: someone scaled up a paused workload

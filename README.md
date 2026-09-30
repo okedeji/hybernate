@@ -6,7 +6,7 @@
 
 **Your Kubernetes workloads are running 24/7. Your users aren't.**
 
-Hybernate is a Kubernetes operator that detects idle workloads, learns their demand patterns, and automatically pauses, scales, or destroys them. It brings them back before traffic returns, turning your non-production clusters from always-on cost centers into pay-for-what-you-use environments.
+Hybernate is a Kubernetes operator that detects idle workloads, learns their demand patterns, and automatically pauses or destroys them. It brings them back before traffic returns, turning your non-production clusters from always-on cost centers into pay-for-what-you-use environments.
 
 ## Why Hybernate?
 
@@ -16,7 +16,7 @@ Hybernate fixes this by:
 
 - **Detecting idle workloads** using CPU + memory metrics and optional Prometheus signals, with a consensus model that prevents false positives
 - **Learning demand patterns** via a per-workload Holt-Winters forecasting model that tracks daily and weekly seasonality
-- **Acting automatically** by pausing idle workloads, scaling based on predicted demand, and resuming proactively before users arrive
+- **Acting automatically** by pausing idle workloads and resuming proactively before users arrive
 - **Tracking savings** with per-workload cost accounting, resource reduction metrics, and cluster-wide aggregation
 
 ## How It Works
@@ -95,7 +95,6 @@ spec:
 
 - **Multi-signal idle detection** using CPU + memory thresholds with Prometheus PromQL signals, consensus-based confirmation, and configurable grace periods
 - **Demand forecasting** via a Holt-Winters double seasonal model that learns daily and weekly patterns per workload, with confidence scoring and anomaly detection
-- **Prediction-driven scaling** where replica counts adjust based on forecasted demand with stabilization windows, step limits, and guard probes
 - **Pause, resume, and destroy** with scale to zero, automatic expiry, forecast-driven resume, and PVC retention
 
 ### Operations
@@ -117,10 +116,10 @@ spec:
 
 | Component | Description |
 |-----------|-------------|
-| **ManagedWorkload** | Per-workload CR that defines idle policy, scale policy, pause/destroy behavior, and cost tracking |
+| **ManagedWorkload** | Per-workload CR that defines idle policy, pause/destroy behavior, and cost tracking |
 | **WorkloadPolicy** | Namespace-scoped scanner that discovers, classifies, and optionally auto-manages workloads |
 | **HybernateReport** | Cluster-wide singleton that aggregates cost, savings, and resource reduction across all workloads |
-| **Forecast Engine** | Per-workload Holt-Winters model that learns demand patterns, gates idle detection, and drives scaling |
+| **Forecast Engine** | Per-workload Holt-Winters model that learns demand patterns, confirms idle detection, and wakes workloads ahead of demand |
 
 ## Documentation
 
