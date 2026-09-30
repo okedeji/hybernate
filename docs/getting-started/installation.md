@@ -67,7 +67,6 @@ kubectl get pods -n hybernate-system
 # Verify CRDs are installed
 kubectl get crd managedworkloads.hybernate.io
 kubectl get crd workloadpolicies.hybernate.io
-kubectl get crd hybernatereports.hybernate.io
 ```
 
 ## Uninstall
@@ -85,7 +84,7 @@ make uninstall
 ```
 
 !!! warning
-    Deleting CRDs removes all ManagedWorkload, WorkloadPolicy, and HybernateReport resources from the cluster. Workloads that were paused (scaled to zero) will remain at zero replicas. You must manually restore them.
+    Deleting CRDs removes all ManagedWorkload and WorkloadPolicy resources from the cluster. Workloads that were paused (scaled to zero) will remain at zero replicas. You must manually restore them.
 
 ## Next Steps
 

@@ -19,11 +19,8 @@ This configures Prometheus to scrape the operator's metrics endpoint.
 **Cluster health dashboard:**
 
 ```promql
-# Are workloads being managed?
-hybernate_workloads_total
-
-# Estimated savings (requires cluster autoscaler for realization)
-hybernate_cost_estimated_savings_dollars
+# Is the operator acting on workloads?
+rate(hybernate_lifecycle_transitions_total[1h])
 
 # Are there errors?
 rate(hybernate_reconcile_errors_total[5m]) > 0

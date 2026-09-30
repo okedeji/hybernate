@@ -25,9 +25,6 @@ resources:
 - workloadpolicy_admin_role.yaml
 - workloadpolicy_editor_role.yaml
 - workloadpolicy_viewer_role.yaml
-- hybernatereport_admin_role.yaml
-- hybernatereport_editor_role.yaml
-- hybernatereport_viewer_role.yaml
 - managedworkload_admin_role.yaml
 - managedworkload_editor_role.yaml
 - managedworkload_viewer_role.yaml

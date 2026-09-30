@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - **Breaking:** prediction-driven replica scaling. `spec.scalePolicy` (min/max replicas, `overrideReplicas`, stabilization, step limits, and scale-down guards), `status.scale`, the `Scaling` phase, the `WorkloadPolicy` default `scalePolicy`, and the `hybernate_scale_events_total`, `hybernate_scale_replicas`, and `hybernate_scale_guard_blocked_total` metrics are gone. Sizing a running workload is left to HPA or KEDA; Hybernate pauses and resumes. Existing `scalePolicy` fields are dropped the next time a ManagedWorkload is written
+- **Breaking:** the cluster-scoped `HybernateReport` CRD and its controller. Delete the CRD after upgrading (`kubectl delete crd hybernatereports.hybernate.io`). Per-workload cost stays in each ManagedWorkload's status
+- **Breaking:** the cluster-wide gauges the report controller published: `hybernate_workloads_total`, `hybernate_active_workloads`, `hybernate_paused_workloads`, `hybernate_destroyed_workloads`, `hybernate_cost_*`, and `hybernate_resource_reduction_*`. Operator metrics now cover health; cost is shown per workload
 
 ### Changed
 

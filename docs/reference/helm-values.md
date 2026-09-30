@@ -139,7 +139,7 @@ These are not configurable via values. To override, use Helm post-rendering or K
 
 The chart creates a ClusterRole with permissions to:
 
-- Manage `ManagedWorkload`, `WorkloadPolicy`, and `HybernateReport` CRs
+- Manage `ManagedWorkload` and `WorkloadPolicy` CRs
 - Read and scale Deployments and StatefulSets
 - Read PersistentVolumeClaims (for retention cleanup)
 - Read pod metrics from metrics-server

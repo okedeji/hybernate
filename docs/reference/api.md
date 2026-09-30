@@ -125,27 +125,3 @@
 | `lastScanAt` | time | Last scan timestamp |
 | `conditions[]` | `Condition` | Standard K8s conditions |
 | `discovered[]` | `DiscoveredWorkload` | Per-workload results (max 500) |
-
----
-
-## HybernateReport
-
-**Group:** `hybernate.io` | **Version:** `v1alpha1` | **Kind:** `HybernateReport` | **Scope:** Cluster
-
-A singleton resource that aggregates data across all ManagedWorkloads. The operator updates its status on each reconcile.
-
-### Status
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `managed` | int | Total ManagedWorkloads |
-| `active` | int | Running workloads |
-| `paused` | int | Paused workloads |
-| `destroyed` | int | Destroyed workloads |
-| `totalCPUHours` | quantity | Aggregate CPU hours |
-| `totalMemoryHours` | quantity | Aggregate memory hours |
-| `totalStorageHours` | quantity | Aggregate storage hours |
-| `estimatedMonthlyCost` | string | Total estimated cost |
-| `estimatedTotalSavings` | string | Estimated total savings (requires autoscaler for realization) |
-| `estimatedCostWithoutManagement` | string | Estimated total cost without Hybernate |
-| `totalResourceReduction` | `ResourceReduction` | Aggregate resources freed across all workloads |

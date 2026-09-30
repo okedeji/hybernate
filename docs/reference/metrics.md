@@ -8,18 +8,9 @@ These metrics provide a high-level view of Hybernate's impact.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `hybernate_workloads_total` | Gauge | `phase` | Managed workloads by lifecycle phase |
-| `hybernate_active_workloads` | Gauge | | Workloads in a running state |
-| `hybernate_paused_workloads` | Gauge | | Currently paused workloads |
-| `hybernate_destroyed_workloads` | Gauge | | Destroyed workloads |
 | `hybernate_reconcile_errors_total` | Counter | `controller` | Reconciliation errors by controller |
 | `hybernate_lifecycle_transitions_total` | Counter | `from`, `to` | Phase transitions |
 | `hybernate_lifecycle_action_duration_seconds` | Histogram | `action` | Duration of lifecycle actions (pause, resume, destroy) |
-| `hybernate_cost_estimated_savings_dollars` | Gauge | | Estimated monthly savings (requires autoscaler for realization) |
-| `hybernate_cost_estimated_dollars` | Gauge | | Total estimated monthly cost |
-| `hybernate_cost_estimated_without_management_dollars` | Gauge | | Estimated cost without Hybernate |
-| `hybernate_resource_reduction_cpu_millicores` | Gauge | | Total CPU millicores freed by Hybernate |
-| `hybernate_resource_reduction_memory_bytes` | Gauge | | Total memory bytes freed by Hybernate |
 
 ## Tier 2: Operational Insight
 
@@ -31,9 +22,6 @@ These metrics help you understand what the operator is doing and why.
 | `hybernate_prediction_phase` | Gauge | `namespace`, `workload` | Engine phase (0-4) |
 | `hybernate_prediction_data_points` | Gauge | `namespace`, `workload` | Data points collected |
 | `hybernate_prediction_anomalies_total` | Counter | `namespace`, `workload` | Anomalies detected |
-| `hybernate_cost_cpu_hours` | Gauge | | Total vCPU-hours this month |
-| `hybernate_cost_memory_hours` | Gauge | | Total GiB memory hours |
-| `hybernate_cost_storage_hours` | Gauge | | Total GiB storage hours |
 | `hybernate_idle_detections_total` | Counter | `action`, `namespace`, `workload` | Idle detections by action |
 | `hybernate_pause_expiry_actions_total` | Counter | `action` | Pause expiry events |
 | `hybernate_drift_detections_total` | Counter | `policy` | Paused workloads scaled up externally |
@@ -76,12 +64,6 @@ The `hybernate_prediction_phase` gauge uses numeric values:
 ## Useful PromQL Queries
 
 ```promql
-# Total workloads by phase
-hybernate_workloads_total
-
-# Estimated monthly savings trend
-hybernate_cost_estimated_savings_dollars
-
 # Workloads with low prediction confidence
 hybernate_prediction_confidence_percent{season="daily"} < 70
 

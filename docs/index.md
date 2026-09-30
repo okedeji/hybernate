@@ -27,7 +27,7 @@ CPU metrics alone aren't enough. Hybernate combines built-in Kubernetes metrics 
 Every action goes through a grace period, signal consensus, and confidence threshold. Enable `dryRun` mode to see what Hybernate would do without it actually doing anything. Conflict detection catches external changes to your workloads.
 
 ### Cost Tracking
-Track per-workload resource consumption and savings. See exactly how much you're saving from paused and destroyed workloads, aggregated across your entire cluster via the HybernateReport.
+Track per-workload resource consumption and savings. See exactly how much you're saving from paused and destroyed workloads.
 
 ### Auto-Discovery
 WorkloadPolicy scans your namespaces, classifies workloads as Active, Idle, or Wasteful, and can auto-create `ManagedWorkload` resources for the ones that need attention.

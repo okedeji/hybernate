@@ -118,7 +118,6 @@ spec:
 |-----------|-------------|
 | **ManagedWorkload** | Per-workload CR that defines idle policy, pause/destroy behavior, and cost tracking |
 | **WorkloadPolicy** | Namespace-scoped scanner that discovers, classifies, and optionally auto-manages workloads |
-| **HybernateReport** | Cluster-wide singleton that aggregates cost, savings, and resource reduction across all workloads |
 | **Forecast Engine** | Per-workload Holt-Winters model that learns demand patterns, confirms idle detection, and wakes workloads ahead of demand |
 
 ## Documentation

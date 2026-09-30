@@ -26,27 +26,15 @@ import (
 func TestAllMetricsRegistered(t *testing.T) {
 	expected := []string{
 		// Tier 1
-		"hybernate_workloads_total",
-		"hybernate_active_workloads",
-		"hybernate_paused_workloads",
-		"hybernate_destroyed_workloads",
 		"hybernate_reconcile_errors_total",
 		"hybernate_lifecycle_transitions_total",
 		"hybernate_lifecycle_action_duration_seconds",
-		"hybernate_cost_estimated_savings_dollars",
-		"hybernate_cost_estimated_dollars",
-		"hybernate_cost_estimated_without_management_dollars",
-		"hybernate_resource_reduction_cpu_millicores",
-		"hybernate_resource_reduction_memory_bytes",
 
 		// Tier 2
 		"hybernate_prediction_confidence_percent",
 		"hybernate_prediction_phase",
 		"hybernate_prediction_data_points",
 		"hybernate_prediction_anomalies_total",
-		"hybernate_cost_cpu_hours",
-		"hybernate_cost_memory_hours",
-		"hybernate_cost_storage_hours",
 		"hybernate_idle_detections_total",
 		"hybernate_pause_expiry_actions_total",
 		"hybernate_drift_detections_total",
@@ -77,7 +65,6 @@ func TestAllMetricsRegistered(t *testing.T) {
 
 	// Metrics without observations won't appear in Gather(), so we verify
 	// they're at least discoverable by writing a value and re-gathering.
-	WorkloadsTotal.WithLabelValues("test").Set(1)
 	ReconcileErrors.WithLabelValues("test").Inc()
 	LifecycleTransitions.WithLabelValues("a", "b").Inc()
 	LifecycleActionDuration.WithLabelValues("test").Observe(1)

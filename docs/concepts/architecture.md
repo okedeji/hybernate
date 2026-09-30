@@ -27,10 +27,6 @@ Watches `WorkloadPolicy` CRs. On each reconcile it scans the namespace for Deplo
 
 In `auto-manage` mode, it creates `ManagedWorkload` CRs for idle and wasteful workloads using the policy's default settings.
 
-### HybernateReport Reconciler
-
-Watches the cluster-scoped `HybernateReport` singleton. Aggregates counts and cost data across all ManagedWorkloads and publishes cluster-wide Prometheus metrics.
-
 ## Internal Packages
 
 | Package | Responsibility |

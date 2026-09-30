@@ -24,26 +24,6 @@ import (
 // --- Tier 1: Cluster Health ---
 
 var (
-	WorkloadsTotal = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hybernate_workloads_total",
-		Help: "Number of managed workloads by phase.",
-	}, []string{"phase"})
-
-	ActiveWorkloads = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_active_workloads",
-		Help: "Number of workloads in a running state (Running, Idle, Creating, Resuming).",
-	})
-
-	PausedWorkloads = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_paused_workloads",
-		Help: "Number of workloads currently paused.",
-	})
-
-	DestroyedWorkloads = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_destroyed_workloads",
-		Help: "Number of workloads that have been destroyed.",
-	})
-
 	ReconcileErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_reconcile_errors_total",
 		Help: "Total reconciliation errors by controller.",
@@ -59,31 +39,6 @@ var (
 		Help:    "Duration of lifecycle actions (pause, resume, destroy).",
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 10),
 	}, []string{"action"})
-
-	CostEstimatedSavingsDollars = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_estimated_savings_dollars",
-		Help: "Total estimated monthly savings across all managed workloads. Only realized when freed resources lead to node removal.",
-	})
-
-	CostEstimatedDollars = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_estimated_dollars",
-		Help: "Total estimated monthly cost across all managed workloads.",
-	})
-
-	CostEstimatedWithoutManagementDollars = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_estimated_without_management_dollars",
-		Help: "Estimated cost of all managed workloads without Hybernate.",
-	})
-
-	ResourceReductionCPUMillis = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_resource_reduction_cpu_millicores",
-		Help: "Total CPU millicores freed by Hybernate actions across all managed workloads.",
-	})
-
-	ResourceReductionMemoryBytes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_resource_reduction_memory_bytes",
-		Help: "Total memory bytes freed by Hybernate actions across all managed workloads.",
-	})
 )
 
 // --- Tier 2: Operational Insight ---
@@ -108,21 +63,6 @@ var (
 		Name: "hybernate_prediction_anomalies_total",
 		Help: "Total anomalies detected by the prediction engine.",
 	}, []string{"namespace", "workload"})
-
-	CostCPUHours = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_cpu_hours",
-		Help: "Total vCPU-hours consumed this month across all workloads.",
-	})
-
-	CostMemoryHours = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_memory_hours",
-		Help: "Total GiB-hours of memory consumed this month across all workloads.",
-	})
-
-	CostStorageHours = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_storage_hours",
-		Help: "Total GiB-hours of PVC storage provisioned this month across all workloads.",
-	})
 
 	IdleDetections = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_idle_detections_total",
@@ -207,27 +147,15 @@ var (
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		// Tier 1
-		WorkloadsTotal,
-		ActiveWorkloads,
-		PausedWorkloads,
-		DestroyedWorkloads,
 		ReconcileErrors,
 		LifecycleTransitions,
 		LifecycleActionDuration,
-		CostEstimatedSavingsDollars,
-		CostEstimatedDollars,
-		CostEstimatedWithoutManagementDollars,
-		ResourceReductionCPUMillis,
-		ResourceReductionMemoryBytes,
 
 		// Tier 2
 		PredictionConfidence,
 		PredictionPhase,
 		PredictionDataPoints,
 		PredictionAnomalies,
-		CostCPUHours,
-		CostMemoryHours,
-		CostStorageHours,
 		IdleDetections,
 		PauseExpiryActions,
 		DriftDetections,
