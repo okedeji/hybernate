@@ -34,6 +34,9 @@ import (
 var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "example.com/hybernate:v0.0.1"
+	// pauseImage runs the Deployment the lifecycle test manages. The Makefile
+	// preloads it into kind so the test doesn't depend on a registry pull.
+	pauseImage = "registry.k8s.io/pause:3.10"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )

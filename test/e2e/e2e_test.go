@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -270,18 +271,112 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
+	})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	Context("ManagedWorkload lifecycle", func() {
+		const (
+			appNamespace = "hybernate-e2e-apps"
+			appName      = "e2e-app"
+		)
+
+		BeforeAll(func() {
+			By("creating a namespace and a two-replica Deployment to manage")
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", appNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", appNamespace, "--wait=false"))
+			})
+
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: %[1]s}
+  template:
+    metadata:
+      labels: {app: %[1]s}
+    spec:
+      containers:
+        - name: app
+          image: %[3]s
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+`, appName, appNamespace, pauseImage))).To(Succeed())
+
+			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+appName,
+				"-n", appNamespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("pauses, resumes, and releases a workload", func() {
+			By("requesting a pause")
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  target: {kind: Deployment, name: %[1]s}
+  desiredState: Paused
+  prediction: {confidence: 85}
+`, appName, appNamespace))).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", appName, appNamespace, "{.status.phase}")).To(Equal("Paused"))
+				g.Expect(jsonpath("deployment", appName, appNamespace, "{.spec.replicas}")).To(Equal("0"))
+			}).Should(Succeed())
+
+			By("checking the API server accepted the events.k8s.io event")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "events.events.k8s.io", "-n", appNamespace,
+					"-o", `jsonpath={range .items[?(@.reason=="Paused")]}{.regarding.name}/{.action}{"\n"}{end}`))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring(appName + "/Pause"))
+			}).Should(Succeed())
+
+			By("resuming to the previous replica count")
+			_, err := utils.Run(exec.Command("kubectl", "patch", "managedworkload", appName, "-n", appNamespace,
+				"--type=merge", "-p", `{"spec":{"desiredState":"Running"}}`))
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", appName, appNamespace, "{.status.phase}")).To(Equal("Running"))
+				g.Expect(jsonpath("deployment", appName, appNamespace, "{.status.readyReplicas}")).To(Equal("2"))
+			}).Should(Succeed())
+
+			By("deleting the ManagedWorkload, which must release its finalizer and leave the Deployment")
+			_, err = utils.Run(exec.Command("kubectl", "delete", "managedworkload", appName,
+				"-n", appNamespace, "--timeout=1m"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(jsonpath("deployment", appName, appNamespace, "{.spec.replicas}")).To(Equal("2"))
+		})
 	})
 })
+
+// kubectlApply applies a manifest from a string.
+func kubectlApply(manifest string) error {
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	_, err := utils.Run(cmd)
+	return err
+}
+
+// jsonpath reads a single field from a namespaced object.
+func jsonpath(resource, name, ns, path string) (string, error) {
+	return utils.Run(exec.Command("kubectl", "get", resource, name, "-n", ns, "-o", "jsonpath="+path))
+}
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
 // It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
