@@ -48,11 +48,6 @@ func testPolicy() *v1alpha1.WorkloadPolicy {
 					Classification: v1alpha1.ClassificationIdle,
 				},
 				{
-					Name:           "wasteful-svc",
-					Kind:           v1alpha1.TargetKindDeployment,
-					Classification: v1alpha1.ClassificationWasteful,
-				},
-				{
 					Name:           "active-api",
 					Kind:           v1alpha1.TargetKindDeployment,
 					Classification: v1alpha1.ClassificationActive,
@@ -84,7 +79,7 @@ func TestGenerate(t *testing.T) {
 		{
 			name:      "no filter returns all unmanaged non-ignored workloads",
 			filter:    Filter{},
-			wantNames: []string{"deployment-idle-app", "deployment-wasteful-svc", "deployment-active-api"},
+			wantNames: []string{"deployment-idle-app", "deployment-active-api"},
 			wantSkipReasons: map[string]string{
 				"managed-db":  "already has a ManagedWorkload",
 				"ignored-job": "ignored (hybernate.io/ignore label)",
@@ -96,9 +91,9 @@ func TestGenerate(t *testing.T) {
 			wantNames: []string{"deployment-idle-app"},
 		},
 		{
-			name:      "filter by wasteful classification",
-			filter:    Filter{Classifications: []v1alpha1.Classification{v1alpha1.ClassificationWasteful}},
-			wantNames: []string{"deployment-wasteful-svc"},
+			name:      "filter by active classification",
+			filter:    Filter{Classifications: []v1alpha1.Classification{v1alpha1.ClassificationActive}},
+			wantNames: []string{"deployment-active-api"},
 		},
 		{
 			name:      "filter by active classification",
@@ -118,7 +113,7 @@ func TestGenerate(t *testing.T) {
 		{
 			name:      "include managed",
 			filter:    Filter{IncludeManaged: true},
-			wantNames: []string{"deployment-idle-app", "deployment-wasteful-svc", "deployment-active-api", "statefulset-managed-db"},
+			wantNames: []string{"deployment-idle-app", "deployment-active-api", "statefulset-managed-db"},
 			wantSkipReasons: map[string]string{
 				"ignored-job": "ignored (hybernate.io/ignore label)",
 			},
@@ -191,7 +186,7 @@ func TestWriteYAML(t *testing.T) {
 
 	out := buf.String()
 	assert.Contains(t, out, "name: deployment-idle-app")
-	assert.Contains(t, out, "name: deployment-wasteful-svc")
+	assert.Contains(t, out, "name: deployment-active-api")
 	assert.Contains(t, out, "---")
 }
 

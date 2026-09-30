@@ -23,9 +23,9 @@ Each ManagedWorkload gets its own forecast engine instance, serialized into the 
 
 ### WorkloadPolicy Reconciler
 
-Watches `WorkloadPolicy` CRs. On each reconcile it scans the namespace for Deployments and StatefulSets, fetches their metrics from the Kubernetes Metrics API, and classifies each as Active, Idle, or Wasteful.
+Watches `WorkloadPolicy` CRs. On each reconcile it scans the namespace for Deployments and StatefulSets, fetches their metrics from the Kubernetes Metrics API, and classifies each as Active or Idle.
 
-In `auto-manage` mode, it creates `ManagedWorkload` CRs for idle and wasteful workloads using the policy's default settings.
+In `auto-manage` mode, it creates `ManagedWorkload` CRs for idle workloads using the policy's default settings.
 
 ## Internal Packages
 

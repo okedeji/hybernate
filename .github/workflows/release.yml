@@ -112,7 +112,7 @@ jobs:
             description: |
               Hybernate kubectl plugin for exporting discovered workloads from a
               WorkloadPolicy as ManagedWorkload YAML manifests. Supports filtering
-              by classification (Active, Idle, Wasteful), specific workload name,
+              by classification (Active or Idle), specific workload name,
               and outputting to stdout or individual files for GitOps workflows.
             platforms:
           EOF

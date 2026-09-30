@@ -43,7 +43,7 @@ spec:
 kubectl apply -f workloadpolicy.yaml
 ```
 
-The policy scans the namespace, classifies each workload as Active, Idle, or Wasteful, and auto-creates a ManagedWorkload for each one with sensible defaults.
+The policy scans the namespace, classifies each workload as Active or Idle, and auto-creates a ManagedWorkload for each one with sensible defaults.
 
 ??? tip "Three ways to manage workloads"
 
@@ -60,8 +60,8 @@ kubectl get workloadpolicy sandbox-policy -n sandbox
 You should see your workload classified:
 
 ```
-NAME             MODE          DISCOVERED   ACTIVE   IDLE   WASTEFUL
-sandbox-policy   auto-manage   1            0        1      0
+NAME             MODE          DISCOVERED   ACTIVE   IDLE
+sandbox-policy   auto-manage   1            0        1
 ```
 
 Check the auto-created ManagedWorkload:

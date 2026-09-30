@@ -99,9 +99,6 @@
 | `scanInterval` | duration | No | `10m` | Re-scan frequency |
 | `cpuIdleThreshold` | int | No | `10` | CPU utilization % of request for Idle classification (0-100) |
 | `memoryIdleThreshold` | int | No | `10` | Memory utilization % of request for Idle classification (0-100) |
-| `cpuWastefulThreshold` | int (0-100) | No | `30` | CPU utilization % for Wasteful |
-| `memoryWastefulThreshold` | int (0-100) | No | `30` | Memory utilization % for Wasteful |
-| `rightSizeTarget` | int (1-100) | No | `70` | Target utilization for savings |
 | `dryRun` | bool | No | `true` | Default for auto-created CRs |
 | `rates` | `CostRates` | No | AWS defaults | Cost rates |
 | `idlePolicy` | `IdlePolicySpec` | No | See defaults | Default idle policy |
@@ -118,7 +115,6 @@
 | `summary.total` | int | Total workloads discovered |
 | `summary.active` | int | Active workloads |
 | `summary.idle` | int | Idle workloads |
-| `summary.wasteful` | int | Wasteful workloads |
 | `summary.managed` | int | Already-managed workloads |
 | `summary.estimatedMonthlyCost` | string | Total estimated cost |
 | `summary.estimatedPotentialSavings` | string | Total potential savings |

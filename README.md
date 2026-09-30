@@ -61,8 +61,8 @@ kubectl get workloadpolicy staging-policy -n staging
 ```
 
 ```
-NAME             MODE          DISCOVERED   ACTIVE   IDLE   WASTEFUL   PROJECTED COST   PROJECTED SAVINGS
-staging-policy   auto-manage   12           8        2      2          $340.00           $89.00
+NAME             MODE          DISCOVERED   ACTIVE   IDLE   PROJECTED COST   PROJECTED SAVINGS
+staging-policy   auto-manage   12           10       2      $340.00          $89.00
 ```
 
 Start with `dryRun: true` to observe. When you're confident, set it to `false` to enable automation.
@@ -99,7 +99,7 @@ spec:
 
 ### Operations
 
-- **Auto-discovery** lets WorkloadPolicy scan namespaces, classify workloads as Active/Idle/Wasteful, and optionally auto-create ManagedWorkloads
+- **Auto-discovery** lets WorkloadPolicy scan namespaces, classify workloads as Active or Idle, and optionally auto-create ManagedWorkloads
 - **GitOps export** via `kubectl hybernate export` generates ManagedWorkload manifests for ArgoCD/Flux workflows
 - **Cost tracking** with per-workload resource consumption, estimated savings, and resources freed
 - **Dry-run mode** to observe every decision the operator would make without it taking action

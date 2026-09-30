@@ -132,7 +132,7 @@ Examples:
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "Directory to write individual YAML files (stdout if omitted)")
 	cmd.Flags().StringVar(&name, "name", "", "Export only the workload with this name")
 	cmd.Flags().StringSliceVar(
-		&classifications, "classification", nil, "Filter by classification (Active, Idle, Wasteful)",
+		&classifications, "classification", nil, "Filter by classification (Active, Idle)",
 	)
 	cmd.Flags().BoolVar(
 		&includeManaged, "include-managed", false, "Include workloads that already have a ManagedWorkload CR",

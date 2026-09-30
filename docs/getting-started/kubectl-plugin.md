@@ -71,13 +71,6 @@ Creates one file per workload (e.g., `manifests/my-api.yaml`).
 ```bash
 # Only idle workloads
 kubectl hybernate export --policy staging-policy -n staging --classification Idle
-
-# Only wasteful workloads
-kubectl hybernate export --policy staging-policy -n staging --classification Wasteful
-
-# Both
-kubectl hybernate export --policy staging-policy -n staging \
-  --classification Idle --classification Wasteful
 ```
 
 ### Export a Specific Workload
@@ -102,7 +95,7 @@ kubectl hybernate export --policy staging-policy -n staging --include-managed
 | `--namespace` | `-n` | `default` | Namespace of the WorkloadPolicy |
 | `--output` | `-o` | _(stdout)_ | Directory to write individual YAML files |
 | `--name` | | | Export only the workload with this name |
-| `--classification` | | | Filter by classification (`Active`, `Idle`, `Wasteful`) |
+| `--classification` | | | Filter by classification (`Active`, `Idle`) |
 | `--include-managed` | | `false` | Include workloads that already have a ManagedWorkload |
 
 ## GitOps Workflow

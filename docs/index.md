@@ -30,7 +30,7 @@ Every action goes through a grace period, signal consensus, and confidence thres
 Track per-workload resource consumption and savings. See exactly how much you're saving from paused and destroyed workloads.
 
 ### Auto-Discovery
-WorkloadPolicy scans your namespaces, classifies workloads as Active, Idle, or Wasteful, and can auto-create `ManagedWorkload` resources for the ones that need attention.
+WorkloadPolicy scans your namespaces, classifies workloads as Active or Idle, and can auto-create `ManagedWorkload` resources for the ones that need attention.
 
 ### GitOps-Native Export
 Use `kubectl hybernate export` to generate ManagedWorkload manifests from discovered workloads, ready to commit to Git and deploy via ArgoCD or Flux.
