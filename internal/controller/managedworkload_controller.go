@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -107,6 +108,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if !workload.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, &workload)
 	}
+
+	// Re-published every reconcile so the gauge is populated after an
+	// operator restart, not only after the next transition.
+	recordPhase(&workload)
 
 	if err := r.ensureFinalizer(ctx, &workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring finalizer: %w", err)
@@ -503,7 +508,17 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 	if err := r.Update(ctx, workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
 	}
+	metrics.WorkloadPhase.DeletePartialMatch(prometheus.Labels{
+		"namespace": workload.Namespace, "workload": workload.Name,
+	})
 	return ctrl.Result{}, nil
+}
+
+func recordPhase(workload *v1alpha1.ManagedWorkload) {
+	if workload.Status.Phase == "" {
+		return
+	}
+	metrics.WorkloadPhase.WithLabelValues(workload.Namespace, workload.Name, string(workload.Status.Phase)).Set(1)
 }
 
 // --- Target ---
@@ -770,6 +785,8 @@ func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedW
 	if err := r.Status().Update(ctx, workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating phase to %s: %w", phase, err)
 	}
+	metrics.WorkloadPhase.DeleteLabelValues(workload.Namespace, workload.Name, string(old))
+	recordPhase(workload)
 	metrics.LifecycleTransitions.WithLabelValues(string(old), string(phase)).Inc()
 	logger.Info("phase transition", "from", old, "to", phase, "reason", reason)
 	return ctrl.Result{}, nil

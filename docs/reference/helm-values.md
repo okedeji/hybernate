@@ -78,15 +78,7 @@ When `metrics.secure` is `true`, the chart creates a `ClusterRoleBinding` to `sy
 | `metrics.prometheusRule.enabled` | `false` | Create a PrometheusRule CR with predefined alerts |
 | `metrics.prometheusRule.additionalLabels` | `{}` | Extra labels on the PrometheusRule |
 
-The PrometheusRule includes alerts for reconciliation errors, low prediction confidence, regime changes, drift detection, PVC retention expiry, scale-guard blocks, and operator downtime.
-
-## Grafana
-
-| Value | Default | Description |
-|-------|---------|-------------|
-| `grafana.enabled` | `false` | Create a ConfigMap with the Grafana dashboard |
-
-The ConfigMap is labeled with `grafana_dashboard: "1"` for auto-provisioning by the Grafana sidecar.
+The PrometheusRule includes alerts for reconciliation errors, operator downtime, workloads stuck in a transition, missing targets, and PVC retention expiry.
 
 ## Network Policy
 
@@ -171,9 +163,6 @@ metrics:
     interval: 15s
   prometheusRule:
     enabled: true
-
-grafana:
-  enabled: true
 
 logLevel: info
 

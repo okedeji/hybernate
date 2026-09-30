@@ -101,13 +101,12 @@ spec:
 
 - **Auto-discovery** lets WorkloadPolicy scan namespaces, classify workloads as Active/Idle/Wasteful, and optionally auto-create ManagedWorkloads
 - **GitOps export** via `kubectl hybernate export` generates ManagedWorkload manifests for ArgoCD/Flux workflows
-- **Cost tracking** with per-workload resource consumption, estimated savings, and concrete resource reduction metrics
+- **Cost tracking** with per-workload resource consumption, estimated savings, and resources freed
 - **Dry-run mode** to observe every decision the operator would make without it taking action
 
 ### Observability
 
-- **30+ Prometheus metrics** across three tiers: cluster health, operational insight, and debugging
-- **Grafana dashboard** included with cost, lifecycle, and prediction panels
+- **Prometheus metrics** for operator health, lifecycle transitions, and prediction state, with alerting rules for the Helm chart
 - **Kubernetes events** for every state change, visible in `kubectl describe`
 
 ## Architecture

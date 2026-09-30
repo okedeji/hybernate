@@ -29,48 +29,14 @@ spec:
 
     - name: hybernate.warning
       rules:
-        - alert: HybernatePredictionConfidenceLow
-          expr: hybernate_prediction_confidence_percent{season="daily"} < 50 and on(namespace, workload) hybernate_prediction_data_points > 168
-          for: 1h
-          labels:
-            severity: warning
-          annotations:
-            summary: "Prediction confidence is low for {{ $labels.workload }}"
-            description: "Daily confidence is {{ $value }}% despite having >168 data points. The model may not fit this workload's pattern."
-
-        - alert: HybernateRegimeChangeDetected
-          expr: increase(hybernate_prediction_regime_changes_total[1h]) > 0
-          labels:
-            severity: warning
-          annotations:
-            summary: "Regime change detected for {{ $labels.workload }}"
-            description: "The prediction engine detected a regime change and demoted confidence for {{ $labels.namespace }}/{{ $labels.workload }}."
-
-        - alert: HybernateDriftFrequent
-          expr: increase(hybernate_drift_detections_total[1h]) > 3
+        - alert: HybernateWorkloadStuck
+          expr: max by (namespace, workload, phase) (hybernate_workload_phase{phase=~"Pausing|Resuming|Destroying"}) == 1
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: "Frequent replica drift detected"
-            description: "Policy {{ $labels.policy }} saw >3 drift detections in the last hour. An external actor may be fighting the operator."
-
-        - alert: HybernatePVCRetentionExpiring
-          expr: hybernate_pvc_retention_remaining_seconds < 86400
-          labels:
-            severity: warning
-          annotations:
-            summary: "PVC retention expiring for {{ $labels.workload }}"
-            description: "PVCs for {{ $labels.namespace }}/{{ $labels.workload }} will be deleted in {{ $value | humanizeDuration }}."
-
-        - alert: HybernateDiscoveryScanSlow
-          expr: histogram_quantile(0.95, sum by (le) (rate(hybernate_discovery_scan_duration_seconds_bucket[5m]))) > 30
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Discovery scans are taking too long"
-            description: "p95 scan duration is {{ $value | humanizeDuration }}. Consider reducing the number of target kinds or namespaces."
+            summary: "Workload {{ $labels.workload }} stuck in {{ $labels.phase }}"
+            description: "ManagedWorkload {{ $labels.namespace }}/{{ $labels.workload }} has been {{ $labels.phase }} for 15 minutes. Check its events and conditions."
 
         - alert: HybernateTargetUnavailable
           expr: increase(hybernate_target_unavailable_total[1h]) > 3
@@ -81,20 +47,10 @@ spec:
             summary: "Target workload not found for {{ $labels.workload }}"
             description: "ManagedWorkload {{ $labels.namespace }}/{{ $labels.workload }} cannot find its target. It may have been deleted or renamed."
 
-        - alert: HybernateDryRunActionsHigh
-          expr: increase(hybernate_dryrun_actions_total[1h]) > 10
-          for: 30m
+        - alert: HybernatePVCRetentionExpiring
+          expr: hybernate_pvc_retention_remaining_seconds > 0 < 86400
           labels:
             severity: warning
           annotations:
-            summary: "High dry-run action rate"
-            description: "{{ $value }} actions were suppressed by dry-run in the last hour. Review workloads and disable dry-run when ready."
-
-        - alert: HybernateNoDiscoveredWorkloads
-          expr: sum(hybernate_discovery_workloads) == 0
-          for: 30m
-          labels:
-            severity: warning
-          annotations:
-            summary: "WorkloadPolicy is not discovering any workloads"
-            description: "No workloads discovered for 30 minutes. Check targetKinds and namespace configuration."
+            summary: "PVC retention expiring for {{ $labels.workload }}"
+            description: "PVCs for {{ $labels.namespace }}/{{ $labels.workload }} will be deleted in {{ $value | humanizeDuration }}."

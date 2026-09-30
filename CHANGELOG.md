@@ -7,11 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `hybernate_workload_phase{namespace, workload, phase}`: 1 for each workload's current phase, and a `HybernateWorkloadStuck` alert for workloads left in `Pausing`, `Resuming`, or `Destroying` for 15 minutes
+
 ### Removed
 
 - **Breaking:** prediction-driven replica scaling. `spec.scalePolicy` (min/max replicas, `overrideReplicas`, stabilization, step limits, and scale-down guards), `status.scale`, the `Scaling` phase, the `WorkloadPolicy` default `scalePolicy`, and the `hybernate_scale_events_total`, `hybernate_scale_replicas`, and `hybernate_scale_guard_blocked_total` metrics are gone. Sizing a running workload is left to HPA or KEDA; Hybernate pauses and resumes. Existing `scalePolicy` fields are dropped the next time a ManagedWorkload is written
 - **Breaking:** the cluster-scoped `HybernateReport` CRD and its controller. Delete the CRD after upgrading (`kubectl delete crd hybernatereports.hybernate.io`). Per-workload cost stays in each ManagedWorkload's status
 - **Breaking:** the cluster-wide gauges the report controller published: `hybernate_workloads_total`, `hybernate_active_workloads`, `hybernate_paused_workloads`, `hybernate_destroyed_workloads`, `hybernate_cost_*`, and `hybernate_resource_reduction_*`. Operator metrics now cover health; cost is shown per workload
+- **Breaking:** the Grafana dashboard (Helm value `grafana.enabled`, `config/grafana/`) and the never-populated `hybernate_discovery_estimated_savings_dollars` gauge
+- Alert rules for low prediction confidence, regime changes, frequent drift, slow discovery scans, dry-run activity, and empty discovery. The shipped rules are now reconcile errors, operator down, stuck workloads, missing targets, and PVC retention expiry
 
 ### Changed
 
@@ -20,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `HybernatePVCRetentionExpiring` no longer fires permanently once PVCs are cleaned up or retention is cancelled; the gauge is set to 0 in both cases, which matched `< 86400`
 - Resuming a paused workload restores its previous replica count. Since 0.1.7 the controller created the pause status early to hold the resource snapshot, which made the pauser skip recording the replica count, so every resume came back with a single replica
 
 - Prometheus signals now work. The operator never received a Prometheus URL, and signal checkers were built without an HTTP client, so any workload with `idlePolicy.signals` or `scalePolicy.down.guard` panicked on evaluation. Configure the endpoint with the new `--prometheus-url` flag (Helm value `prometheus.url`); the documented `PROMETHEUS_ENDPOINT` environment variable was never read and is removed from the docs

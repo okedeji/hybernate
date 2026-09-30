@@ -24,6 +24,14 @@ import (
 // --- Tier 1: Cluster Health ---
 
 var (
+	// WorkloadPhase is 1 for each workload's current phase, in the style of
+	// kube-state-metrics, so alerts can see which workload is in which phase
+	// and for how long.
+	WorkloadPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hybernate_workload_phase",
+		Help: "Current lifecycle phase of each managed workload (1 for the current phase).",
+	}, []string{"namespace", "workload", "phase"})
+
 	ReconcileErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_reconcile_errors_total",
 		Help: "Total reconciliation errors by controller.",
@@ -133,11 +141,6 @@ var (
 		Help: "Number of discovered workloads by classification.",
 	}, []string{"classification"})
 
-	DiscoveryEstimatedSavings = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_discovery_estimated_savings_dollars",
-		Help: "Total estimated monthly savings from discovered workloads.",
-	})
-
 	DiscoveryAutoManaged = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "hybernate_discovery_auto_managed_total",
 		Help: "Total ManagedWorkload CRs auto-created by discovery.",
@@ -147,6 +150,7 @@ var (
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		// Tier 1
+		WorkloadPhase,
 		ReconcileErrors,
 		LifecycleTransitions,
 		LifecycleActionDuration,
@@ -172,7 +176,6 @@ func init() {
 		// Discovery
 		DiscoveryScanDuration,
 		DiscoveryWorkloads,
-		DiscoveryEstimatedSavings,
 		DiscoveryAutoManaged,
 	)
 }

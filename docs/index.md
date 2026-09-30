@@ -36,7 +36,7 @@ WorkloadPolicy scans your namespaces, classifies workloads as Active, Idle, or W
 Use `kubectl hybernate export` to generate ManagedWorkload manifests from discovered workloads, ready to commit to Git and deploy via ArgoCD or Flux.
 
 ### Full Observability
-Prometheus metrics for every lifecycle transition, prediction confidence score, and cost saving. Grafana dashboards and alerting rules included.
+Prometheus metrics for operator health, lifecycle transitions, and prediction confidence, with alerting rules included.
 
 ---
 

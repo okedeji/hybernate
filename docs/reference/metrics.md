@@ -4,10 +4,11 @@ All metrics are prefixed with `hybernate_` and registered with the controller-ru
 
 ## Tier 1: Cluster Health
 
-These metrics provide a high-level view of Hybernate's impact.
+These metrics show whether the operator is healthy and what phase each workload is in.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
+| `hybernate_workload_phase` | Gauge | `namespace`, `workload`, `phase` | 1 for each workload's current lifecycle phase |
 | `hybernate_reconcile_errors_total` | Counter | `controller` | Reconciliation errors by controller |
 | `hybernate_lifecycle_transitions_total` | Counter | `from`, `to` | Phase transitions |
 | `hybernate_lifecycle_action_duration_seconds` | Histogram | `action` | Duration of lifecycle actions (pause, resume, destroy) |
@@ -46,7 +47,6 @@ These metrics help troubleshoot specific workload behavior.
 |--------|------|--------|-------------|
 | `hybernate_discovery_scan_duration_seconds` | Histogram | | Scan duration |
 | `hybernate_discovery_workloads` | Gauge | `classification` | Discovered workloads by class |
-| `hybernate_discovery_estimated_savings_dollars` | Gauge | | Estimated savings from discoveries |
 | `hybernate_discovery_auto_managed_total` | Counter | | Auto-created ManagedWorkloads |
 
 ## Prediction Phase Values

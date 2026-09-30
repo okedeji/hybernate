@@ -25,6 +25,7 @@ import (
 
 func TestAllMetricsRegistered(t *testing.T) {
 	expected := []string{
+		"hybernate_workload_phase",
 		// Tier 1
 		"hybernate_reconcile_errors_total",
 		"hybernate_lifecycle_transitions_total",
@@ -51,7 +52,6 @@ func TestAllMetricsRegistered(t *testing.T) {
 		// Discovery
 		"hybernate_discovery_scan_duration_seconds",
 		"hybernate_discovery_workloads",
-		"hybernate_discovery_estimated_savings_dollars",
 		"hybernate_discovery_auto_managed_total",
 	}
 
@@ -66,6 +66,7 @@ func TestAllMetricsRegistered(t *testing.T) {
 	// Metrics without observations won't appear in Gather(), so we verify
 	// they're at least discoverable by writing a value and re-gathering.
 	ReconcileErrors.WithLabelValues("test").Inc()
+	WorkloadPhase.WithLabelValues("ns", "w", "Running").Set(1)
 	LifecycleTransitions.WithLabelValues("a", "b").Inc()
 	LifecycleActionDuration.WithLabelValues("test").Observe(1)
 	PredictionConfidence.WithLabelValues("daily", "ns", "w").Set(50)
@@ -84,7 +85,6 @@ func TestAllMetricsRegistered(t *testing.T) {
 	TargetUnavailable.WithLabelValues("ns", "w").Inc()
 	DiscoveryScanDuration.Observe(1.5)
 	DiscoveryWorkloads.WithLabelValues("Idle").Set(5)
-	DiscoveryEstimatedSavings.Set(100)
 	DiscoveryAutoManaged.Inc()
 
 	gathered, err = ctrlmetrics.Registry.Gather()

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -36,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 var fixedTime = time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
@@ -1103,4 +1105,34 @@ func TestFindWorkloadsForTarget_MatchesKindAndName(t *testing.T) {
 			assert.Equal(t, tt.want, r.findWorkloadsForTarget(context.Background(), tt.obj))
 		})
 	}
+}
+
+func TestReconcile_WorkloadPhaseGaugeFollowsTransitions(t *testing.T) {
+	workload := lifecycleWorkload("phase-gauge-app", desiredState(v1alpha1.DesiredStatePaused), v1alpha1.PhaseRunning)
+	r := newTestReconciler(t, workload, &stubPauser{pauseDone: true}, &stubDestroyer{})
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("phase-gauge-app"))
+	require.NoError(t, err)
+	require.Equal(t, v1alpha1.PhasePaused, getWorkload(t, r, "phase-gauge-app").Status.Phase)
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.WorkloadPhase.WithLabelValues("default", "phase-gauge-app", "Paused")))
+	for _, stale := range []string{"Running", "Pausing"} {
+		assert.False(t, metrics.WorkloadPhase.DeleteLabelValues("default", "phase-gauge-app", stale),
+			"%s must not linger after the workload leaves it", stale)
+	}
+}
+
+func TestReconcileDelete_DropsWorkloadPhaseSeries(t *testing.T) {
+	workload := lifecycleWorkload("deleted-gauge-app", nil, v1alpha1.PhaseRunning)
+	workload.Finalizers = []string{finalizerName}
+	deleting := metav1.NewTime(fixedTime)
+	workload.DeletionTimestamp = &deleting
+	r := newTestReconciler(t, workload, &stubPauser{}, &stubDestroyer{})
+	metrics.WorkloadPhase.WithLabelValues("default", "deleted-gauge-app", "Running").Set(1)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("deleted-gauge-app"))
+	require.NoError(t, err)
+
+	assert.False(t, metrics.WorkloadPhase.DeleteLabelValues("default", "deleted-gauge-app", "Running"),
+		"a deleted workload must not leave a phase series behind")
 }
