@@ -54,7 +54,6 @@ rules:
 - apiGroups:
   - hybernate.io
   resources:
-  - hybernatereports
   - managedworkloads
   - workloadpolicies
   verbs:
@@ -68,7 +67,6 @@ rules:
 - apiGroups:
   - hybernate.io
   resources:
-  - hybernatereports/finalizers
   - managedworkloads/finalizers
   - workloadpolicies/finalizers
   verbs:
@@ -76,7 +74,6 @@ rules:
 - apiGroups:
   - hybernate.io
   resources:
-  - hybernatereports/status
   - managedworkloads/status
   - workloadpolicies/status
   verbs:
