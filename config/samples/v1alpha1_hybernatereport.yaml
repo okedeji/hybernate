@@ -1,7 +1,0 @@
-apiVersion: hybernate.io/v1alpha1
-kind: HybernateReport
-metadata:
-  labels:
-    app.kubernetes.io/name: hybernate
-    app.kubernetes.io/managed-by: kustomize
-  name: cluster-report

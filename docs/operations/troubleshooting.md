@@ -74,17 +74,6 @@ Also check that metrics-server is running and returning data:
 kubectl top pods -n staging
 ```
 
-### Scale-down is blocked
-
-```bash
-kubectl describe managedworkload my-api -n staging
-```
-
-Look for:
-
-- **"in stabilization window"**: cooldown from a recent scale event. Wait for the stabilization period to elapse.
-- **Guard probe denial**: a Prometheus guard query returned zero/empty. Check the query against Prometheus directly.
-
 ### Target not found
 
 ```bash

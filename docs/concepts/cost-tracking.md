@@ -1,6 +1,6 @@
 # Cost Tracking
 
-Hybernate tracks per-workload resource consumption and estimates the potential cost savings from its actions (pause, scale, destroy). Cost data is available per-workload in the ManagedWorkload status and aggregated cluster-wide in the HybernateReport.
+Hybernate tracks per-workload resource consumption and estimates the potential cost savings from its actions (pause, destroy). Cost data is available per-workload in the ManagedWorkload status.
 
 !!! warning "Estimated savings vs. actual savings"
     Hybernate operates at the **workload layer** — it removes pods, freeing CPU and memory on nodes. But your cloud bill is based on **nodes**, not pods. Estimated savings are only realized when freed resources lead to node removal by a cluster autoscaler. If freed capacity isn't enough to drain a node, the node stays and no money is saved. Hybernate reports two things separately: **resource reduction** (always accurate — the concrete CPU/memory freed) and **estimated cost savings** (projected — assumes freed resources lead to node removal).
@@ -95,27 +95,14 @@ status:
 | `estimatedCostWithoutManagement` | Estimated cost without Hybernate: estimated cost + estimated savings. |
 | `resourceReduction` | Concrete CPU, memory, and replicas freed by Hybernate actions. Always accurate regardless of autoscaler behavior. |
 
-## Cluster-Wide Aggregation
+## Viewing Costs Across Workloads
 
-The HybernateReport singleton aggregates cost data across all ManagedWorkloads:
+List cost and savings for every ManagedWorkload in the cluster:
 
 ```bash
-kubectl get hybernatereport cluster-report -o jsonpath='{.status}'
+kubectl get managedworkloads -A -o custom-columns=\
+NAMESPACE:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase,\
+COST:.status.cost.estimatedMonthlyCost,SAVINGS:.status.cost.estimatedMonthlySavings
 ```
 
-This gives you total managed workload count, aggregate CPU/memory/storage hours, total estimated cost, and total savings, providing a single view of Hybernate's impact.
-
-## Prometheus Metrics
-
-Cost data is also exposed as Prometheus metrics:
-
-- `hybernate_cost_estimated_dollars` — estimated monthly cost
-- `hybernate_cost_estimated_savings_dollars` — estimated monthly savings (requires autoscaler for realization)
-- `hybernate_cost_estimated_without_management_dollars` — estimated cost without Hybernate
-- `hybernate_resource_reduction_cpu_millicores` — total CPU millicores freed
-- `hybernate_resource_reduction_memory_bytes` — total memory bytes freed
-- `hybernate_cost_cpu_hours` — total vCPU-hours consumed
-- `hybernate_cost_memory_hours` — total GiB-hours consumed
-- `hybernate_cost_storage_hours` — total GiB-hours storage
-
-See the [Metrics Reference](../reference/metrics.md) for the full list.
+Cost data is not exported as Prometheus metrics. The operator's metrics cover its own health; see the [Metrics Reference](../reference/metrics.md).

@@ -28,13 +28,12 @@ const (
 	PolicyModeAutoManage PolicyMode = "auto-manage"
 )
 
-// +kubebuilder:validation:Enum=Active;Idle;Wasteful
+// +kubebuilder:validation:Enum=Active;Idle
 type Classification string
 
 const (
-	ClassificationActive   Classification = "Active"
-	ClassificationIdle     Classification = "Idle"
-	ClassificationWasteful Classification = "Wasteful"
+	ClassificationActive Classification = "Active"
+	ClassificationIdle   Classification = "Idle"
 )
 
 // WorkloadPolicySpec defines the discovery scope, classification thresholds,
@@ -67,29 +66,6 @@ type WorkloadPolicySpec struct {
 	// +optional
 	MemoryIdleThreshold int `json:"memoryIdleThreshold,omitempty"`
 
-	// CPU utilization percentage below which a non-idle workload is Wasteful.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=30
-	// +optional
-	CPUWastefulThreshold int `json:"cpuWastefulThreshold,omitempty"`
-
-	// Memory utilization percentage below which a non-idle workload is Wasteful.
-	// A workload is Wasteful if either CPU or memory utilization is below
-	// its respective threshold.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=30
-	// +optional
-	MemoryWastefulThreshold int `json:"memoryWastefulThreshold,omitempty"`
-
-	// Target utilization percentage for right-sizing savings estimates.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=70
-	// +optional
-	RightSizeTarget int `json:"rightSizeTarget,omitempty"`
-
 	// +optional
 	Rates *CostRates `json:"rates,omitempty"`
 
@@ -101,10 +77,6 @@ type WorkloadPolicySpec struct {
 	// Default idle policy copied into exported/auto-created ManagedWorkloads.
 	// +kubebuilder:default={"action":"pause","cpuIdleThreshold":10,"memoryIdleThreshold":10,"gracePeriod":"5m0s","autoResume":true}
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
-
-	// Default scaling policy copied into exported/auto-created ManagedWorkloads.
-	// +kubebuilder:default={"minReplicas":1,"maxReplicas":10,"down":{"stabilization":"5m0s"},"up":{"stabilization":"2m0s"}}
-	ScalePolicy *ScalePolicySpec `json:"scalePolicy,omitempty"`
 
 	// Default pause behavior copied into exported/auto-created ManagedWorkloads.
 	// +kubebuilder:default={"expireAfter":"168h0m0s","expireAction":"resume"}
@@ -150,7 +122,6 @@ type DiscoverySummary struct {
 	Total                     int    `json:"total"`
 	Active                    int    `json:"active"`
 	Idle                      int    `json:"idle"`
-	Wasteful                  int    `json:"wasteful"`
 	Managed                   int    `json:"managed"`
 	EstimatedMonthlyCost      string `json:"estimatedMonthlyCost,omitempty"`
 	EstimatedPotentialSavings string `json:"estimatedPotentialSavings,omitempty"`
@@ -180,7 +151,6 @@ type DiscoveredWorkload struct {
 // +kubebuilder:printcolumn:name="Discovered",type=integer,JSONPath=`.status.summary.total`
 // +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=`.status.summary.active`
 // +kubebuilder:printcolumn:name="Idle",type=integer,JSONPath=`.status.summary.idle`
-// +kubebuilder:printcolumn:name="Wasteful",type=integer,JSONPath=`.status.summary.wasteful`
 // +kubebuilder:printcolumn:name="Projected Cost",type=string,JSONPath=`.status.summary.estimatedMonthlyCost`
 // +kubebuilder:printcolumn:name="Projected Savings",type=string,JSONPath=`.status.summary.estimatedPotentialSavings`
 // +kubebuilder:resource:shortName=wp

@@ -68,7 +68,7 @@ type ManagedWorkloadSpec struct {
 	Target WorkloadRef `json:"target"`
 
 	// DesiredState overrides automation and forces the workload into the given
-	// state. When set, the operator stops evaluating idle/scale policies and
+	// state. When set, the operator stops evaluating the idle policy and
 	// drives the workload to this state instead.
 	// +optional
 	DesiredState *DesiredState `json:"desiredState,omitempty"`
@@ -78,11 +78,6 @@ type ManagedWorkloadSpec struct {
 	// period the operator executes the configured action (pause or destroy).
 	// +optional
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
-
-	// ScalePolicy configures prediction-driven replica scaling with
-	// stabilization windows, step limits, and min/max bounds.
-	// +optional
-	ScalePolicy *ScalePolicySpec `json:"scalePolicy,omitempty"`
 
 	// Pause configures behavior while the workload is paused, including
 	// automatic expiry and what action to take when the pause expires.
@@ -94,8 +89,8 @@ type ManagedWorkloadSpec struct {
 	// +optional
 	Destroy *DestroySpec `json:"destroy,omitempty"`
 
-	// Prediction configures the Holt-Winters forecasting engine that drives
-	// idle detection confirmation and scale decisions.
+	// Prediction configures the Holt-Winters forecasting engine that confirms
+	// idle detection and wakes paused workloads ahead of predicted demand.
 	// +required
 	Prediction PredictionSpec `json:"prediction"`
 
@@ -105,10 +100,10 @@ type ManagedWorkloadSpec struct {
 	// +optional
 	CostTracking *CostTrackingSpec `json:"costTracking,omitempty"`
 
-	// ConflictAction controls how the operator reacts when someone changes
-	// the target's replicas outside of Hybernate. "enforce" corrects the
-	// drift, "warn" emits an event but leaves the change, "defer" accepts
-	// the external change and updates internal state to match.
+	// ConflictAction controls how the operator reacts when someone scales up
+	// a paused target outside of Hybernate. "enforce" scales it back to zero,
+	// "warn" emits an event but leaves the change, "defer" accepts the change
+	// and treats the workload as running.
 	// +kubebuilder:default=warn
 	// +optional
 	ConflictAction ConflictAction `json:"conflictAction,omitempty"`
@@ -218,18 +213,16 @@ const (
 	ProbeSourcePrometheus ProbeSource = "prometheus"
 )
 
-// ProbeSpec defines an external check used for idle detection signals or
-// scale-down guards. For Prometheus probes, the PromQL query must return a
-// non-zero value to confirm the action. An empty result or zero value denies it.
+// ProbeSpec defines an external check used as an idle detection signal. For
+// Prometheus probes, the PromQL query must return a non-zero value to confirm
+// the workload is idle. An empty result or zero value denies it.
 type ProbeSpec struct {
 	// +kubebuilder:default=prometheus
 	Source ProbeSource `json:"source"`
 
 	// PromQL is an instant query evaluated against the configured Prometheus
-	// endpoint. The query must return a non-zero scalar to confirm the action.
-	// Examples:
-	//   Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
-	//   Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
+	// endpoint. The query must return a non-zero scalar to confirm idle.
+	// Example: rate(http_requests_total{service="api"}[10m]) == 0
 	// +optional
 	PromQL string `json:"promQL,omitempty"`
 }
@@ -255,59 +248,6 @@ type PauseSpec struct {
 	// +kubebuilder:default=destroy
 	// +optional
 	ExpireAction ExpireAction `json:"expireAction,omitempty"`
-}
-
-// ScalePolicySpec configures prediction-driven replica scaling.
-type ScalePolicySpec struct {
-	// MinReplicas is the floor for scaling. The operator will never scale
-	// below this value.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=1
-	MinReplicas int `json:"minReplicas"`
-
-	// MaxReplicas is the ceiling for scaling. The operator will never scale
-	// above this value.
-	// +kubebuilder:validation:Minimum=1
-	MaxReplicas int `json:"maxReplicas"`
-
-	// OverrideReplicas bypasses prediction and forces the operator to scale
-	// to this exact replica count (clamped to [minReplicas, maxReplicas]).
-	// Stabilization and step limits still apply. Remove the field to return
-	// to prediction-driven scaling.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	OverrideReplicas *int32 `json:"overrideReplicas,omitempty"`
-
-	// Down configures scale-down behavior including stabilization, step
-	// limits, and guard probes.
-	// +optional
-	Down *ScaleDirectionSpec `json:"down,omitempty"`
-
-	// Up configures scale-up behavior including stabilization and step limits.
-	// +optional
-	Up *ScaleDirectionSpec `json:"up,omitempty"`
-}
-
-// ScaleDirectionSpec configures guardrails for a single scaling direction.
-type ScaleDirectionSpec struct {
-	// Stabilization is the cooldown period after a scale event in this
-	// direction. Prevents oscillation by blocking same-direction scaling
-	// until the window elapses.
-	// +optional
-	// +kubebuilder:validation:Format=duration
-	Stabilization *metav1.Duration `json:"stabilization,omitempty"`
-
-	// MaxStep limits how many replicas can be added or removed in a single
-	// reconciliation loop. Enables gradual ramp-up or ramp-down.
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	MaxStep *int `json:"maxStep,omitempty"`
-
-	// Guard probes that must all confirm before a scale-down proceeds.
-	// An internal CPU capacity check runs automatically; these probes
-	// add application-level safety gates (e.g. active connections, in-flight jobs).
-	// +optional
-	Guard []ProbeSpec `json:"guard,omitempty"`
 }
 
 // DestroySpec configures cleanup behavior after a workload is destroyed.
@@ -352,14 +292,13 @@ type CostRates struct {
 
 // --- Status ---
 
-// +kubebuilder:validation:Enum=Creating;Running;Idle;Scaling;Pausing;Paused;Resuming;Destroying;Destroyed
+// +kubebuilder:validation:Enum=Creating;Running;Idle;Pausing;Paused;Resuming;Destroying;Destroyed
 type WorkloadPhase string
 
 const (
 	PhaseCreating   WorkloadPhase = "Creating"
 	PhaseRunning    WorkloadPhase = "Running"
 	PhaseIdle       WorkloadPhase = "Idle"
-	PhaseScaling    WorkloadPhase = "Scaling"
 	PhasePausing    WorkloadPhase = "Pausing"
 	PhasePaused     WorkloadPhase = "Paused"
 	PhaseResuming   WorkloadPhase = "Resuming"
@@ -384,10 +323,6 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	Pause *PauseStatus `json:"pause,omitempty"`
 
-	// Scale holds state related to the most recent scaling event.
-	// +optional
-	Scale *ScaleStatus `json:"scale,omitempty"`
-
 	// Destroy holds state after the workload is destroyed.
 	// +optional
 	Destroy *DestroyStatus `json:"destroy,omitempty"`
@@ -401,7 +336,7 @@ type ManagedWorkloadStatus struct {
 	Cost *CostStatus `json:"cost,omitempty"`
 
 	// LastActedAt is when the operator last mutated the target workload
-	// (scale, pause, resume, destroy, or drift correction).
+	// (pause, resume, destroy, or drift correction).
 	// +optional
 	LastActedAt *metav1.Time `json:"lastActedAt,omitempty"`
 
@@ -439,18 +374,6 @@ type PauseStatus struct {
 	// for cost savings calculation.
 	// +optional
 	Resources *ResourceSnapshot `json:"resources,omitempty"`
-}
-
-// ScaleStatus records state from the most recent scaling event.
-type ScaleStatus struct {
-	// PreviousReplicas is the replica count before the last scale event.
-	PreviousReplicas int32 `json:"previousReplicas"`
-
-	// CurrentReplicas is the replica count after the last scale event.
-	CurrentReplicas int32 `json:"currentReplicas"`
-
-	// ScaledAt is when the last scale event occurred.
-	ScaledAt *metav1.Time `json:"scaledAt,omitempty"`
 }
 
 // DestroyStatus records state after the workload is destroyed.
@@ -503,7 +426,7 @@ type CostStatus struct {
 	EstimatedMonthlyCost string `json:"estimatedMonthlyCost"`
 
 	// EstimatedMonthlySavings is the projected dollar amount saved by Hybernate
-	// actions (pause, scale-down, destroy) this month. These savings are only
+	// actions (pause, destroy) this month. These savings are only
 	// realized when freed resources lead to node removal by a cluster autoscaler.
 	EstimatedMonthlySavings string `json:"estimatedMonthlySavings"`
 
@@ -523,7 +446,7 @@ type CostStatus struct {
 }
 
 // ResourceReduction tracks the workload-level resources freed by Hybernate
-// actions (pause, scale-down, destroy). These resources are released on the
+// actions (pause, destroy). These resources are released on the
 // node when pods are removed, but the node itself is only removed if a
 // cluster autoscaler determines it is underutilized.
 type ResourceReduction struct {

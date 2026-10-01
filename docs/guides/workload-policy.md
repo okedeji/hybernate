@@ -1,6 +1,6 @@
 # WorkloadPolicy Guide
 
-WorkloadPolicy automates workload discovery and classification within a namespace. It scans for Deployments and StatefulSets, fetches their metrics, and classifies each as Active, Idle, or Wasteful.
+WorkloadPolicy automates workload discovery and classification within a namespace. It scans for Deployments and StatefulSets, fetches their metrics, and classifies each as Active or Idle.
 
 ## Quick Start
 
@@ -15,8 +15,6 @@ spec:
   scanInterval: "10m"
   cpuIdleThreshold: 10
   memoryIdleThreshold: 10
-  cpuWastefulThreshold: 30
-  rightSizeTarget: 70
 ```
 
 ```bash
@@ -32,8 +30,8 @@ kubectl get workloadpolicy staging-policy -n staging
 Output:
 
 ```
-NAME             MODE      DISCOVERED   ACTIVE   IDLE   WASTEFUL   PROJECTED COST   PROJECTED SAVINGS
-staging-policy   suggest   12           8        2      2          $340.00          $89.00
+NAME             MODE      DISCOVERED   ACTIVE   IDLE   PROJECTED COST   PROJECTED SAVINGS
+staging-policy   suggest   12           10       2      $340.00          $89.00
 ```
 
 ## Modes
@@ -50,7 +48,7 @@ Use this mode to:
 
 ### `auto-manage`
 
-Automatically creates ManagedWorkload CRs for idle and wasteful workloads using the policy's default settings. Active workloads are left alone.
+Automatically creates ManagedWorkload CRs for idle workloads using the policy's default settings. Active workloads are left alone.
 
 ```yaml title="workloadpolicy.yaml" linenums="1"
 spec:
@@ -62,19 +60,18 @@ spec:
     Start with `dryRun: true` when using `auto-manage`. This creates the ManagedWorkloads but they won't take action until you set `dryRun: false` on each one individually.
 
 !!! note "Forecast engine starts fresh"
-    When you switch from `suggest` to `auto-manage`, newly created ManagedWorkloads have no forecast history. The Holt-Winters engine begins in its Observing phase and needs time to learn the workload's demand patterns before it can gate idle detection or drive scaling. In `suggest` mode, no forecast engines run because no ManagedWorkloads exist. Plan for a warm-up period after switching modes.
+    When you switch from `suggest` to `auto-manage`, newly created ManagedWorkloads have no forecast history. The Holt-Winters engine begins in its Observing phase and needs time to learn the workload's demand patterns before it can confirm idle detection or wake workloads ahead of demand. In `suggest` mode, no forecast engines run because no ManagedWorkloads exist. Plan for a warm-up period after switching modes.
 
 ## Classification Thresholds
 
 | Classification | Condition |
 |---------------|-----------|
 | **Idle** | CPU usage < `cpuIdleThreshold`% of request AND memory usage < `memoryIdleThreshold`% of request |
-| **Wasteful** | CPU utilization < `cpuWastefulThreshold` AND memory utilization < `memoryWastefulThreshold` |
 | **Active** | Everything else |
 
-**Utilization** is calculated as `(usage / request) x 100%`. A workload requesting 1000m CPU but using 200m has 20% utilization, which is classified as Wasteful.
+**Utilization** is calculated as `(usage / request) x 100%`. A workload requesting 1000m CPU but using 50m has 5% CPU utilization.
 
-**Right-size savings** are estimated as the cost difference between current resources and what would be needed at `rightSizeTarget` utilization (default: 70%).
+**Projected savings** are the compute cost of the idle workloads: what pausing them would save. Storage is excluded, since PVCs persist while paused.
 
 ## Default Policies
 
@@ -88,14 +85,6 @@ spec:
     memoryIdleThreshold: 10
     gracePeriod: "5m"
     autoResume: true
-
-  scalePolicy:
-    minReplicas: 1
-    maxReplicas: 10
-    down:
-      stabilization: "5m"
-    up:
-      stabilization: "2m"
 
   pause:
     expireAfter: "168h"
@@ -152,8 +141,5 @@ Results are capped at 500 entries, sorted by estimated savings descending.
 | `scanInterval` | duration | `10m` | How often to re-scan |
 | `cpuIdleThreshold` | int (percent) | `10` | CPU utilization % of request below which workload is Idle (0-100) |
 | `memoryIdleThreshold` | int (percent) | `10` | Memory utilization % of request below which workload is Idle (0-100) |
-| `cpuWastefulThreshold` | int (percent) | `30` | CPU utilization below this = Wasteful |
-| `memoryWastefulThreshold` | int (percent) | `30` | Memory utilization below this = Wasteful |
-| `rightSizeTarget` | int (percent) | `70` | Target utilization for savings estimates |
 | `dryRun` | bool | `true` | Default dryRun for auto-created ManagedWorkloads |
 | `rates` | CostRates | AWS defaults | Cost rates for savings estimates |

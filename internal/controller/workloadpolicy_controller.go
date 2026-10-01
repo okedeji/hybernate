@@ -91,7 +91,7 @@ func (r *WorkloadPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: requeueInterval(policy.Spec)}, nil
 	}
 
-	// Auto-manage: create ManagedWorkload CRs for idle/wasteful workloads.
+	// Auto-manage: create ManagedWorkload CRs for idle workloads.
 	if policy.Spec.Mode == v1alpha1.PolicyModeAutoManage {
 		created := r.autoManage(ctx, &policy, result)
 		if created > 0 {
@@ -104,7 +104,6 @@ func (r *WorkloadPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Update metrics.
 	opmetrics.DiscoveryWorkloads.WithLabelValues("Active").Set(float64(result.Summary.Active))
 	opmetrics.DiscoveryWorkloads.WithLabelValues("Idle").Set(float64(result.Summary.Idle))
-	opmetrics.DiscoveryWorkloads.WithLabelValues("Wasteful").Set(float64(result.Summary.Wasteful))
 
 	now := metav1.Now()
 	policy.Status.Summary = result.Summary
@@ -124,8 +123,8 @@ func (r *WorkloadPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	r.Recorder.Eventf(&policy, nil, "Normal", "ScanCompleted", actionScan,
-		"Discovered %d workloads: %d active, %d idle, %d wasteful (cost: %s, savings: %s)",
-		result.Summary.Total, result.Summary.Active, result.Summary.Idle, result.Summary.Wasteful,
+		"Discovered %d workloads: %d active, %d idle (cost: %s, savings: %s)",
+		result.Summary.Total, result.Summary.Active, result.Summary.Idle,
 		result.Summary.EstimatedMonthlyCost, result.Summary.EstimatedPotentialSavings)
 
 	return ctrl.Result{RequeueAfter: requeueInterval(policy.Spec)}, nil
@@ -136,7 +135,7 @@ func (r *WorkloadPolicyReconciler) autoManage(ctx context.Context, policy *v1alp
 	var created int
 
 	for _, d := range result.Discovered {
-		if d.Managed || d.Classification == v1alpha1.ClassificationActive {
+		if d.Managed || d.Classification != v1alpha1.ClassificationIdle {
 			continue
 		}
 
@@ -164,7 +163,6 @@ func (r *WorkloadPolicyReconciler) autoManage(ctx context.Context, policy *v1alp
 					return v1alpha1.PredictionSpec{}
 				}(),
 				IdlePolicy:     policy.Spec.IdlePolicy,
-				ScalePolicy:    policy.Spec.ScalePolicy,
 				Pause:          policy.Spec.Pause,
 				Destroy:        policy.Spec.Destroy,
 				CostTracking:   policy.Spec.CostTracking,
@@ -193,15 +191,6 @@ func thresholdsFromSpec(spec v1alpha1.WorkloadPolicySpec) discovery.Thresholds {
 	}
 	if spec.MemoryIdleThreshold > 0 {
 		th.MemoryIdlePercent = spec.MemoryIdleThreshold
-	}
-	if spec.CPUWastefulThreshold > 0 {
-		th.WastefulPercent = spec.CPUWastefulThreshold
-	}
-	if spec.MemoryWastefulThreshold > 0 {
-		th.MemoryWastefulPercent = spec.MemoryWastefulThreshold
-	}
-	if spec.RightSizeTarget > 0 {
-		th.RightSizePercent = spec.RightSizeTarget
 	}
 	if spec.Rates != nil {
 		th.Rates = ratesToInternal(spec.Rates)

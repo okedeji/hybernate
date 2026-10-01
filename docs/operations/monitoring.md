@@ -1,6 +1,6 @@
 # Monitoring
 
-Hybernate ships with Prometheus metrics, Grafana dashboards, and alerting rules.
+Hybernate ships with Prometheus metrics for operator health and a set of alerting rules.
 
 ## Prometheus
 
@@ -19,11 +19,8 @@ This configures Prometheus to scrape the operator's metrics endpoint.
 **Cluster health dashboard:**
 
 ```promql
-# Are workloads being managed?
-hybernate_workloads_total
-
-# Estimated savings (requires cluster autoscaler for realization)
-hybernate_cost_estimated_savings_dollars
+# Is the operator acting on workloads?
+rate(hybernate_lifecycle_transitions_total[1h])
 
 # Are there errors?
 rate(hybernate_reconcile_errors_total[5m]) > 0
@@ -37,49 +34,19 @@ hybernate_prediction_confidence_percent{season="daily"}
 
 # Are workloads cycling too fast?
 rate(hybernate_lifecycle_transitions_total[1h])
-
-# Are scale-downs being blocked?
-rate(hybernate_scale_guard_blocked_total[1h])
 ```
-
-## Grafana Dashboards
-
-Pre-built dashboards are available in `config/grafana/`:
-
-- **Hybernate Overview**: cluster-wide workload counts, cost savings, phase distribution
-- **Workload Detail**: per-workload prediction confidence, scaling history, idle detection state
-
-Import them via Grafana's dashboard import feature or deploy them as ConfigMaps if using the Grafana sidecar.
 
 ## Alerting Rules
 
-Sample alerting rules are in `config/prometheus/`:
+The Helm chart creates these rules when `metrics.prometheusRule.enabled` is `true`; the same rules are in `config/prometheus/alerts.yaml` for kustomize installs.
 
-### Suggested Alerts
-
-| Alert | Condition | Severity |
+| Alert | Fires when | Severity |
 |-------|-----------|----------|
-| HybernateReconcileErrors | `rate(hybernate_reconcile_errors_total[5m]) > 0` | warning |
-| HybernatePredictionLowConfidence | `hybernate_prediction_confidence_percent{season="daily"} < 50` for 1h | info |
-| HybernateTargetUnavailable | `increase(hybernate_target_unavailable_total[10m]) > 0` | warning |
-| HybernatePVCRetentionExpiring | `hybernate_pvc_retention_remaining_seconds < 3600` | warning |
-| HybernateRegimeChange | `increase(hybernate_prediction_regime_changes_total[1h]) > 0` | info |
-
-### Example Alert Rule
-
-```yaml title="alerts.yaml" linenums="1"
-groups:
-  - name: hybernate
-    rules:
-      - alert: HybernateReconcileErrors
-        expr: rate(hybernate_reconcile_errors_total[5m]) > 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Hybernate reconciliation errors detected"
-          description: "Controller {{ $labels.controller }} is experiencing reconcile errors."
-```
+| `HybernateReconcileErrorsHigh` | Reconcile errors exceed 0.1/sec for 10 minutes | critical |
+| `HybernateDown` | No healthy operator target is scraped for 5 minutes | critical |
+| `HybernateWorkloadStuck` | A workload stays in `Pausing`, `Resuming`, or `Destroying` for 15 minutes | warning |
+| `HybernateTargetUnavailable` | A ManagedWorkload's target is missing more than 3 times in an hour | warning |
+| `HybernatePVCRetentionExpiring` | A destroyed workload's PVCs will be deleted within 24 hours | warning |
 
 ## Health Checks
 
@@ -105,8 +72,7 @@ kubectl logs -n hybernate-system deployment/hybernate-controller-manager -f
 
 Key log entries to watch for:
 
-- `"pool scaled"`: scaling events with before/after counts
 - `"phase transition"`: lifecycle state changes
 - `"idle confirmed"`: idle detection results
 - `"regime change"`: prediction engine pattern shifts
-- `"drift detected"`: external replica changes
+- `"paused workload scaled externally"`: someone scaled up a paused workload

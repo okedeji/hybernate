@@ -46,9 +46,5 @@ Hybernate has been installed in namespace {{ .Release.Namespace }}.
 
 5. Metrics are being scraped via ServiceMonitor. Check Prometheus targets for the hybernate endpoint.
 {{- end }}
-{{- if .Values.grafana.enabled }}
-
-6. The Grafana dashboard has been provisioned. Look for "Hybernate Operator" in your dashboards.
-{{- end }}
 
 For more information, visit: https://github.com/okedeji/hybernate

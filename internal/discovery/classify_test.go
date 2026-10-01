@@ -64,18 +64,7 @@ func TestClassify(t *testing.T) {
 				MemoryRequestBytes: 1 << 30,
 				Replicas:           1,
 			},
-			want: v1alpha1.ClassificationWasteful,
-		},
-		{
-			name: "wasteful when both CPU and memory utilization below wasteful threshold",
-			workload: WorkloadInfo{
-				CPUUsageMillis:     200,
-				CPURequestMillis:   1000,
-				MemoryUsageBytes:   20 << 20,
-				MemoryRequestBytes: 256 << 20,
-				Replicas:           1,
-			},
-			want: v1alpha1.ClassificationWasteful,
+			want: v1alpha1.ClassificationActive,
 		},
 		{
 			name: "active when CPU low but memory high",
@@ -89,18 +78,9 @@ func TestClassify(t *testing.T) {
 			want: v1alpha1.ClassificationActive,
 		},
 		{
-			name: "active when utilization above wasteful threshold",
+			name: "active when utilization well above idle threshold",
 			workload: WorkloadInfo{
 				CPUUsageMillis:   500,
-				CPURequestMillis: 1000,
-				Replicas:         1,
-			},
-			want: v1alpha1.ClassificationActive,
-		},
-		{
-			name: "active at exactly wasteful boundary",
-			workload: WorkloadInfo{
-				CPUUsageMillis:   300,
 				CPURequestMillis: 1000,
 				Replicas:         1,
 			},
@@ -197,27 +177,6 @@ func TestEstimateSavings_Idle(t *testing.T) {
 
 	// Idle saves full compute, not storage.
 	expected := 2*0.031*730 + 2*0.004*730
-	assert.InDelta(t, expected, got, 0.01)
-}
-
-func TestEstimateSavings_Wasteful(t *testing.T) {
-	th := DefaultThresholds() // rightSizeTarget = 70%
-
-	w := WorkloadInfo{
-		CPUUsageMillis:     200,
-		CPURequestMillis:   1000,
-		MemoryUsageBytes:   512 << 20, // 0.5 GiB
-		MemoryRequestBytes: 2 << 30,   // 2 GiB
-		Replicas:           1,
-	}
-
-	got := EstimateSavings(w, v1alpha1.ClassificationWasteful, th)
-
-	// right-sized CPU = 0.2 cores / 0.7 ≈ 0.2857 cores → delta = 1.0 - 0.2857 = 0.7143
-	// right-sized mem = 0.5 GiB / 0.7 ≈ 0.7143 GiB → delta = 2.0 - 0.7143 = 1.2857
-	cpuDelta := 1.0 - 0.2/0.7
-	memDelta := 2.0 - 0.5/0.7
-	expected := cpuDelta*0.031*730 + memDelta*0.004*730
 	assert.InDelta(t, expected, got, 0.01)
 }
 

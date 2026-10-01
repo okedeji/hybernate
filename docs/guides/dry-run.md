@@ -45,7 +45,6 @@ The operator runs its full evaluation pipeline:
 | Action | Dry Run Behavior |
 |--------|-----------------|
 | Idle detection | Signals are checked, grace period is tracked, and events are emitted, but the workload is **not** paused |
-| Scaling | Forecast engine proposes targets and constraints are evaluated, but replicas are **not** changed |
 | Pause expiry | Expiry is detected, but the workload is **not** resumed or destroyed |
 | Cost tracking | Costs are accumulated normally (resource usage is real regardless of management) |
 | Prediction engine | Data points are observed and confidence builds normally |
@@ -64,7 +63,6 @@ Look for events like:
 
 ```
 [DRY RUN] Idle confirmed — would pause workload (grace period elapsed, all signals confirm)
-[DRY RUN] Scale — would scale from 5 to 3 replicas (prediction: low demand)
 ```
 
 ### Status
@@ -100,7 +98,7 @@ kubectl patch managedworkload my-api -n staging \
 ## When to Use Dry Run
 
 - First time deploying a ManagedWorkload
-- After changing idle or scale policies
+- After changing idle policies
 - When onboarding a new namespace via WorkloadPolicy
 - Before moving from `suggest` to `auto-manage` mode
 - In production environments where you want to validate before acting

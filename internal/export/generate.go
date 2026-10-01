@@ -106,7 +106,6 @@ func Generate(policy *v1alpha1.WorkloadPolicy, f Filter) Result {
 					return v1alpha1.PredictionSpec{}
 				}(),
 				IdlePolicy:     policy.Spec.IdlePolicy,
-				ScalePolicy:    policy.Spec.ScalePolicy,
 				Pause:          policy.Spec.Pause,
 				Destroy:        policy.Spec.Destroy,
 				CostTracking:   policy.Spec.CostTracking,

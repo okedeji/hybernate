@@ -68,14 +68,6 @@ type idleEvaluator interface {
 	Reset(namespace, name string)
 }
 
-type scaleEvaluator interface {
-	Evaluate(ctx context.Context, namespace, name string, proposed, current int32, constraints policy.ScaleConstraints, signals []signal.Checker) (policy.ScaleDecision, error)
-}
-
-type lifecycleScaler interface {
-	Scale(ctx context.Context, workload *v1alpha1.ManagedWorkload, target int32) (bool, error)
-}
-
 // engineRegistry manages forecast engines per workload.
 type engineRegistry struct {
 	mu      sync.Mutex
@@ -303,16 +295,6 @@ func (r *Reconciler) reconcileAutomationPolicies(ctx context.Context, workload *
 		}
 	}
 
-	if workload.Spec.ScalePolicy != nil {
-		result, err := r.reconcileScaleAction(ctx, workload, engine, dryRun)
-		if err != nil {
-			return nil, err
-		}
-		if result != nil {
-			return result, nil
-		}
-	}
-
 	if err := r.Status().Update(ctx, workload); err != nil {
 		return nil, fmt.Errorf("updating status: %w", err)
 	}
@@ -409,117 +391,4 @@ func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1
 		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(1)
 		return nil, nil
 	}
-}
-
-func (r *Reconciler) reconcileScaleAction(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, dryRun bool) (*ctrl.Result, error) {
-	sp := workload.Spec.ScalePolicy
-	predicted := engine.Predict(1, r.now())
-
-	cpuPerReplica, err := r.metrics.CPURequestPerReplica(ctx, workload)
-	if err != nil && sp.OverrideReplicas == nil {
-		r.emitEvent(workload, dryRun, "Warning", ReasonScalingUnavailable, actionScale,
-			"cannot compute replica count, %v", err)
-		return nil, fmt.Errorf("reading cpu request per replica: %w", err)
-	}
-
-	var proposed int32
-	override := sp.OverrideReplicas != nil
-	if override {
-		proposed = clampInt32(*sp.OverrideReplicas, int32(sp.MinReplicas), int32(sp.MaxReplicas))
-	} else {
-		proposed = demandToReplicas(predicted, cpuPerReplica, sp.MinReplicas, sp.MaxReplicas)
-	}
-
-	constraints := policy.ScaleConstraints{
-		MinReplicas: int32(sp.MinReplicas),
-		MaxReplicas: int32(sp.MaxReplicas),
-	}
-	if sp.Down != nil {
-		if sp.Down.Stabilization != nil {
-			constraints.DownStabilization = sp.Down.Stabilization.Duration
-		}
-		if sp.Down.MaxStep != nil {
-			constraints.MaxStepDown = int32(*sp.Down.MaxStep)
-		}
-	}
-	if sp.Up != nil {
-		if sp.Up.Stabilization != nil {
-			constraints.UpStabilization = sp.Up.Stabilization.Duration
-		}
-		if sp.Up.MaxStep != nil {
-			constraints.MaxStepUp = int32(*sp.Up.MaxStep)
-		}
-	}
-
-	current := proposed
-	if workload.Status.Scale != nil {
-		current = workload.Status.Scale.CurrentReplicas
-	}
-
-	decision, err := r.scale.Evaluate(ctx, workload.Namespace, workload.Spec.Target.Name, proposed, current, constraints, nil)
-	if err != nil {
-		return nil, fmt.Errorf("evaluating scale: %w", err)
-	}
-
-	if !decision.ShouldScale() {
-		return nil, nil
-	}
-
-	target := decision.GetTarget()
-	ns, name := workload.Namespace, workload.Name
-
-	if decision.Direction == policy.ScaleDown && !override {
-		guards := r.buildScaleDownGuards(workload, float64(target)*cpuPerReplica)
-		res, err := signal.CheckAll(ctx, workload.Namespace, workload.Spec.Target.Name, guards)
-		if err != nil {
-			return nil, fmt.Errorf("checking scale-down guards: %w", err)
-		}
-		if !res.Confirm {
-			opmetrics.ScaleGuardBlocked.WithLabelValues(ns, name).Inc()
-			r.emitEvent(workload, dryRun, "Normal", ReasonScaleDownGuarded, actionScale,
-				"scale-down to %d blocked: %s", target, res.Reason)
-			result := ctrl.Result{RequeueAfter: 1 * time.Minute}
-			return &result, nil
-		}
-	}
-
-	if dryRun {
-		opmetrics.DryrunActions.WithLabelValues("scale_" + decision.Direction.String()).Inc()
-		if override {
-			r.emitEvent(workload, dryRun, "Normal", ReasonScaled, actionScale,
-				"would scale to %d replicas (manual override, predicted demand %.0fm)",
-				target, predicted)
-		} else {
-			r.emitEvent(workload, dryRun, "Normal", ReasonScaled, actionScale,
-				"would scale to %d replicas (predicted demand %.0fm, cpu/replica %.0fm)",
-				target, predicted, cpuPerReplica)
-		}
-		return nil, nil
-	}
-
-	if _, err := r.transition(ctx, workload, v1alpha1.PhaseScaling, "ScaleDecision"); err != nil {
-		return nil, err
-	}
-
-	done, err := r.lifecycleScaler.Scale(ctx, workload, target)
-	if err != nil {
-		return nil, fmt.Errorf("scaling workload: %w", err)
-	}
-
-	if !done {
-		result := ctrl.Result{RequeueAfter: 5 * time.Second}
-		return &result, nil
-	}
-
-	r.stampLastActed(workload)
-	opmetrics.ScaleEvents.WithLabelValues(decision.Direction.String(), ns, name).Inc()
-	opmetrics.ScaleReplicas.WithLabelValues(ns, name).Set(float64(target))
-	r.emitEvent(workload, false, "Normal", ReasonScaled, actionScale,
-		"scaled to %d replicas", target)
-
-	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ScaleComplete")
-	if err != nil {
-		return nil, err
-	}
-	return &result, nil
 }

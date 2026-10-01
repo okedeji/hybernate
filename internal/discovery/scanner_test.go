@@ -98,10 +98,6 @@ func TestScanner_Scan_ClassifiesWorkloads(t *testing.T) {
 		makeDeployment("idle-app", ns, 1, "1000m", "1Gi", nil),
 		makePodMetrics("idle-app", ns, "10m", "100Mi"),
 
-		// Wasteful: 200m usage / 1000m request = 20% < 30%
-		makeDeployment("wasteful-app", ns, 1, "1000m", "2Gi", nil),
-		makePodMetrics("wasteful-app", ns, "200m", "512Mi"),
-
 		// Active: 500m usage / 1000m request = 50% > 30%
 		makeDeployment("active-app", ns, 2, "1000m", "1Gi", nil),
 		makePodMetrics("active-app", ns, "500m", "800Mi"),
@@ -113,10 +109,9 @@ func TestScanner_Scan_ClassifiesWorkloads(t *testing.T) {
 	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
 
-	assert.Equal(t, 3, result.Summary.Total)
+	assert.Equal(t, 2, result.Summary.Total)
 	assert.Equal(t, 1, result.Summary.Active)
 	assert.Equal(t, 1, result.Summary.Idle)
-	assert.Equal(t, 1, result.Summary.Wasteful)
 
 	byName := make(map[string]v1alpha1.DiscoveredWorkload)
 	for _, d := range result.Discovered {
@@ -124,7 +119,6 @@ func TestScanner_Scan_ClassifiesWorkloads(t *testing.T) {
 	}
 
 	assert.Equal(t, v1alpha1.ClassificationIdle, byName["idle-app"].Classification)
-	assert.Equal(t, v1alpha1.ClassificationWasteful, byName["wasteful-app"].Classification)
 	assert.Equal(t, v1alpha1.ClassificationActive, byName["active-app"].Classification)
 }
 

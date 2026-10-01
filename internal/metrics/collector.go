@@ -24,25 +24,13 @@ import (
 // --- Tier 1: Cluster Health ---
 
 var (
-	WorkloadsTotal = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hybernate_workloads_total",
-		Help: "Number of managed workloads by phase.",
-	}, []string{"phase"})
-
-	ActiveWorkloads = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_active_workloads",
-		Help: "Number of workloads in a running state (Running, Idle, Scaling, Creating, Resuming).",
-	})
-
-	PausedWorkloads = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_paused_workloads",
-		Help: "Number of workloads currently paused.",
-	})
-
-	DestroyedWorkloads = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_destroyed_workloads",
-		Help: "Number of workloads that have been destroyed.",
-	})
+	// WorkloadPhase is 1 for each workload's current phase, in the style of
+	// kube-state-metrics, so alerts can see which workload is in which phase
+	// and for how long.
+	WorkloadPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hybernate_workload_phase",
+		Help: "Current lifecycle phase of each managed workload (1 for the current phase).",
+	}, []string{"namespace", "workload", "phase"})
 
 	ReconcileErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_reconcile_errors_total",
@@ -56,34 +44,9 @@ var (
 
 	LifecycleActionDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "hybernate_lifecycle_action_duration_seconds",
-		Help:    "Duration of lifecycle actions (pause, resume, destroy, scale).",
+		Help:    "Duration of lifecycle actions (pause, resume, destroy).",
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 10),
 	}, []string{"action"})
-
-	CostEstimatedSavingsDollars = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_estimated_savings_dollars",
-		Help: "Total estimated monthly savings across all managed workloads. Only realized when freed resources lead to node removal.",
-	})
-
-	CostEstimatedDollars = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_estimated_dollars",
-		Help: "Total estimated monthly cost across all managed workloads.",
-	})
-
-	CostEstimatedWithoutManagementDollars = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_estimated_without_management_dollars",
-		Help: "Estimated cost of all managed workloads without Hybernate.",
-	})
-
-	ResourceReductionCPUMillis = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_resource_reduction_cpu_millicores",
-		Help: "Total CPU millicores freed by Hybernate actions across all managed workloads.",
-	})
-
-	ResourceReductionMemoryBytes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_resource_reduction_memory_bytes",
-		Help: "Total memory bytes freed by Hybernate actions across all managed workloads.",
-	})
 )
 
 // --- Tier 2: Operational Insight ---
@@ -109,31 +72,6 @@ var (
 		Help: "Total anomalies detected by the prediction engine.",
 	}, []string{"namespace", "workload"})
 
-	CostCPUHours = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_cpu_hours",
-		Help: "Total vCPU-hours consumed this month across all workloads.",
-	})
-
-	CostMemoryHours = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_memory_hours",
-		Help: "Total GiB-hours of memory consumed this month across all workloads.",
-	})
-
-	CostStorageHours = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_cost_storage_hours",
-		Help: "Total GiB-hours of PVC storage provisioned this month across all workloads.",
-	})
-
-	ScaleEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_scale_events_total",
-		Help: "Total scaling events by direction.",
-	}, []string{"direction", "namespace", "workload"})
-
-	ScaleReplicas = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hybernate_scale_replicas",
-		Help: "Current replica count after scaling.",
-	}, []string{"namespace", "workload"})
-
 	IdleDetections = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_idle_detections_total",
 		Help: "Total idle detections by action taken.",
@@ -156,11 +94,6 @@ var (
 	IdleSignalResult = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hybernate_idle_signal_result",
 		Help: "Current idle signal evaluation status (1=active, 2=signals_confirm, 3=grace_period, 4=idle).",
-	}, []string{"namespace", "workload"})
-
-	ScaleGuardBlocked = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_scale_guard_blocked_total",
-		Help: "Total times a scale-down was blocked by a guard probe.",
 	}, []string{"namespace", "workload"})
 
 	IdleFlukes = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -208,11 +141,6 @@ var (
 		Help: "Number of discovered workloads by classification.",
 	}, []string{"classification"})
 
-	DiscoveryEstimatedSavings = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "hybernate_discovery_estimated_savings_dollars",
-		Help: "Total estimated monthly savings from discovered workloads.",
-	})
-
 	DiscoveryAutoManaged = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "hybernate_discovery_auto_managed_total",
 		Help: "Total ManagedWorkload CRs auto-created by discovery.",
@@ -222,36 +150,22 @@ var (
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		// Tier 1
-		WorkloadsTotal,
-		ActiveWorkloads,
-		PausedWorkloads,
-		DestroyedWorkloads,
+		WorkloadPhase,
 		ReconcileErrors,
 		LifecycleTransitions,
 		LifecycleActionDuration,
-		CostEstimatedSavingsDollars,
-		CostEstimatedDollars,
-		CostEstimatedWithoutManagementDollars,
-		ResourceReductionCPUMillis,
-		ResourceReductionMemoryBytes,
 
 		// Tier 2
 		PredictionConfidence,
 		PredictionPhase,
 		PredictionDataPoints,
 		PredictionAnomalies,
-		CostCPUHours,
-		CostMemoryHours,
-		CostStorageHours,
-		ScaleEvents,
-		ScaleReplicas,
 		IdleDetections,
 		PauseExpiryActions,
 		DriftDetections,
 
 		// Tier 3
 		IdleSignalResult,
-		ScaleGuardBlocked,
 		IdleFlukes,
 		PredictionRegimeChanges,
 		PVCRetentionRemaining,
@@ -262,7 +176,6 @@ func init() {
 		// Discovery
 		DiscoveryScanDuration,
 		DiscoveryWorkloads,
-		DiscoveryEstimatedSavings,
 		DiscoveryAutoManaged,
 	)
 }

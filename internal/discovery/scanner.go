@@ -246,8 +246,6 @@ func buildSummary(discovered []v1alpha1.DiscoveredWorkload, totalCost, totalSavi
 			s.Active++
 		case v1alpha1.ClassificationIdle:
 			s.Idle++
-		case v1alpha1.ClassificationWasteful:
-			s.Wasteful++
 		}
 		if d.Managed {
 			s.Managed++

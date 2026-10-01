@@ -110,7 +110,7 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 		}
 
 	default:
-		// Running/Idle/Scaling — accumulate actual usage.
+		// Running/Idle — accumulate actual usage.
 		cpuMillis, err := r.metrics.TotalCPUMillis(ctx, workload)
 		if err != nil {
 			logger.V(1).Info("skipping cpu cost accumulation", "error", err)

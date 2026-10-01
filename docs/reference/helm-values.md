@@ -78,15 +78,7 @@ When `metrics.secure` is `true`, the chart creates a `ClusterRoleBinding` to `sy
 | `metrics.prometheusRule.enabled` | `false` | Create a PrometheusRule CR with predefined alerts |
 | `metrics.prometheusRule.additionalLabels` | `{}` | Extra labels on the PrometheusRule |
 
-The PrometheusRule includes alerts for reconciliation errors, low prediction confidence, regime changes, drift detection, PVC retention expiry, scale-guard blocks, and operator downtime.
-
-## Grafana
-
-| Value | Default | Description |
-|-------|---------|-------------|
-| `grafana.enabled` | `false` | Create a ConfigMap with the Grafana dashboard |
-
-The ConfigMap is labeled with `grafana_dashboard: "1"` for auto-provisioning by the Grafana sidecar.
+The PrometheusRule includes alerts for reconciliation errors, operator downtime, workloads stuck in a transition, missing targets, and PVC retention expiry.
 
 ## Network Policy
 
@@ -139,7 +131,7 @@ These are not configurable via values. To override, use Helm post-rendering or K
 
 The chart creates a ClusterRole with permissions to:
 
-- Manage `ManagedWorkload`, `WorkloadPolicy`, and `HybernateReport` CRs
+- Manage `ManagedWorkload` and `WorkloadPolicy` CRs
 - Read and scale Deployments and StatefulSets
 - Read PersistentVolumeClaims (for retention cleanup)
 - Read pod metrics from metrics-server
@@ -171,9 +163,6 @@ metrics:
     interval: 15s
   prometheusRule:
     enabled: true
-
-grafana:
-  enabled: true
 
 logLevel: info
 

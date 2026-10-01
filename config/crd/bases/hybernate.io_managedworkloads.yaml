@@ -51,10 +51,10 @@ spec:
               conflictAction:
                 default: warn
                 description: |-
-                  ConflictAction controls how the operator reacts when someone changes
-                  the target's replicas outside of Hybernate. "enforce" corrects the
-                  drift, "warn" emits an event but leaves the change, "defer" accepts
-                  the external change and updates internal state to match.
+                  ConflictAction controls how the operator reacts when someone scales up
+                  a paused target outside of Hybernate. "enforce" scales it back to zero,
+                  "warn" emits an event but leaves the change, "defer" accepts the change
+                  and treats the workload as running.
                 enum:
                 - enforce
                 - warn
@@ -100,7 +100,7 @@ spec:
               desiredState:
                 description: |-
                   DesiredState overrides automation and forces the workload into the given
-                  state. When set, the operator stops evaluating idle/scale policies and
+                  state. When set, the operator stops evaluating the idle policy and
                   drives the workload to this state instead.
                 enum:
                 - Running
@@ -184,17 +184,15 @@ spec:
                       these signals are layered on top for application-level confirmation.
                     items:
                       description: |-
-                        ProbeSpec defines an external check used for idle detection signals or
-                        scale-down guards. For Prometheus probes, the PromQL query must return a
-                        non-zero value to confirm the action. An empty result or zero value denies it.
+                        ProbeSpec defines an external check used as an idle detection signal. For
+                        Prometheus probes, the PromQL query must return a non-zero value to confirm
+                        the workload is idle. An empty result or zero value denies it.
                       properties:
                         promQL:
                           description: |-
                             PromQL is an instant query evaluated against the configured Prometheus
-                            endpoint. The query must return a non-zero scalar to confirm the action.
-                            Examples:
-                              Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
-                              Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
+                            endpoint. The query must return a non-zero scalar to confirm idle.
+                            Example: rate(http_requests_total{service="api"}[10m]) == 0
                           type: string
                         source:
                           default: prometheus
@@ -231,8 +229,8 @@ spec:
                 type: object
               prediction:
                 description: |-
-                  Prediction configures the Holt-Winters forecasting engine that drives
-                  idle detection confirmation and scale decisions.
+                  Prediction configures the Holt-Winters forecasting engine that confirms
+                  idle detection and wakes paused workloads ahead of predicted demand.
                 properties:
                   confidence:
                     default: 85
@@ -245,130 +243,6 @@ spec:
                     type: integer
                 required:
                 - confidence
-                type: object
-              scalePolicy:
-                description: |-
-                  ScalePolicy configures prediction-driven replica scaling with
-                  stabilization windows, step limits, and min/max bounds.
-                properties:
-                  down:
-                    description: |-
-                      Down configures scale-down behavior including stabilization, step
-                      limits, and guard probes.
-                    properties:
-                      guard:
-                        description: |-
-                          Guard probes that must all confirm before a scale-down proceeds.
-                          An internal CPU capacity check runs automatically; these probes
-                          add application-level safety gates (e.g. active connections, in-flight jobs).
-                        items:
-                          description: |-
-                            ProbeSpec defines an external check used for idle detection signals or
-                            scale-down guards. For Prometheus probes, the PromQL query must return a
-                            non-zero value to confirm the action. An empty result or zero value denies it.
-                          properties:
-                            promQL:
-                              description: |-
-                                PromQL is an instant query evaluated against the configured Prometheus
-                                endpoint. The query must return a non-zero scalar to confirm the action.
-                                Examples:
-                                  Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
-                                  Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
-                              type: string
-                            source:
-                              default: prometheus
-                              enum:
-                              - prometheus
-                              type: string
-                          required:
-                          - source
-                          type: object
-                        type: array
-                      maxStep:
-                        description: |-
-                          MaxStep limits how many replicas can be added or removed in a single
-                          reconciliation loop. Enables gradual ramp-up or ramp-down.
-                        minimum: 1
-                        type: integer
-                      stabilization:
-                        description: |-
-                          Stabilization is the cooldown period after a scale event in this
-                          direction. Prevents oscillation by blocking same-direction scaling
-                          until the window elapses.
-                        format: duration
-                        type: string
-                    type: object
-                  maxReplicas:
-                    description: |-
-                      MaxReplicas is the ceiling for scaling. The operator will never scale
-                      above this value.
-                    minimum: 1
-                    type: integer
-                  minReplicas:
-                    default: 1
-                    description: |-
-                      MinReplicas is the floor for scaling. The operator will never scale
-                      below this value.
-                    minimum: 0
-                    type: integer
-                  overrideReplicas:
-                    description: |-
-                      OverrideReplicas bypasses prediction and forces the operator to scale
-                      to this exact replica count (clamped to [minReplicas, maxReplicas]).
-                      Stabilization and step limits still apply. Remove the field to return
-                      to prediction-driven scaling.
-                    format: int32
-                    minimum: 0
-                    type: integer
-                  up:
-                    description: Up configures scale-up behavior including stabilization
-                      and step limits.
-                    properties:
-                      guard:
-                        description: |-
-                          Guard probes that must all confirm before a scale-down proceeds.
-                          An internal CPU capacity check runs automatically; these probes
-                          add application-level safety gates (e.g. active connections, in-flight jobs).
-                        items:
-                          description: |-
-                            ProbeSpec defines an external check used for idle detection signals or
-                            scale-down guards. For Prometheus probes, the PromQL query must return a
-                            non-zero value to confirm the action. An empty result or zero value denies it.
-                          properties:
-                            promQL:
-                              description: |-
-                                PromQL is an instant query evaluated against the configured Prometheus
-                                endpoint. The query must return a non-zero scalar to confirm the action.
-                                Examples:
-                                  Idle signal:      rate(http_requests_total{service="api"}[10m]) == 0
-                                  Scale-down guard: sum(websocket_active_connections{service="api"}) < 100
-                              type: string
-                            source:
-                              default: prometheus
-                              enum:
-                              - prometheus
-                              type: string
-                          required:
-                          - source
-                          type: object
-                        type: array
-                      maxStep:
-                        description: |-
-                          MaxStep limits how many replicas can be added or removed in a single
-                          reconciliation loop. Enables gradual ramp-up or ramp-down.
-                        minimum: 1
-                        type: integer
-                      stabilization:
-                        description: |-
-                          Stabilization is the cooldown period after a scale event in this
-                          direction. Prevents oscillation by blocking same-direction scaling
-                          until the window elapses.
-                        format: duration
-                        type: string
-                    type: object
-                required:
-                - maxReplicas
-                - minReplicas
                 type: object
               target:
                 description: Target identifies the workload to manage (e.g. a Deployment
@@ -498,7 +372,7 @@ spec:
                   estimatedMonthlySavings:
                     description: |-
                       EstimatedMonthlySavings is the projected dollar amount saved by Hybernate
-                      actions (pause, scale-down, destroy) this month. These savings are only
+                      actions (pause, destroy) this month. These savings are only
                       realized when freed resources lead to node removal by a cluster autoscaler.
                     type: string
                   lastAccumulatedAt:
@@ -586,7 +460,7 @@ spec:
               lastActedAt:
                 description: |-
                   LastActedAt is when the operator last mutated the target workload
-                  (scale, pause, resume, destroy, or drift correction).
+                  (pause, resume, destroy, or drift correction).
                 format: date-time
                 type: string
               lastTransitionTime:
@@ -647,7 +521,6 @@ spec:
                 - Creating
                 - Running
                 - Idle
-                - Scaling
                 - Pausing
                 - Paused
                 - Resuming
@@ -681,28 +554,6 @@ spec:
                 - dailyPhase
                 - weeklyConfidence
                 - weeklyPhase
-                type: object
-              scale:
-                description: Scale holds state related to the most recent scaling
-                  event.
-                properties:
-                  currentReplicas:
-                    description: CurrentReplicas is the replica count after the last
-                      scale event.
-                    format: int32
-                    type: integer
-                  previousReplicas:
-                    description: PreviousReplicas is the replica count before the
-                      last scale event.
-                    format: int32
-                    type: integer
-                  scaledAt:
-                    description: ScaledAt is when the last scale event occurred.
-                    format: date-time
-                    type: string
-                required:
-                - currentReplicas
-                - previousReplicas
                 type: object
             type: object
         required:

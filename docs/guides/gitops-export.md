@@ -25,7 +25,6 @@ spec:
   mode: suggest
   cpuIdleThreshold: 10
   memoryIdleThreshold: 10
-  cpuWastefulThreshold: 30
 ```
 
 ```bash
@@ -39,8 +38,8 @@ kubectl get workloadpolicy staging-policy -n staging
 ```
 
 ```
-NAME             MODE      DISCOVERED   ACTIVE   IDLE   WASTEFUL
-staging-policy   suggest   12           8        2      2
+NAME             MODE      DISCOVERED   ACTIVE   IDLE
+staging-policy   suggest   12           10       2
 ```
 
 ### 3. Export to Files
@@ -122,6 +121,6 @@ kubectl hybernate export \
 ## Tips
 
 - **Start with `dryRun: true`** in exported manifests. Review events before enabling.
-- **Use `--classification`** to export in batches: idle workloads first, wasteful later.
+- **Use `--classification Idle`** to export only the workloads Hybernate would pause.
 - **Customize per-workload** when defaults don't fit. Adjust grace periods, idle thresholds, or add Prometheus signals as needed.
 - **Keep the WorkloadPolicy in suggest mode** alongside GitOps. It continues scanning and reporting new discoveries without creating anything automatically.

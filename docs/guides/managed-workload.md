@@ -18,7 +18,7 @@ spec:
     confidence: 85
 ```
 
-This is the absolute minimum. The operator will watch the Deployment but won't take any automated action until you add idle or scale policies.
+This is the absolute minimum. The operator will watch the Deployment but won't take any automated action until you add an idle policy.
 
 ## Full Example
 
@@ -42,19 +42,6 @@ spec:
     signals:
       - source: prometheus
         promQL: 'rate(http_requests_total{service="my-api"}[10m]) == 0'
-
-  scalePolicy:
-    minReplicas: 1
-    maxReplicas: 10
-    down:
-      stabilization: "5m"
-      maxStep: 2
-      guard:
-        - source: prometheus
-          promQL: 'sum(active_connections{service="my-api"}) < 10'
-    up:
-      stabilization: "2m"
-      maxStep: 3
 
   pause:
     expireAfter: "24h"
@@ -111,18 +98,6 @@ See [Idle Detection](../concepts/idle-detection.md) for how the detection pipeli
 | `autoResume` | bool | `false` | Auto-resume when signals clear |
 | `signals` | list of ProbeSpec | _(none)_ | Additional Prometheus checks |
 
-### `scalePolicy`
-
-See the [Scaling Guide](scaling.md) for detailed behavior.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `minReplicas` | int | `1` | Floor for scaling |
-| `maxReplicas` | int | _(required)_ | Ceiling for scaling |
-| `overrideReplicas` | int | _(none)_ | Bypass prediction, force this count |
-| `down` | ScaleDirectionSpec | _(none)_ | Scale-down constraints |
-| `up` | ScaleDirectionSpec | _(none)_ | Scale-up constraints |
-
 ### `pause`
 
 See [Pause & Destroy](pause-destroy.md) for detailed behavior.
@@ -157,13 +132,13 @@ Cost tracking is always enabled with AWS on-demand defaults. Set `costTracking.r
 
 ### `conflictAction`
 
-Controls behavior when replicas are changed externally (e.g., by HPA or a human).
+Controls behavior when a paused workload is scaled up outside Hybernate (e.g., by a human or a deploy). While a workload is running, Hybernate doesn't manage its replica count, so changes by the team or an HPA are never treated as drift.
 
 | Value | Behavior |
 |-------|----------|
-| `enforce` | Correct the drift back to the operator's target |
+| `enforce` | Scale the workload back to zero |
 | `warn` | Emit an event but leave the external change |
-| `defer` | Accept the external change and update internal state |
+| `defer` | Accept the change and treat the workload as running |
 
 ### `dryRun`
 
