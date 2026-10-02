@@ -152,79 +152,65 @@ const (
 	ConflictActionDefer   ConflictAction = "defer"
 )
 
-// +kubebuilder:validation:Enum=auto;pause;destroy
+// +kubebuilder:validation:Enum=pause;destroy
 type IdleAction string
 
 const (
-	IdleActionAuto    IdleAction = "auto"
 	IdleActionPause   IdleAction = "pause"
 	IdleActionDestroy IdleAction = "destroy"
 )
 
-// IdlePolicySpec configures how idle detection works for this workload.
+// IdlePolicySpec configures automatic pausing. The operator tracks when the
+// workload was last active and acts once it has been inactive for IdleAfter.
+// Any single activity source keeps the workload awake.
 type IdlePolicySpec struct {
-	// Action to take when the workload is confirmed idle. "auto" and "pause"
-	// both scale to zero; "destroy" deletes the workload entirely.
-	// +kubebuilder:default=auto
-	Action IdleAction `json:"action"`
-
-	// CPUIdleThreshold is the CPU utilization percentage of request below
-	// which the workload is considered potentially idle (e.g. 10 means idle
-	// if CPU usage < 10% of CPU request).
+	// Action to take once the workload has been idle for IdleAfter. "pause"
+	// scales to zero; "destroy" deletes the workload.
+	// +kubebuilder:default=pause
 	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=10
-	CPUIdleThreshold int `json:"cpuIdleThreshold,omitempty"`
+	Action IdleAction `json:"action,omitempty"`
 
-	// MemoryIdleThreshold is the memory utilization percentage of request
-	// below which the workload is considered potentially idle. Both CPU and
-	// memory must be below their respective thresholds for idle detection
-	// to confirm.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=10
-	MemoryIdleThreshold int `json:"memoryIdleThreshold,omitempty"`
-
-	// Signals are additional checks that must all confirm before the workload
-	// is considered idle. An internal CPU usage check runs automatically;
-	// these signals are layered on top for application-level confirmation.
-	// +optional
-	Signals []ProbeSpec `json:"signals,omitempty"`
-
-	// GracePeriod is how long signals must continuously confirm idle before
-	// the operator acts. Protects against brief quiet moments triggering
-	// a false idle.
-	// +optional
+	// IdleAfter is how long the workload must go without any activity
+	// before the operator acts.
+	// +kubebuilder:default="1h"
 	// +kubebuilder:validation:Format=duration
-	GracePeriod *metav1.Duration `json:"gracePeriod,omitempty"`
+	// +optional
+	IdleAfter *metav1.Duration `json:"idleAfter,omitempty"`
 
-	// AutoResume re-enables the workload when idle detection clears
-	// (i.e. signals no longer confirm idle).
+	// Activity configures what counts as activity, beyond the deploys and
+	// activity annotations that always count.
+	// +optional
+	Activity *ActivitySpec `json:"activity,omitempty"`
+
+	// AutoResume wakes a paused workload ahead of the demand the forecast
+	// predicts.
 	// +optional
 	AutoResume bool `json:"autoResume,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=prometheus
-type ProbeSource string
-
-const (
-	ProbeSourcePrometheus ProbeSource = "prometheus"
-)
-
-// ProbeSpec defines an external check used as an idle detection signal. For
-// Prometheus probes, the PromQL query must return a non-zero value to confirm
-// the workload is idle. An empty result or zero value denies it.
-type ProbeSpec struct {
-	// +kubebuilder:default=prometheus
-	Source ProbeSource `json:"source"`
-
-	// PromQL is an instant query evaluated against the configured Prometheus
-	// endpoint. The query must return a non-zero scalar to confirm idle.
-	// Example: rate(http_requests_total{service="api"}[10m]) == 0
+// ActivitySpec configures the activity sources for idle detection.
+type ActivitySpec struct {
+	// CPUThreshold is the CPU utilization, as a percentage of the workload's
+	// CPU requests, above which the workload counts as active.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=10
 	// +optional
-	PromQL string `json:"promQL,omitempty"`
+	CPUThreshold int `json:"cpuThreshold,omitempty"`
+
+	// Prometheus queries that measure activity, such as an ingress request
+	// rate. A result above zero counts as activity; an empty result or zero
+	// doesn't. Requires the operator's --prometheus-url.
+	// +optional
+	Prometheus []PrometheusActivity `json:"prometheus,omitempty"`
+}
+
+// PrometheusActivity is a PromQL instant query used as an activity source.
+type PrometheusActivity struct {
+	// PromQL is the query. Example:
+	// sum(rate(nginx_ingress_controller_requests{exported_service="api"}[5m]))
+	// +kubebuilder:validation:MinLength=1
+	PromQL string `json:"promQL"`
 }
 
 // +kubebuilder:validation:Enum=destroy;resume
@@ -335,6 +321,10 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	Cost *CostStatus `json:"cost,omitempty"`
 
+	// Activity tracks when the workload was last active, for idle detection.
+	// +optional
+	Activity *ActivityStatus `json:"activity,omitempty"`
+
 	// LastActedAt is when the operator last mutated the target workload
 	// (pause, resume, destroy, or drift correction).
 	// +optional
@@ -343,6 +333,44 @@ type ManagedWorkloadStatus struct {
 	// LastTransitionTime is when the workload last changed phases.
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+}
+
+// +kubebuilder:validation:Enum=created;woke;cpu;rollout;annotation;prometheus;unobserved
+type ActivitySource string
+
+const (
+	ActivitySourceCreated    ActivitySource = "created"
+	ActivitySourceWoke       ActivitySource = "woke"
+	ActivitySourceCPU        ActivitySource = "cpu"
+	ActivitySourceRollout    ActivitySource = "rollout"
+	ActivitySourceAnnotation ActivitySource = "annotation"
+	ActivitySourcePrometheus ActivitySource = "prometheus"
+	// ActivitySourceUnobserved restarts the clock after the operator could
+	// not watch the workload, so a gap in observation never causes a pause.
+	ActivitySourceUnobserved ActivitySource = "unobserved"
+)
+
+// ActivityStatus records the state of the activity clock.
+type ActivityStatus struct {
+	// LastActivityTime is the most recent activity from any source.
+	LastActivityTime metav1.Time `json:"lastActivityTime"`
+
+	// LastActivitySource is what produced LastActivityTime.
+	LastActivitySource ActivitySource `json:"lastActivitySource"`
+
+	// PauseAt is when the idle action will run if no further activity is
+	// seen: LastActivityTime plus IdleAfter.
+	// +optional
+	PauseAt *metav1.Time `json:"pauseAt,omitempty"`
+
+	// LastEvaluatedTime is when the operator last checked for activity.
+	// +optional
+	LastEvaluatedTime *metav1.Time `json:"lastEvaluatedTime,omitempty"`
+
+	// TemplateHash fingerprints the target's pod template, so a deploy or
+	// configuration change counts as activity while replica changes don't.
+	// +optional
+	TemplateHash string `json:"templateHash,omitempty"`
 }
 
 // ResourceSnapshot captures the workload's resource profile at the moment of a

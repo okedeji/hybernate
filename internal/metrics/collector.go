@@ -91,14 +91,9 @@ var (
 // --- Tier 3: Debugging ---
 
 var (
-	IdleSignalResult = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hybernate_idle_signal_result",
-		Help: "Current idle signal evaluation status (1=active, 2=signals_confirm, 3=grace_period, 4=idle).",
-	}, []string{"namespace", "workload"})
-
-	IdleFlukes = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_idle_fluke_total",
-		Help: "Total times signals confirmed idle but prediction disagreed.",
+	IdleSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hybernate_idle_seconds",
+		Help: "Seconds since the workload's last activity from any source.",
 	}, []string{"namespace", "workload"})
 
 	PredictionRegimeChanges = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -165,8 +160,7 @@ func init() {
 		DriftDetections,
 
 		// Tier 3
-		IdleSignalResult,
-		IdleFlukes,
+		IdleSeconds,
 		PredictionRegimeChanges,
 		PVCRetentionRemaining,
 		AutomationSkipped,

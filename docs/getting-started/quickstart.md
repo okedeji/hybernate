@@ -92,19 +92,15 @@ View events on the resource:
 kubectl describe managedworkload my-api -n sandbox
 ```
 
-At this point, Hybernate is already working. The forecast engine progresses through phases independently, regardless of `dryRun`:
+At this point, Hybernate is already working. It records when the workload was last active, and once there has been no activity for `idleAfter` (default 1 hour), it pauses the workload. There's no learning period.
 
-1. **Observing** — collecting data, no decisions yet. The engine needs at least 24 hours of data before it starts making predictions.
-2. **Suggesting** — the engine has enough data to predict daily patterns and starts evaluating the idle policy, but only logs what it would do. This is always dry run, even if `dryRun: false`.
-3. **Active** — the engine's confidence has crossed the threshold (default 85%). If `dryRun: false`, it now takes real action: pausing or destroying workloads. If `dryRun: true`, it continues to log decisions without acting.
-
-You can track which phase the engine is in:
+You can see the activity clock:
 
 ```bash
-kubectl get managedworkload my-api -n sandbox -o jsonpath='{.status.prediction}'
+kubectl get managedworkload my-api -n sandbox -o jsonpath='{.status.activity}'
 ```
 
-Since `dryRun` is enabled and the engine starts in Observing, nothing will be touched. You can follow the events to watch it progress:
+Since `dryRun` is enabled, nothing will be touched: when the clock runs out, the phase becomes `Idle` and a "would pause" event is emitted. You can follow the events to watch it progress:
 
 ```bash
 kubectl describe managedworkload my-api -n sandbox
@@ -160,17 +156,14 @@ kubectl patch managedworkload my-api -n sandbox \
 
 Hybernate will now:
 
-- Monitor CPU and memory usage against their percentage-of-request thresholds
-- Wait for all signals to confirm idle
-- Apply the grace period
-- Check the forecast engine before acting
-- Pause the workload if everything agrees
-- Auto-resume when demand returns
+- Record activity: CPU above the threshold, deploys, and activity annotations
+- Pause the workload once there has been no activity for `idleAfter`
+- Hold off if a confident forecast expects demand within the hour
+- Wake it when an activity annotation is set, or ahead of forecast demand with `autoResume`
 
 ## What's Next?
 
 - [ManagedWorkload Guide](../guides/managed-workload.md): full spec reference with examples
-- [Idle Detection](../concepts/idle-detection.md): how signals and grace periods work
-- [Prometheus Signals](../guides/prometheus-signals.md): add custom PromQL checks
+- [Idle Detection](../concepts/idle-detection.md): how the activity clock works
 - [WorkloadPolicy](../guides/workload-policy.md): discovery, classification, and auto-manage
 - [GitOps Export](../guides/gitops-export.md): export discovered workloads for ArgoCD/Flux

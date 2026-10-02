@@ -43,10 +43,8 @@ type prometheusResponse struct {
 	} `json:"data"`
 }
 
-// Prometheus implements Checker by evaluating a PromQL instant query.
-// A non-empty, non-zero result confirms the action; empty or zero denies it.
-// The PromQL query encodes the intent — the caller writes a query that
-// returns non-empty when the proposed action should proceed.
+// Prometheus evaluates a PromQL instant query. A result above zero confirms;
+// an empty result, zero, or a negative value doesn't.
 type Prometheus struct {
 	Endpoint string
 	Query    string
@@ -109,8 +107,8 @@ func (p *Prometheus) Check(ctx context.Context, _, _ string) (Result, error) {
 		return Result{}, fmt.Errorf("extracting prometheus value: %w", err)
 	}
 
-	if val == 0 {
-		return Result{Confirm: false, Reason: fmt.Sprintf("promql value is 0 for %q", p.Query)}, nil
+	if val <= 0 {
+		return Result{Confirm: false, Reason: fmt.Sprintf("promql value is %g for %q", val, p.Query)}, nil
 	}
 	return Result{Confirm: true, Reason: fmt.Sprintf("promql value is %g for %q", val, p.Query)}, nil
 }

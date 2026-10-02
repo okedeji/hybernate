@@ -14,7 +14,7 @@ Most staging, dev, and test workloads sit idle 60-80% of the time: nights, weeke
 
 Hybernate fixes this by:
 
-- **Detecting idle workloads** using CPU + memory metrics and optional Prometheus signals, with a consensus model that prevents false positives
+- **Detecting idle workloads** with a per-workload activity clock: CPU, deploys, Prometheus queries, and activity annotations from your own tooling, with no learning period
 - **Learning demand patterns** via a per-workload Holt-Winters forecasting model that tracks daily and weekly seasonality
 - **Acting automatically** by pausing idle workloads and resuming proactively before users arrive
 - **Tracking savings** with per-workload cost accounting, resource reduction metrics, and cluster-wide aggregation
@@ -24,9 +24,9 @@ Hybernate fixes this by:
 ![How It Works](docs/assets/how-it-works.png)
 
 1. You point Hybernate at a Deployment or StatefulSet
-2. The operator monitors CPU, memory, and optional Prometheus signals
+2. The operator tracks when the workload was last active: CPU, deploys, and activity annotations
 3. A per-workload forecast model learns when the workload is typically busy
-4. When all signals confirm idle and the forecast agrees, the workload is paused
+4. When nothing has been active for `idleAfter` (default 1 hour), the workload is paused
 5. Before the next busy period, the forecast triggers an automatic resume
 
 ## Quick Start
@@ -80,9 +80,7 @@ spec:
     kind: Deployment
     name: my-api
   idlePolicy:
-    cpuIdleThreshold: 10
-    memoryIdleThreshold: 10
-    gracePeriod: "5m"
+    idleAfter: 1h
     autoResume: true
   prediction:
     confidence: 85
@@ -93,7 +91,7 @@ spec:
 
 ### Core
 
-- **Multi-signal idle detection** using CPU + memory thresholds with Prometheus PromQL signals, consensus-based confirmation, and configurable grace periods
+- **Activity-based idle detection**: any sign of use (CPU, a deploy, a Prometheus query such as request rate, an activity annotation) keeps a workload awake; it pauses after `idleAfter` with none
 - **Demand forecasting** via a Holt-Winters double seasonal model that learns daily and weekly patterns per workload, with confidence scoring and anomaly detection
 - **Pause, resume, and destroy** with scale to zero, automatic expiry, forecast-driven resume, and PVC retention
 
@@ -125,7 +123,7 @@ Full docs at **[okedeji.io/hybernate](https://okedeji.io/hybernate)**
 
 - [Installation](https://okedeji.io/hybernate/getting-started/installation/): Helm, kubectl, and source
 - [Quickstart](https://okedeji.io/hybernate/getting-started/quickstart/): manage your first workload
-- [Idle Detection](https://okedeji.io/hybernate/concepts/idle-detection/): how signals, forecasts, and grace periods work
+- [Idle Detection](https://okedeji.io/hybernate/concepts/idle-detection/): how the activity clock decides when to pause
 - [Forecasting](https://okedeji.io/hybernate/concepts/forecasting/): the Holt-Winters prediction engine
 - [Cost Tracking](https://okedeji.io/hybernate/concepts/cost-tracking/): resource reduction vs. estimated savings
 - [API Reference](https://okedeji.io/hybernate/reference/api/): complete CRD field reference

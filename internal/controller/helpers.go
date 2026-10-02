@@ -19,10 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -32,16 +30,15 @@ import (
 	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/forecast"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
-	"github.com/okedeji/hybernate/internal/signal"
 )
 
 const (
 	ReasonPredictionFed        = "PredictionFed"
 	ReasonAutomationSkipped    = "AutomationSkipped"
-	ReasonIdleConsensus        = "IdleConsensus"
-	ReasonIdleFluke            = "IdleFluke"
-	ReasonIdleGracePeriod      = "IdleGracePeriod"
 	ReasonIdleDetected         = "IdleDetected"
+	ReasonIdleVetoed           = "IdleVetoed"
+	ReasonActivityResumed      = "ActivityResumed"
+	ReasonWokeByActivity       = "WokeByActivity"
 	ReasonPaused               = "Paused"
 	ReasonResumed              = "Resumed"
 	ReasonDestroyed            = "Destroyed"
@@ -85,44 +82,6 @@ func dryRunPrefix(dryRun bool) string {
 		return "[dry-run] "
 	}
 	return ""
-}
-
-func resolveIdleAction(workload *v1alpha1.ManagedWorkload) v1alpha1.IdleAction {
-	if workload.Spec.IdlePolicy == nil {
-		return v1alpha1.IdleActionPause
-	}
-	if workload.Spec.IdlePolicy.Action == v1alpha1.IdleActionDestroy {
-		return v1alpha1.IdleActionDestroy
-	}
-	// auto and pause both pause. Destruction after idle is handled by
-	// pause.expireAfter + expireAction: destroy.
-	return v1alpha1.IdleActionPause
-}
-
-const (
-	defaultCPUIdlePercent    = 10
-	defaultMemoryIdlePercent = 10
-)
-
-func cpuIdlePercentFor(workload *v1alpha1.ManagedWorkload) int {
-	if workload.Spec.IdlePolicy != nil && workload.Spec.IdlePolicy.CPUIdleThreshold > 0 {
-		return workload.Spec.IdlePolicy.CPUIdleThreshold
-	}
-	return defaultCPUIdlePercent
-}
-
-func memoryIdlePercentFor(workload *v1alpha1.ManagedWorkload) int {
-	if workload.Spec.IdlePolicy != nil && workload.Spec.IdlePolicy.MemoryIdleThreshold > 0 {
-		return workload.Spec.IdlePolicy.MemoryIdleThreshold
-	}
-	return defaultMemoryIdlePercent
-}
-
-func idleGracePeriod(workload *v1alpha1.ManagedWorkload) time.Duration {
-	if workload.Spec.IdlePolicy != nil && workload.Spec.IdlePolicy.GracePeriod != nil {
-		return workload.Spec.IdlePolicy.GracePeriod.Duration
-	}
-	return 0
 }
 
 func (r *Reconciler) predictionState(ctx context.Context, workload *v1alpha1.ManagedWorkload) *string {
@@ -207,49 +166,6 @@ func seasonPhases(phase forecast.Phase) (daily, weekly string) {
 	default:
 		return seasonUnknown, seasonUnknown
 	}
-}
-
-func (r *Reconciler) buildIdleSignals(ctx context.Context, workload *v1alpha1.ManagedWorkload) ([]signal.Checker, error) {
-	cpuPercent := cpuIdlePercentFor(workload)
-	memPercent := memoryIdlePercentFor(workload)
-
-	cpuPerReplica, err := r.metrics.CPURequestPerReplica(ctx, workload)
-	if err != nil {
-		return nil, fmt.Errorf("reading cpu request: %w", err)
-	}
-	memPerReplica, err := r.metrics.MemoryRequestPerReplica(ctx, workload)
-	if err != nil {
-		return nil, fmt.Errorf("reading memory request: %w", err)
-	}
-	replicas, err := r.metrics.Replicas(ctx, workload)
-	if err != nil {
-		return nil, fmt.Errorf("reading replicas: %w", err)
-	}
-
-	// Signal checkers compare against total usage across all pods, so
-	// the absolute threshold must account for all replicas.
-	n := float64(replicas)
-	cpuAbsolute := int64(cpuPerReplica * n * float64(cpuPercent) / 100)
-	memAbsolute := int64(memPerReplica * n * float64(memPercent) / 100)
-
-	cpuThreshold := resource.NewMilliQuantity(cpuAbsolute, resource.DecimalSI)
-	memThreshold := resource.NewQuantity(memAbsolute, resource.BinarySI)
-
-	checkers := []signal.Checker{
-		signal.NewInternal(r.metrics, workload, *cpuThreshold, signal.Below),
-		signal.NewMemoryInternal(r.metrics, workload, *memThreshold, signal.Below),
-	}
-	return r.appendUserSignals(checkers, workload.Spec.IdlePolicy.Signals), nil
-}
-
-func (r *Reconciler) appendUserSignals(checkers []signal.Checker, specs []v1alpha1.ProbeSpec) []signal.Checker {
-	for _, s := range specs {
-		switch s.Source {
-		case v1alpha1.ProbeSourcePrometheus:
-			checkers = append(checkers, signal.NewPrometheus(r.prometheusURL, s.PromQL))
-		}
-	}
-	return checkers
 }
 
 func resolveConflictAction(workload *v1alpha1.ManagedWorkload) v1alpha1.ConflictAction {

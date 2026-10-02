@@ -13,12 +13,11 @@
 | `target.name` | string | Yes | | Target name (same namespace) |
 | `desiredState` | `Running` \| `Paused` \| `Destroyed` | No | | Manual lifecycle override |
 | `idlePolicy` | `IdlePolicySpec` | No | | Idle detection configuration |
-| `idlePolicy.action` | `auto` \| `pause` \| `destroy` | No | `auto` | Action on idle confirmation |
-| `idlePolicy.cpuIdleThreshold` | int | No | `10` | CPU utilization percentage of request below which workload is idle (0-100) |
-| `idlePolicy.memoryIdleThreshold` | int | No | `10` | Memory utilization percentage of request below which workload is idle (0-100) |
-| `idlePolicy.gracePeriod` | duration | No | | Continuous idle confirmation period |
-| `idlePolicy.autoResume` | bool | No | `false` | Resume when signals clear |
-| `idlePolicy.signals[]` | `ProbeSpec` | No | | Additional signal checks |
+| `idlePolicy.action` | `pause` \| `destroy` | No | `pause` | Action once idle for `idleAfter` |
+| `idlePolicy.idleAfter` | duration | No | `1h` | Time without activity before acting |
+| `idlePolicy.activity.cpuThreshold` | int | No | `10` | CPU utilization % of requests above which the workload is active (0-100) |
+| `idlePolicy.activity.prometheus[].promQL` | string | Yes (per entry) | | PromQL query; a result above zero is activity |
+| `idlePolicy.autoResume` | bool | No | `false` | Wake ahead of confident forecast demand |
 | `pause` | `PauseSpec` | No | | Pause behavior |
 | `pause.expireAfter` | duration | No | | Max pause duration |
 | `pause.expireAction` | `resume` \| `destroy` | No | `destroy` | Action on expiry |
@@ -31,13 +30,6 @@
 | `costTracking.rates` | `CostRates` | No | AWS defaults | Custom cost rates |
 | `conflictAction` | `enforce` \| `warn` \| `defer` | No | `warn` | Handling of a paused workload scaled up externally |
 | `dryRun` | bool | No | `false` | Evaluate without acting |
-
-### ProbeSpec
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `source` | `prometheus` | No | `prometheus` | Signal source |
-| `promQL` | string | No | | PromQL instant query |
 
 ### CostRates
 
@@ -54,6 +46,11 @@
 | `phase` | `WorkloadPhase` | Current lifecycle phase |
 | `conditions[]` | `Condition` | Standard K8s conditions |
 | `pause` | `PauseStatus` | State while paused |
+| `activity.lastActivityTime` | time | Most recent activity from any source |
+| `activity.lastActivitySource` | string | `created`, `woke`, `cpu`, `rollout`, `annotation`, `prometheus`, or `unobserved` |
+| `activity.pauseAt` | time | When the idle action runs if no further activity is seen |
+| `activity.lastEvaluatedTime` | time | When activity was last checked |
+| `activity.templateHash` | string | Fingerprint of the target's pod template, used to detect deploys |
 | `pause.previousReplicas` | int32 | Replicas before pause |
 | `pause.pausedAt` | time | When paused |
 | `pause.resources` | `ResourceSnapshot` | Resource profile at pause |

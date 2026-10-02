@@ -26,6 +26,15 @@ const (
 	// AnnotationWorkloadPolicy links a ManagedWorkload back to the WorkloadPolicy that created it.
 	AnnotationWorkloadPolicy = "hybernate.io/workload-policy"
 
+	// AnnotationLastActivity records activity seen by another tool, such as a
+	// sandbox UI or CI pipeline, as an RFC 3339 time. Set on the ManagedWorkload
+	// or its target. A newer value wakes a paused workload.
+	AnnotationLastActivity = "hybernate.io/last-activity"
+
+	// AnnotationActiveUntil keeps a workload awake until an RFC 3339 time.
+	// Set on the ManagedWorkload or its target.
+	AnnotationActiveUntil = "hybernate.io/active-until"
+
 	// FinalizerCleanup is the finalizer added to ManagedWorkloads for PVC retention cleanup.
 	FinalizerCleanup = "hybernate.io/cleanup"
 )

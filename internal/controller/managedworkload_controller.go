@@ -40,7 +40,6 @@ import (
 	"github.com/okedeji/hybernate/internal/forecast"
 	"github.com/okedeji/hybernate/internal/lifecycle"
 	"github.com/okedeji/hybernate/internal/metrics"
-	"github.com/okedeji/hybernate/internal/policy"
 )
 
 const (
@@ -62,9 +61,9 @@ type Reconciler struct {
 
 	pauser        lifecyclePauser
 	destroyer     lifecycleDestroyer
-	idle          idleEvaluator
 	metrics       metricsReader
 	engines       *engineRegistry
+	activityMemo  activityMemo
 	prometheusURL string
 	clock         func() time.Time
 }
@@ -113,6 +112,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	// operator restart, not only after the next transition.
 	recordPhase(&workload)
 
+	// The status as last written, to tell what this reconcile changed.
+	observed := workload.Status.DeepCopy()
+
 	if err := r.ensureFinalizer(ctx, &workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring finalizer: %w", err)
 	}
@@ -130,8 +132,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// --- Target check + drift detection ---
 
+	var target client.Object
 	if workload.Status.Phase != v1alpha1.PhaseDestroyed && workload.Status.Phase != v1alpha1.PhaseDestroying {
-		target, err := r.checkTarget(ctx, &workload)
+		var err error
+		target, err = r.checkTarget(ctx, &workload)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -178,21 +182,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// --- Automation ---
 
-	result, err = r.reconcileAutomation(ctx, &workload)
+	result, err = r.reconcileAutomation(ctx, &workload, target)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// --- Cost tracking and status ---
+
+	r.accumulateCost(ctx, &workload)
+	if err := r.persistStatus(ctx, &workload, observed); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.V(1).Info("reconciled", "workload", workload.Name, "namespace", workload.Namespace, "phase", workload.Status.Phase)
 	if result != nil {
 		return *result, nil
 	}
-
-	// --- Cost tracking ---
-	r.accumulateCost(ctx, &workload)
-	if err := r.Status().Update(ctx, &workload); err != nil {
-		return ctrl.Result{}, fmt.Errorf("persisting cost status: %w", err)
-	}
-
-	logger.Info("reconciled", "phase", workload.Status.Phase)
 	return ctrl.Result{}, nil
 }
 
@@ -299,6 +304,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 
 	r.stampLastActed(workload)
 	r.observeActionDuration(workload, "resume")
+	r.resetActivity(workload, v1alpha1.ActivitySourceWoke)
 	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed")
 	if err != nil {
 		return nil, err
@@ -508,9 +514,10 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 	if err := r.Update(ctx, workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
 	}
-	metrics.WorkloadPhase.DeletePartialMatch(prometheus.Labels{
-		"namespace": workload.Namespace, "workload": workload.Name,
-	})
+	r.activityMemo.forget(workload.UID)
+	labels := prometheus.Labels{"namespace": workload.Namespace, "workload": workload.Name}
+	metrics.WorkloadPhase.DeletePartialMatch(labels)
+	metrics.IdleSeconds.DeletePartialMatch(labels)
 	return ctrl.Result{}, nil
 }
 
@@ -526,6 +533,9 @@ func recordPhase(workload *v1alpha1.ManagedWorkload) {
 const (
 	conditionTargetAvailable  = "TargetAvailable"
 	conditionMetricsAvailable = "MetricsAvailable"
+	// conditionPrometheusAvailable is only set when Prometheus activity
+	// queries are configured.
+	conditionPrometheusAvailable = "PrometheusAvailable"
 )
 
 // checkTarget verifies the target workload exists. Returns the target object
@@ -820,9 +830,6 @@ func (r *Reconciler) initDefaults() {
 	}
 	if r.metrics == nil {
 		r.metrics = metrics.NewReader(r.Client)
-	}
-	if r.idle == nil {
-		r.idle = policy.NewIdleDetector()
 	}
 	if r.engines == nil {
 		r.engines = newEngineRegistry(func(threshold int) forecaster {

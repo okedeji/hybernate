@@ -287,32 +287,7 @@ var _ = Describe("Manager", Ordered, func() {
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", appNamespace, "--wait=false"))
 			})
 
-			Expect(kubectlApply(fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: %[1]s
-  namespace: %[2]s
-spec:
-  replicas: 2
-  selector:
-    matchLabels: {app: %[1]s}
-  template:
-    metadata:
-      labels: {app: %[1]s}
-    spec:
-      containers:
-        - name: app
-          image: %[3]s
-          imagePullPolicy: IfNotPresent
-          resources:
-            requests: {cpu: 10m, memory: 16Mi}
-          securityContext:
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL]}
-            seccompProfile: {type: RuntimeDefault}
-`, appName, appNamespace, pauseImage))).To(Succeed())
+			Expect(kubectlApply(deploymentManifest(appName, appNamespace, 2))).To(Succeed())
 
 			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+appName,
 				"-n", appNamespace, "--timeout=2m"))
@@ -363,7 +338,103 @@ spec:
 			Expect(jsonpath("deployment", appName, appNamespace, "{.spec.replicas}")).To(Equal("2"))
 		})
 	})
+
+	Context("Idle clock", func() {
+		const (
+			idleNamespace = "hybernate-e2e-idle"
+			idleName      = "e2e-idle-app"
+		)
+
+		BeforeAll(func() {
+			By("installing metrics-server, which the clock needs to read CPU activity")
+			_, err := utils.Run(exec.Command("kubectl", "apply", "-f", metricsServerManifest))
+			Expect(err).NotTo(HaveOccurred())
+			// kind's kubelets serve self-signed certificates.
+			_, err = utils.Run(exec.Command("kubectl", "patch", "deployment", "metrics-server", "-n", "kube-system",
+				"--type=json", "-p", `[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]`))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("kubectl", "wait", "--for=condition=Available",
+				"apiservice/v1beta1.metrics.k8s.io", "--timeout=3m"))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating an idle Deployment")
+			_, err = utils.Run(exec.Command("kubectl", "create", "ns", idleNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", idleNamespace, "--wait=false"))
+			})
+			Expect(kubectlApply(deploymentManifest(idleName, idleNamespace, 1))).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+idleName,
+				"-n", idleNamespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("pauses a workload with no activity, and wakes it on an activity annotation", func() {
+			By("managing it with a one-minute idle clock")
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  target: {kind: Deployment, name: %[1]s}
+  idlePolicy:
+    idleAfter: 1m
+  prediction: {confidence: 85}
+`, idleName, idleNamespace))).To(Succeed())
+
+			By("waiting for the clock to run out and the workload to pause")
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", idleName, idleNamespace, "{.status.phase}")).To(Equal("Paused"))
+				g.Expect(jsonpath("deployment", idleName, idleNamespace, "{.spec.replicas}")).To(Equal("0"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("annotating the Deployment as active, as a sandbox UI would")
+			_, err := utils.Run(exec.Command("kubectl", "annotate", "deployment", idleName, "-n", idleNamespace,
+				"--overwrite", "hybernate.io/last-activity="+time.Now().UTC().Format(time.RFC3339)))
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", idleName, idleNamespace, "{.status.phase}")).To(Equal("Running"))
+				g.Expect(jsonpath("deployment", idleName, idleNamespace, "{.status.readyReplicas}")).To(Equal("1"))
+				g.Expect(jsonpath("managedworkload", idleName, idleNamespace,
+					"{.status.activity.lastActivitySource}")).To(Equal("woke"))
+			}).Should(Succeed())
+		})
+	})
 })
+
+// deploymentManifest is a Deployment of the pause container, which uses no
+// CPU and so never registers as active on its own.
+func deploymentManifest(name, namespace string, replicas int) string {
+	return fmt.Sprintf(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  replicas: %[4]d
+  selector:
+    matchLabels: {app: %[1]s}
+  template:
+    metadata:
+      labels: {app: %[1]s}
+    spec:
+      containers:
+        - name: app
+          image: %[3]s
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+`, name, namespace, pauseImage, replicas)
+}
 
 // kubectlApply applies a manifest from a string.
 func kubectlApply(manifest string) error {

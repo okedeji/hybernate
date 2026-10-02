@@ -72,10 +72,10 @@ nav:
       - ManagedWorkload: guides/managed-workload.md
       - WorkloadPolicy: guides/workload-policy.md
       - Pause & Destroy: guides/pause-destroy.md
-      - Prometheus Signals: guides/prometheus-signals.md
       - GitOps Export: guides/gitops-export.md
       - Cluster Autoscaler: guides/cluster-autoscaler.md
       - Dry Run: guides/dry-run.md
+      - Prometheus Activity: guides/prometheus-signals.md
   - Reference:
       - API: reference/api.md
       - Helm Values: reference/helm-values.md

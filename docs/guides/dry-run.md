@@ -17,9 +17,7 @@ spec:
     kind: Deployment
     name: my-api
   idlePolicy:
-    cpuIdleThreshold: 10
-    memoryIdleThreshold: 10
-    gracePeriod: "5m"
+    idleAfter: 1h
   prediction:
     confidence: 85
   dryRun: true  # Observe only
@@ -44,7 +42,7 @@ The operator runs its full evaluation pipeline:
 
 | Action | Dry Run Behavior |
 |--------|-----------------|
-| Idle detection | Signals are checked, grace period is tracked, and events are emitted, but the workload is **not** paused |
+| Idle detection | The activity clock runs and the phase becomes `Idle` when it runs out, but the workload is **not** paused |
 | Pause expiry | Expiry is detected, but the workload is **not** resumed or destroyed |
 | Cost tracking | Costs are accumulated normally (resource usage is real regardless of management) |
 | Prediction engine | Data points are observed and confidence builds normally |
@@ -62,7 +60,7 @@ kubectl describe managedworkload my-api -n staging
 Look for events like:
 
 ```
-[DRY RUN] Idle confirmed — would pause workload (grace period elapsed, all signals confirm)
+[dry-run] my-api: no activity for 1h0m0s, last seen from cpu; pause
 ```
 
 ### Status

@@ -26,13 +26,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/forecast"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
-	"github.com/okedeji/hybernate/internal/policy"
-	"github.com/okedeji/hybernate/internal/signal"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -60,12 +59,6 @@ type metricsReader interface {
 	Replicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error)
 	TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 	TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
-}
-
-type idleEvaluator interface {
-	Evaluate(ctx context.Context, namespace, name string, signals []signal.Checker, gracePeriod time.Duration) (policy.IdleEvaluation, error)
-	StartGracePeriod(namespace, name string)
-	Reset(namespace, name string)
 }
 
 // engineRegistry manages forecast engines per workload.
@@ -123,12 +116,11 @@ func (reg *engineRegistry) markFed(key string, now time.Time) {
 
 // --- Reconcile automation ---
 
-func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
+func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	phase := workload.Status.Phase
 
-	// Paused workloads only participate in auto-resume checks.
 	if phase == v1alpha1.PhasePaused {
-		return r.reconcileAutoResume(ctx, workload)
+		return r.reconcileWake(ctx, workload, target)
 	}
 
 	if phase != v1alpha1.PhaseRunning && phase != v1alpha1.PhaseIdle {
@@ -170,30 +162,66 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 		opmetrics.AutomationSkipped.WithLabelValues(workload.Namespace, workload.Name).Inc()
 		r.emitEvent(workload, false, "Normal", ReasonAutomationSkipped, actionEvaluate,
 			"automation skipped, desiredState is manually set to %s", *workload.Spec.DesiredState)
-		if err := r.Status().Update(ctx, workload); err != nil {
-			return nil, fmt.Errorf("updating prediction status: %w", err)
-		}
-		result := ctrl.Result{RequeueAfter: 1 * time.Hour}
-		return &result, nil
+		return &ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
 	}
 
-	enginePhase := engine.GetPhase()
-	logger.Info("automation tick", "engine_phase", enginePhase, "data_points", engine.GetDataPoints())
-
-	switch enginePhase {
-	case forecast.Observing:
-		if err := r.Status().Update(ctx, workload); err != nil {
-			return nil, fmt.Errorf("updating prediction status: %w", err)
-		}
-		result := ctrl.Result{RequeueAfter: 1 * time.Hour}
-		return &result, nil
-
-	case forecast.DailySuggesting:
-		return r.reconcileAutomationPolicies(ctx, workload, engine, true)
-
-	default: // DailyActive, WeeklySuggesting, FullyActive
-		return r.reconcileAutomationPolicies(ctx, workload, engine, workload.Spec.DryRun)
+	if workload.Spec.IdlePolicy == nil {
+		return &ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
 	}
+
+	logger.V(1).Info("automation tick", "workload", workload.Name, "namespace", workload.Namespace,
+		"engine_phase", engine.GetPhase(), "data_points", engine.GetDataPoints())
+	return r.reconcileIdleClock(ctx, workload, target, engine)
+}
+
+// reconcileWake resumes a paused workload when an activity annotation asks
+// for it, or ahead of the demand a confident forecast predicts.
+func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
+	if workload.Spec.DesiredState != nil {
+		return nil, nil
+	}
+
+	if r.wokenByActivity(ctx, workload, target) {
+		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonWokeByActivity, actionResume,
+			"activity annotation is newer than the pause, waking")
+		if workload.Spec.DryRun {
+			return nil, nil
+		}
+		return r.handleResume(ctx, workload)
+	}
+
+	if workload.Spec.IdlePolicy == nil || !workload.Spec.IdlePolicy.AutoResume {
+		return nil, nil
+	}
+
+	key := workload.Namespace + "/" + workload.Name
+	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, r.predictionState(ctx, workload))
+	if engine.GetPhase() < forecast.DailyActive {
+		return nil, nil
+	}
+
+	// The workload is scaled to zero, so live requests can't be read. The
+	// snapshot taken at pause time converts predicted millicores to a share
+	// of what the workload requests across all its replicas.
+	var totalRequest float64
+	if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
+		totalRequest = float64(workload.Status.Pause.Resources.CPUMillis) * float64(workload.Status.Pause.PreviousReplicas)
+	}
+	if totalRequest <= 0 {
+		return nil, nil
+	}
+	predictedPercent := engine.Predict(0, r.now()) / totalRequest * 100
+	threshold := cpuThresholdFor(workload)
+	if predictedPercent < float64(threshold) {
+		return nil, nil
+	}
+
+	r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonAutoResume, actionResume,
+		"forecast expects %.0f%% utilization (threshold %d%%), waking ahead of demand", predictedPercent, threshold)
+	if workload.Spec.DryRun {
+		return nil, nil
+	}
+	return r.handleResume(ctx, workload)
 }
 
 // observedCPU reads total CPU usage to feed the forecast. A target scaled to
@@ -210,185 +238,28 @@ func (r *Reconciler) observedCPU(ctx context.Context, workload *v1alpha1.Managed
 	return 0, err
 }
 
-// reportMetricsUnavailable surfaces why the forecast can't be fed. Without
-// it the workload shows Observing indefinitely, with nothing to say it has
-// stopped learning.
+// reportMetricsUnavailable surfaces why CPU can't be read. Both idle
+// detection and the forecast depend on it, so without this the workload would
+// sit awake indefinitely with nothing to say why.
 func (r *Reconciler) reportMetricsUnavailable(ctx context.Context, workload *v1alpha1.ManagedWorkload, err error) (*ctrl.Result, error) {
 	reason := "MetricsUnavailable"
-	msg := fmt.Sprintf("cannot read CPU usage, forecast is not learning: %v", err)
-	if errors.Is(err, opmetrics.ErrNoPodMetrics) {
+	msg := fmt.Sprintf("cannot read CPU usage, so idle detection and the forecast are paused: %v", err)
+	switch {
+	case errors.Is(err, opmetrics.ErrNoPodMetrics):
 		reason = "NoPodMetrics"
-		msg = "target has replicas but no pod metrics, forecast is not learning; check that metrics-server is installed and reporting"
+		msg = "target has replicas but no pod metrics, so idle detection and the forecast are paused; check that metrics-server is installed and reporting"
+	case errors.Is(err, errNoCPURequests):
+		reason = "NoCPURequests"
+		msg = "target sets no CPU requests, so CPU activity can't be measured and idle detection is paused; set CPU requests on its containers"
 	}
 
 	firstFailure := !meta.IsStatusConditionFalse(workload.Status.Conditions, conditionMetricsAvailable)
 	r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionFalse, reason, msg)
-	if uerr := r.Status().Update(ctx, workload); uerr != nil {
-		return nil, fmt.Errorf("updating metrics condition: %w", uerr)
-	}
 	if firstFailure {
 		r.emitEvent(workload, false, "Warning", reason, actionForecast, "%s", msg)
 	}
-	log.FromContext(ctx).V(1).Info("forecast not fed",
+	log.FromContext(ctx).V(1).Info("CPU usage unavailable",
 		"workload", workload.Name, "namespace", workload.Namespace, "reason", reason, "error", err.Error())
 
 	return &ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
-}
-
-func (r *Reconciler) reconcileAutoResume(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
-	if workload.Spec.IdlePolicy == nil || !workload.Spec.IdlePolicy.AutoResume {
-		return nil, nil
-	}
-
-	// Manual desiredState takes precedence — don't fight the user.
-	if workload.Spec.DesiredState != nil {
-		return nil, nil
-	}
-
-	key := workload.Namespace + "/" + workload.Name
-	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, r.predictionState(ctx, workload))
-
-	enginePhase := engine.GetPhase()
-	if enginePhase == forecast.Observing {
-		return nil, nil
-	}
-
-	dryRun := enginePhase == forecast.DailySuggesting || workload.Spec.DryRun
-	predicted := engine.Predict(0, r.now())
-	cpuPercent := cpuIdlePercentFor(workload)
-
-	// Use the paused resource snapshot to convert predicted millicores to
-	// a percentage of total request — the workload is scaled to zero so we
-	// cannot query live metrics. Predicted value is total across all replicas.
-	var totalRequest float64
-	if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
-		totalRequest = float64(workload.Status.Pause.Resources.CPUMillis) * float64(workload.Status.Pause.PreviousReplicas)
-	}
-	predictedPercent := 0.0
-	if totalRequest > 0 {
-		predictedPercent = predicted / totalRequest * 100
-	}
-
-	if predictedPercent < float64(cpuPercent) {
-		return nil, nil
-	}
-
-	r.emitEvent(workload, dryRun, "Normal", ReasonAutoResume, actionResume,
-		"prediction expects %.0f%% utilization (threshold %d%%), resuming", predictedPercent, cpuPercent)
-
-	if dryRun {
-		return nil, nil
-	}
-
-	r.idle.Reset(workload.Namespace, workload.Spec.Target.Name)
-	return r.handleResume(ctx, workload)
-}
-
-func (r *Reconciler) reconcileAutomationPolicies(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, dryRun bool) (*ctrl.Result, error) {
-	if workload.Spec.IdlePolicy != nil && r.metrics != nil {
-		result, err := r.reconcileIdleAction(ctx, workload, engine, dryRun)
-		if err != nil {
-			return nil, err
-		}
-		if result != nil {
-			return result, nil
-		}
-	}
-
-	if err := r.Status().Update(ctx, workload); err != nil {
-		return nil, fmt.Errorf("updating status: %w", err)
-	}
-	requeue := 1 * time.Minute
-	if dryRun {
-		requeue = 1 * time.Hour
-	}
-	result := ctrl.Result{RequeueAfter: requeue}
-	return &result, nil
-}
-
-func (r *Reconciler) reconcileIdleAction(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, dryRun bool) (*ctrl.Result, error) {
-	signals, err := r.buildIdleSignals(ctx, workload)
-	if err != nil {
-		return nil, fmt.Errorf("building idle signals: %w", err)
-	}
-	eval, err := r.idle.Evaluate(ctx, workload.Namespace, workload.Spec.Target.Name, signals, idleGracePeriod(workload))
-	if err != nil {
-		r.emitEvent(workload, dryRun, "Warning", ReasonIdleConsensus, actionEvaluateIdle,
-			"failed to get idle signal consensus, %v", err)
-		return nil, fmt.Errorf("evaluating idle: %w", err)
-	}
-
-	ns, name := workload.Namespace, workload.Name
-	cpuPercent := cpuIdlePercentFor(workload)
-
-	switch {
-	case eval.SignalsConfirm():
-		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(2)
-		predicted := engine.Predict(0, r.now())
-		cpuPerReplica, err := r.metrics.CPURequestPerReplica(ctx, workload)
-		if err != nil {
-			return nil, fmt.Errorf("reading cpu request for prediction check: %w", err)
-		}
-		replicas, err := r.metrics.Replicas(ctx, workload)
-		if err != nil {
-			return nil, fmt.Errorf("reading replicas for prediction check: %w", err)
-		}
-		totalRequest := cpuPerReplica * float64(replicas)
-		predictedPercent := 0.0
-		if totalRequest > 0 {
-			predictedPercent = predicted / totalRequest * 100
-		}
-		if predictedPercent >= float64(cpuPercent) {
-			opmetrics.IdleFlukes.WithLabelValues(ns, name).Inc()
-			r.emitEvent(workload, dryRun, "Normal", ReasonIdleFluke, actionEvaluateIdle,
-				"signals confirm idle but prediction disagrees (predicted %.0f%% utilization, threshold %d%%), rechecking",
-				predictedPercent, cpuPercent)
-			result := ctrl.Result{RequeueAfter: 5 * time.Minute}
-			return &result, nil
-		}
-		r.idle.StartGracePeriod(workload.Namespace, workload.Spec.Target.Name)
-		r.emitEvent(workload, dryRun, "Normal", ReasonIdleGracePeriod, actionEvaluateIdle,
-			"signals and prediction confirm idle (predicted demand %.0fm), starting grace period",
-			predicted)
-		result := ctrl.Result{RequeueAfter: 30 * time.Second}
-		return &result, nil
-
-	case eval.InGracePeriod():
-		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(3)
-		r.emitEvent(workload, dryRun, "Normal", ReasonIdleGracePeriod, actionEvaluateIdle,
-			"in grace period, idle for %s", eval.IdleDuration())
-		result := ctrl.Result{RequeueAfter: 30 * time.Second}
-		return &result, nil
-
-	case eval.IsIdle():
-		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(4)
-		action := resolveIdleAction(workload)
-		opmetrics.IdleDetections.WithLabelValues(string(action), ns, name).Inc()
-		r.emitEvent(workload, dryRun, "Normal", ReasonIdleDetected, actionEvaluateIdle,
-			"idle for %s, executing %s", eval.IdleDuration(), action)
-
-		if dryRun {
-			opmetrics.DryrunActions.WithLabelValues("idle_" + string(action)).Inc()
-			r.emitEvent(workload, dryRun, "Normal", ReasonIdleDetected, actionEvaluateIdle,
-				"would %s workload (idle for %s)", action, eval.IdleDuration())
-			return nil, nil
-		}
-
-		if workload.Status.Phase != v1alpha1.PhaseIdle {
-			if _, err := r.transition(ctx, workload, v1alpha1.PhaseIdle, "IdleDetected"); err != nil {
-				return nil, err
-			}
-		}
-
-		switch action {
-		case v1alpha1.IdleActionDestroy:
-			return r.handleDestroy(ctx, workload)
-		default:
-			return r.handlePause(ctx, workload)
-		}
-
-	default:
-		opmetrics.IdleSignalResult.WithLabelValues(ns, name).Set(1)
-		return nil, nil
-	}
 }

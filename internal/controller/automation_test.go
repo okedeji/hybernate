@@ -28,15 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/forecast"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
-	"github.com/okedeji/hybernate/internal/policy"
-	"github.com/okedeji/hybernate/internal/signal"
 )
 
 // --- Stubs ---
@@ -116,27 +113,6 @@ func (m *stubMetrics) TotalPVCBytes(_ context.Context, _ *v1alpha1.ManagedWorklo
 	return m.pvcBytes, m.err
 }
 
-type stubIdleEvaluator struct {
-	eval            policy.IdleEvaluation
-	err             error
-	evalCalls       int
-	startGraceCalls int
-	resetCalls      int
-}
-
-func (s *stubIdleEvaluator) Evaluate(_ context.Context, _, _ string, _ []signal.Checker, _ time.Duration) (policy.IdleEvaluation, error) {
-	s.evalCalls++
-	return s.eval, s.err
-}
-
-func (s *stubIdleEvaluator) StartGracePeriod(_, _ string) {
-	s.startGraceCalls++
-}
-
-func (s *stubIdleEvaluator) Reset(_, _ string) {
-	s.resetCalls++
-}
-
 func newAutomationReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, engine *stubForecaster, opts automationOpts) *Reconciler {
 	t.Helper()
 	scheme := testScheme(t)
@@ -162,7 +138,6 @@ func newAutomationReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, e
 		Recorder:  events.NewFakeRecorder(10),
 		pauser:    opts.pauser,
 		destroyer: opts.destroyer,
-		idle:      opts.idle,
 		engines:   reg,
 		clock:     func() time.Time { return fixedTime },
 	}
@@ -181,7 +156,6 @@ func newAutomationReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, e
 type automationOpts struct {
 	pauser    *stubPauser
 	destroyer *stubDestroyer
-	idle      *stubIdleEvaluator
 	metrics   *stubMetrics
 	needsFeed bool
 }
@@ -206,7 +180,7 @@ func TestAutomation_SkipsNonRunningPhase(t *testing.T) {
 			engine := &stubForecaster{phase: forecast.DailyActive}
 			r := newAutomationReconciler(t, workload, engine, automationOpts{})
 
-			result, err := r.reconcileAutomation(context.Background(), workload)
+			result, err := r.reconcileAutomation(context.Background(), workload, nil)
 			require.NoError(t, err)
 			assert.Nil(t, result)
 		})
@@ -224,7 +198,7 @@ func TestAutomation_DesiredStateStillUpdatesStatus(t *testing.T) {
 	}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{})
 
-	result, err := r.reconcileAutomation(context.Background(), workload)
+	result, err := r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, 1*time.Hour, result.RequeueAfter)
@@ -235,12 +209,12 @@ func TestAutomation_DesiredStateStillUpdatesStatus(t *testing.T) {
 	assert.Equal(t, 72, workload.Status.Prediction.DailyConfidence)
 }
 
-func TestAutomation_ObservingRequeuesHourly(t *testing.T) {
+func TestAutomation_NoIdlePolicyOnlyLearns(t *testing.T) {
 	workload := automationWorkload(v1alpha1.PhaseRunning)
 	engine := &stubForecaster{phase: forecast.Observing, dataPoints: 10}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{})
 
-	result, err := r.reconcileAutomation(context.Background(), workload)
+	result, err := r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, 1*time.Hour, result.RequeueAfter)
@@ -248,158 +222,6 @@ func TestAutomation_ObservingRequeuesHourly(t *testing.T) {
 	assert.NotNil(t, workload.Status.Prediction)
 	assert.Equal(t, "Observing", workload.Status.Prediction.DailyPhase)
 	assert.Equal(t, "Observing", workload.Status.Prediction.WeeklyPhase)
-}
-
-func TestAutomation_SuggestingEmitsDryRunEvents(t *testing.T) {
-	workload := automationWorkload(v1alpha1.PhaseRunning)
-	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{
-		Action: v1alpha1.IdleActionPause,
-	}
-
-	engine := &stubForecaster{
-		phase:        forecast.DailySuggesting,
-		predictValue: 10.0, // below idle threshold as percentage
-	}
-	idle := &stubIdleEvaluator{
-		eval: policy.IdleEvaluation{
-			Status:  policy.IdleStatusIdle,
-			IdleFor: 45 * time.Minute,
-		},
-	}
-	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
-	r := newAutomationReconciler(t, workload, engine, automationOpts{idle: idle, metrics: metrics})
-
-	result, err := r.reconcileAutomation(context.Background(), workload)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, 1*time.Hour, result.RequeueAfter)
-	assert.Equal(t, 1, idle.evalCalls)
-
-	// Phase should NOT change — suggesting mode doesn't act.
-	w := getWorkload(t, r, "api")
-	assert.Equal(t, v1alpha1.PhaseRunning, w.Status.Phase)
-}
-
-func TestAutomation_ActiveIdlePauses(t *testing.T) {
-	workload := automationWorkload(v1alpha1.PhaseRunning)
-	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{
-		Action: v1alpha1.IdleActionPause,
-	}
-
-	engine := &stubForecaster{
-		phase:        forecast.DailyActive,
-		predictValue: 10.0,
-	}
-	idle := &stubIdleEvaluator{
-		eval: policy.IdleEvaluation{
-			Status:  policy.IdleStatusIdle,
-			IdleFor: 45 * time.Minute,
-		},
-	}
-	pauser := &stubPauser{pauseDone: true}
-	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
-	r := newAutomationReconciler(t, workload, engine, automationOpts{
-		idle:    idle,
-		pauser:  pauser,
-		metrics: metrics,
-	})
-
-	_, err := r.reconcileAutomation(context.Background(), workload)
-	require.NoError(t, err)
-	assert.Equal(t, 1, idle.evalCalls)
-	assert.Equal(t, 1, pauser.pauseCalls)
-
-	w := getWorkload(t, r, "api")
-	assert.Equal(t, v1alpha1.PhasePaused, w.Status.Phase)
-}
-
-func TestAutomation_ActiveIdleDestroys(t *testing.T) {
-	workload := automationWorkload(v1alpha1.PhaseRunning)
-	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{
-		Action: v1alpha1.IdleActionDestroy,
-	}
-
-	engine := &stubForecaster{
-		phase:        forecast.FullyActive,
-		predictValue: 10.0,
-	}
-	idle := &stubIdleEvaluator{
-		eval: policy.IdleEvaluation{
-			Status:  policy.IdleStatusIdle,
-			IdleFor: 45 * time.Minute,
-		},
-	}
-	destroyer := &stubDestroyer{destroyDone: true}
-	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
-	r := newAutomationReconciler(t, workload, engine, automationOpts{
-		idle:      idle,
-		destroyer: destroyer,
-		metrics:   metrics,
-	})
-
-	_, err := r.reconcileAutomation(context.Background(), workload)
-	require.NoError(t, err)
-	assert.Equal(t, 1, destroyer.destroyCalls)
-
-	w := getWorkload(t, r, "api")
-	assert.Equal(t, v1alpha1.PhaseDestroyed, w.Status.Phase)
-}
-
-func TestAutomation_ActiveNotIdleDoesNotAct(t *testing.T) {
-	workload := automationWorkload(v1alpha1.PhaseRunning)
-	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{
-		Action: v1alpha1.IdleActionPause,
-	}
-
-	engine := &stubForecaster{
-		phase:        forecast.DailyActive,
-		predictValue: 10.0,
-	}
-	idle := &stubIdleEvaluator{
-		eval: policy.IdleEvaluation{Status: policy.IdleStatusActive},
-	}
-	pauser := &stubPauser{}
-	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
-	r := newAutomationReconciler(t, workload, engine, automationOpts{
-		idle:    idle,
-		pauser:  pauser,
-		metrics: metrics,
-	})
-
-	result, err := r.reconcileAutomation(context.Background(), workload)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, 1*time.Minute, result.RequeueAfter)
-	assert.Equal(t, 0, pauser.pauseCalls)
-}
-
-func TestAutomation_ActiveIdleFlukePredictionDisagrees(t *testing.T) {
-	workload := automationWorkload(v1alpha1.PhaseRunning)
-	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{
-		Action: v1alpha1.IdleActionPause,
-	}
-
-	engine := &stubForecaster{
-		phase:        forecast.DailyActive,
-		predictValue: 500.0, // 50% of 1000m request — well above 10% idle threshold
-	}
-	idle := &stubIdleEvaluator{
-		eval: policy.IdleEvaluation{Status: policy.IdleStatusSignalsConfirm},
-	}
-	pauser := &stubPauser{}
-	metrics := &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 1 << 30}
-	r := newAutomationReconciler(t, workload, engine, automationOpts{
-		idle:    idle,
-		pauser:  pauser,
-		metrics: metrics,
-	})
-
-	result, err := r.reconcileAutomation(context.Background(), workload)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, 5*time.Minute, result.RequeueAfter)
-	assert.Equal(t, 1, idle.evalCalls)
-	assert.Equal(t, 0, pauser.pauseCalls)
 }
 
 func TestAutomation_FeedsEngineHourly(t *testing.T) {
@@ -412,12 +234,12 @@ func TestAutomation_FeedsEngineHourly(t *testing.T) {
 		needsFeed: true,
 	})
 
-	_, err := r.reconcileAutomation(context.Background(), workload)
+	_, err := r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, engine.observeCalls)
 
 	// Second call within the hour should not feed.
-	_, err = r.reconcileAutomation(context.Background(), workload)
+	_, err = r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, engine.observeCalls)
 }
@@ -455,12 +277,10 @@ func TestAutomation_PredictionStatusUpdated(t *testing.T) {
 	}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{})
 
-	_, err := r.reconcileAutomation(context.Background(), workload)
+	_, err := r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 
-	w := &v1alpha1.ManagedWorkload{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, w))
-
+	w := workload
 	require.NotNil(t, w.Status.Prediction)
 	assert.Equal(t, "Active", w.Status.Prediction.DailyPhase)
 	assert.Equal(t, "Suggesting", w.Status.Prediction.WeeklyPhase)
@@ -468,9 +288,10 @@ func TestAutomation_PredictionStatusUpdated(t *testing.T) {
 	assert.Equal(t, 72, w.Status.Prediction.WeeklyConfidence)
 }
 
-func metricsCondition(t *testing.T, r *Reconciler) *metav1.Condition {
-	t.Helper()
-	return meta.FindStatusCondition(getWorkload(t, r, "api").Status.Conditions, conditionMetricsAvailable)
+// metricsCondition reads the condition from the in-memory workload: the
+// automation step sets it, and the reconcile writes status once at the end.
+func metricsCondition(workload *v1alpha1.ManagedWorkload) *metav1.Condition {
+	return meta.FindStatusCondition(workload.Status.Conditions, conditionMetricsAvailable)
 }
 
 func TestAutomation_MissingMetricsSurfacesCondition(t *testing.T) {
@@ -493,14 +314,14 @@ func TestAutomation_MissingMetricsSurfacesCondition(t *testing.T) {
 			})
 
 			for range 2 {
-				result, err := r.reconcileAutomation(context.Background(), workload)
+				result, err := r.reconcileAutomation(context.Background(), workload, nil)
 				require.NoError(t, err)
 				require.NotNil(t, result)
 				assert.Equal(t, 1*time.Minute, result.RequeueAfter)
 			}
 
 			assert.Equal(t, 0, engine.observeCalls)
-			cond := metricsCondition(t, r)
+			cond := metricsCondition(workload)
 			require.NotNil(t, cond, "the user must be able to see why the forecast isn't learning")
 			assert.Equal(t, metav1.ConditionFalse, cond.Status)
 			assert.Equal(t, tt.wantReason, cond.Reason)
@@ -518,11 +339,11 @@ func TestAutomation_ZeroReplicasFeedsZeroDemand(t *testing.T) {
 	r := newAutomationReconciler(t, workload, engine, automationOpts{needsFeed: true})
 	r.metrics = &zeroReplicaMetrics{stubMetrics{err: fmt.Errorf("%w for default/api", opmetrics.ErrNoPodMetrics)}}
 
-	_, err := r.reconcileAutomation(context.Background(), workload)
+	_, err := r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, engine.observeCalls, "a target scaled to zero is an observation of zero demand")
-	cond := metricsCondition(t, r)
+	cond := metricsCondition(workload)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 }
@@ -533,16 +354,15 @@ func TestAutomation_MetricsConditionRecovers(t *testing.T) {
 	metrics := &stubMetrics{err: fmt.Errorf("%w for default/api", opmetrics.ErrNoPodMetrics), replicas: 2}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: metrics, needsFeed: true})
 
-	_, err := r.reconcileAutomation(context.Background(), workload)
+	_, err := r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
-	require.Equal(t, metav1.ConditionFalse, metricsCondition(t, r).Status)
+	require.Equal(t, metav1.ConditionFalse, metricsCondition(workload).Status)
 
 	metrics.err = nil
 	metrics.cpuMillis = 120
-	workload = getWorkload(t, r, "api")
-	_, err = r.reconcileAutomation(context.Background(), workload)
+	_, err = r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, engine.observeCalls)
-	assert.Equal(t, metav1.ConditionTrue, metricsCondition(t, r).Status)
+	assert.Equal(t, metav1.ConditionTrue, metricsCondition(workload).Status)
 }

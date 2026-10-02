@@ -16,34 +16,8 @@ limitations under the License.
 
 package signal
 
-import (
-	"context"
-	"fmt"
-)
-
-// Checker confirms whether a proposed action should proceed.
-// Used by both idle detection and scaling to build signal consensus.
-type Checker interface {
-	Check(ctx context.Context, namespace, name string) (Result, error)
-}
-
+// Result is the outcome of evaluating a signal.
 type Result struct {
 	Confirm bool
 	Reason  string
-}
-
-// CheckAll evaluates all signals and returns the first non-confirming result.
-// If all signals confirm, it returns a confirming result. This implements
-// the consensus model: every signal must agree before the caller acts.
-func CheckAll(ctx context.Context, namespace, name string, signals []Checker) (Result, error) {
-	for _, sig := range signals {
-		res, err := sig.Check(ctx, namespace, name)
-		if err != nil {
-			return Result{}, fmt.Errorf("checking signal for %s/%s: %w", namespace, name, err)
-		}
-		if !res.Confirm {
-			return Result{Confirm: false, Reason: fmt.Sprintf("signal denied: %s", res.Reason)}, nil
-		}
-	}
-	return Result{Confirm: true, Reason: "all signals confirm"}, nil
 }

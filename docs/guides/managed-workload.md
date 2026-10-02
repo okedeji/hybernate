@@ -35,13 +35,12 @@ spec:
 
   idlePolicy:
     action: pause
-    cpuIdleThreshold: 10
-    memoryIdleThreshold: 10
-    gracePeriod: "10m"
+    idleAfter: 1h
+    activity:
+      cpuThreshold: 10
+      prometheus:
+        - promQL: 'sum(rate(nginx_ingress_controller_requests{exported_service="my-api"}[5m]))'
     autoResume: true
-    signals:
-      - source: prometheus
-        promQL: 'rate(http_requests_total{service="my-api"}[10m]) == 0'
 
   pause:
     expireAfter: "24h"
@@ -87,16 +86,17 @@ Remove the field to return to automatic management.
 
 ### `idlePolicy`
 
-See [Idle Detection](../concepts/idle-detection.md) for how the detection pipeline works.
+See [Idle Detection](../concepts/idle-detection.md) for how the activity clock works.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `action` | `auto`, `pause`, `destroy` | `auto` | What to do when idle is confirmed |
-| `cpuIdleThreshold` | int (percent) | `10` | CPU utilization % of request below which workload is potentially idle (0-100) |
-| `memoryIdleThreshold` | int (percent) | `10` | Memory utilization % of request below which workload is potentially idle (0-100) |
-| `gracePeriod` | duration | _(none)_ | How long signals must continuously confirm before acting |
-| `autoResume` | bool | `false` | Auto-resume when signals clear |
-| `signals` | list of ProbeSpec | _(none)_ | Additional Prometheus checks |
+| `action` | `pause`, `destroy` | `pause` | What to do once the workload has been idle for `idleAfter` |
+| `idleAfter` | duration | `1h` | How long without any activity before acting |
+| `activity.cpuThreshold` | int (percent) | `10` | CPU utilization, as % of requests, above which the workload counts as active (0-100) |
+| `activity.prometheus[].promQL` | string | _(none)_ | PromQL query; a result above zero counts as activity. See the [Prometheus Activity Guide](prometheus-signals.md) |
+| `autoResume` | bool | `false` | Wake ahead of the demand a confident forecast predicts |
+
+Deploys and the `hybernate.io/last-activity` and `hybernate.io/active-until` annotations always count as activity; see [Idle Detection](../concepts/idle-detection.md#activity-annotations).
 
 ### `pause`
 

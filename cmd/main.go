@@ -78,7 +78,7 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "Metrics server key file name.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false, "Enable HTTP/2 for metrics and webhook servers.")
 	flag.StringVar(&prometheusURL, "prometheus-url", "",
-		"Base URL of the Prometheus API used for PromQL signals, e.g. http://prometheus.monitoring.svc:9090.")
+		"Base URL of the Prometheus API used for activity queries, e.g. http://prometheus.monitoring.svc:9090.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)

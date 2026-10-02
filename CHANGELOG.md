@@ -9,10 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Prometheus activity sources: `idlePolicy.activity.prometheus` queries count as activity when they return a value above zero, such as an ingress request rate. Configure the endpoint with `--prometheus-url` (Helm value `prometheus.url`); path-prefixed endpoints (Thanos, Mimir, reverse proxies) work as-is. If a query can't be evaluated, the `PrometheusAvailable` condition reports `EndpointNotConfigured` or `QueryFailed` and the workload isn't paused
+- `MetricsAvailable` reason `NoCPURequests`: idle detection doesn't act on a workload whose CPU utilization can't be measured
+- `hybernate_idle_seconds{namespace, workload}`: time since the workload's last activity
 - `hybernate_workload_phase{namespace, workload, phase}`: 1 for each workload's current phase, and a `HybernateWorkloadStuck` alert for workloads left in `Pausing`, `Resuming`, or `Destroying` for 15 minutes
+
+### Changed
+
+- **Breaking:** idle detection is an activity clock. Each ManagedWorkload records its last activity in `status.activity`, and the idle action runs once there has been none for `idlePolicy.idleAfter` (default 1h). CPU above `idlePolicy.activity.cpuThreshold`% of requests, a pod template change, and the `hybernate.io/last-activity` / `hybernate.io/active-until` annotations count as activity; any one keeps the workload awake. There is no learning period: the forecast no longer gates idle detection, and only defers a pause when it is confident demand is coming
+- **Breaking:** `idlePolicy.cpuIdleThreshold`, `memoryIdleThreshold`, `gracePeriod`, and `signals` are removed, along with the `auto` idle action (use `pause`). The WorkloadPolicy default idle policy is now `{action: pause, idleAfter: 1h, autoResume: true}`
+- A paused workload wakes when an activity annotation newer than the pause, or a future `active-until`, is set on the ManagedWorkload or its target
+- Drift detection only applies to paused workloads. Hybernate no longer owns the replica count of a running workload, so changes by its team or an autoscaler are not treated as drift; `conflictAction` now governs what happens when a paused workload is scaled up externally
+- Events are emitted through the `events.k8s.io/v1` API (`events.EventRecorder`) instead of the deprecated `record.EventRecorder`. Each event now carries an action (e.g. `Pause`, `EvaluateIdle`, `CheckDrift`). The operator's ClusterRole gains `create`/`patch` on `events.k8s.io` events; the Helm chart and kustomize RBAC include it
 
 ### Removed
 
+- `hybernate_idle_signal_result` and `hybernate_idle_fluke_total`, which described the grace-period model
 - **Breaking:** prediction-driven replica scaling. `spec.scalePolicy` (min/max replicas, `overrideReplicas`, stabilization, step limits, and scale-down guards), `status.scale`, the `Scaling` phase, the `WorkloadPolicy` default `scalePolicy`, and the `hybernate_scale_events_total`, `hybernate_scale_replicas`, and `hybernate_scale_guard_blocked_total` metrics are gone. Sizing a running workload is left to HPA or KEDA; Hybernate pauses and resumes. Existing `scalePolicy` fields are dropped the next time a ManagedWorkload is written
 - **Breaking:** the cluster-scoped `HybernateReport` CRD and its controller. Delete the CRD after upgrading (`kubectl delete crd hybernatereports.hybernate.io`). Per-workload cost stays in each ManagedWorkload's status
 - **Breaking:** the cluster-wide gauges the report controller published: `hybernate_workloads_total`, `hybernate_active_workloads`, `hybernate_paused_workloads`, `hybernate_destroyed_workloads`, `hybernate_cost_*`, and `hybernate_resource_reduction_*`. Operator metrics now cover health; cost is shown per workload
@@ -20,19 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** the Grafana dashboard (Helm value `grafana.enabled`, `config/grafana/`) and the never-populated `hybernate_discovery_estimated_savings_dollars` gauge
 - Alert rules for low prediction confidence, regime changes, frequent drift, slow discovery scans, dry-run activity, and empty discovery. The shipped rules are now reconcile errors, operator down, stuck workloads, missing targets, and PVC retention expiry
 
-### Changed
-
-- Drift detection only applies to paused workloads. Hybernate no longer owns the replica count of a running workload, so changes by its team or an autoscaler are not treated as drift; `conflictAction` now governs what happens when a paused workload is scaled up externally
-- Events are emitted through the `events.k8s.io/v1` API (`events.EventRecorder`) instead of the deprecated `record.EventRecorder`. Each event now carries an action (e.g. `Pause`, `EvaluateIdle`, `CheckDrift`). The operator's ClusterRole gains `create`/`patch` on `events.k8s.io` events; the Helm chart and kustomize RBAC include it
-
 ### Fixed
 
+- Cost is tracked for running workloads. Cost accumulation ran at the end of a reconcile that the automation step always returned from first, so `status.cost` was only ever updated for paused and destroyed workloads
+- ManagedWorkload status is no longer written on every check. Values that change continuously (cost totals and the activity clock's timestamps) are written at most every 5 minutes, and phase, condition, and lifecycle changes are written immediately; activity seen between writes is held in memory
 - `HybernatePVCRetentionExpiring` no longer fires permanently once PVCs are cleaned up or retention is cancelled; the gauge is set to 0 in both cases, which matched `< 86400`
 - Resuming a paused workload restores its previous replica count. Since 0.1.7 the controller created the pause status early to hold the resource snapshot, which made the pauser skip recording the replica count, so every resume came back with a single replica
 
-- Prometheus signals now work. The operator never received a Prometheus URL, and signal checkers were built without an HTTP client, so any workload with `idlePolicy.signals` or `scalePolicy.down.guard` panicked on evaluation. Configure the endpoint with the new `--prometheus-url` flag (Helm value `prometheus.url`); the documented `PROMETHEUS_ENDPOINT` environment variable was never read and is removed from the docs
-- Prometheus endpoints served under a path prefix (Thanos, Mimir, reverse proxies) no longer have their prefix replaced by `/api/v1/query`
-- Evaluating a Prometheus signal without a configured endpoint now fails with a clear `prometheus endpoint not configured` error
 - Two ManagedWorkloads targeting the same workload no longer block each other. The duplicate check OR'd the UID tie-breaker in unconditionally, so when the older CR had the larger UID both were marked `DuplicateTarget` and neither managed the target. The oldest CR now always wins, with UID breaking ties only for CRs created in the same second
 - A blocked duplicate now takes over when the owning ManagedWorkload is deleted. Previously it was never reconciled again, so it stayed blocked until something else touched it
 - The `DuplicateTarget` warning event fires once when the conflict is detected, not on every recheck

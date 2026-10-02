@@ -39,7 +39,7 @@ metrics:
     additionalLabels: {}
 
 prometheus:
-  url: "" # required only for PromQL signals, e.g. http://prometheus.monitoring.svc:9090
+  url: "" # required only for Prometheus activity queries, e.g. http://prometheus.monitoring.svc:9090
 
 networkPolicy:
   enabled: false
