@@ -82,6 +82,13 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
 
+		// The specs delete their namespaces without waiting, so their
+		// ManagedWorkloads can still hold the cleanup finalizer. Once the
+		// operator is gone nothing releases it, and deleting the CRD hangs.
+		By("deleting every ManagedWorkload while the operator can still release its finalizer")
+		cmd = exec.Command("kubectl", "delete", "managedworkloads", "--all", "--all-namespaces", "--timeout=2m")
+		_, _ = utils.Run(cmd)
+
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
