@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/cost"
 )
 
 const testNamespace = "test-ns"
@@ -104,7 +105,7 @@ func TestScanner_Scan_ClassifiesWorkloads(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
-	scanner := NewScanner(c)
+	scanner := NewScanner(c, c)
 
 	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
@@ -136,7 +137,7 @@ func TestScanner_Scan_SkipsIgnored(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
-	scanner := NewScanner(c)
+	scanner := NewScanner(c, c)
 
 	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
@@ -164,7 +165,7 @@ func TestScanner_Scan_DetectsManaged(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
-	scanner := NewScanner(c)
+	scanner := NewScanner(c, c)
 
 	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
@@ -175,7 +176,7 @@ func TestScanner_Scan_DetectsManaged(t *testing.T) {
 
 func TestScanner_Scan_EmptyNamespace(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
-	scanner := NewScanner(c)
+	scanner := NewScanner(c, c)
 
 	result, err := scanner.Scan(context.Background(), "empty-ns", []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, DefaultThresholds())
 	require.NoError(t, err)
@@ -200,7 +201,7 @@ func TestScanner_Scan_SortsBySavingsDescending(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
-	scanner := NewScanner(c)
+	scanner := NewScanner(c, c)
 
 	result, err := scanner.Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, th)
 	require.NoError(t, err)
@@ -222,7 +223,7 @@ func TestScanner_Scan_SortsByAmountNotString(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
-	result, err := NewScanner(c).Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, DefaultThresholds())
+	result, err := NewScanner(c, c).Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, DefaultThresholds())
 	require.NoError(t, err)
 	require.Len(t, result.Discovered, 2)
 
@@ -245,11 +246,57 @@ func TestScanner_Scan_CapKeepsHighestSavingsAndSummaryCountsAll(t *testing.T) {
 		makePodMetrics("biggest", ns, "1m", "1Mi"))
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objects...).Build()
-	result, err := NewScanner(c).Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, DefaultThresholds())
+	result, err := NewScanner(c, c).Scan(context.Background(), ns, []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, DefaultThresholds())
 	require.NoError(t, err)
 
 	require.Len(t, result.Discovered, maxDiscovered)
 	assert.Equal(t, "biggest", result.Discovered[0].Name, "the cap must keep the highest-savings workloads")
 	assert.Equal(t, maxDiscovered+1, result.Summary.Total, "summary counts every scanned workload, not just the capped list")
 	assert.Equal(t, maxDiscovered+1, result.Summary.Idle)
+}
+
+// A sidecar injected at pod creation isn't in the template, so its usage
+// would count against requests that don't include it.
+func TestScanner_Scan_IgnoresInjectedSidecars(t *testing.T) {
+	pm := makePodMetrics("meshed-app", testNamespace, "1m", "6Mi")
+	pm.Containers = append(pm.Containers, metricsv1beta1.ContainerMetrics{
+		Name:  "istio-proxy",
+		Usage: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("30m"), corev1.ResourceMemory: resource.MustParse("30Mi")},
+	})
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(
+		makeDeployment("meshed-app", testNamespace, 1, "100m", "128Mi", nil), pm).Build()
+
+	result, err := NewScanner(c, c).Scan(context.Background(), testNamespace,
+		[]v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, DefaultThresholds())
+	require.NoError(t, err)
+
+	require.Len(t, result.Discovered, 1)
+	assert.Equal(t, v1alpha1.ClassificationIdle, result.Discovered[0].Classification,
+		"1m of the app's 100m is idle; the proxy's 30m is not the app's")
+}
+
+// Pausing frees the whole pod, so savings are priced on a running pod's
+// requests, including a sidecar the template doesn't list.
+func TestScanner_Scan_PricesTheWholePod(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "meshed-app-1", Namespace: testNamespace, Labels: map[string]string{"app": "meshed-app"}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "main", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")}}},
+			{Name: "istio-proxy", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")}}},
+		}},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(
+		makeDeployment("meshed-app", testNamespace, 1, "100m", "128Mi", nil),
+		makePodMetrics("meshed-app", testNamespace, "1m", "6Mi"), pod).Build()
+
+	result, err := NewScanner(c, c).Scan(context.Background(), testNamespace,
+		[]v1alpha1.TargetKind{v1alpha1.TargetKindDeployment}, DefaultThresholds())
+	require.NoError(t, err)
+
+	require.Len(t, result.Discovered, 1)
+	wholePod := WorkloadInfo{Replicas: 1, PodCPURequestMillis: 200, PodMemoryRequestBytes: 256 << 20}
+	assert.Equal(t, cost.FormatDollars(EstimateSavings(wholePod, v1alpha1.ClassificationIdle, DefaultThresholds())),
+		result.Discovered[0].EstimatedPotentialSavings, "the proxy's 100m and 128Mi are freed too")
 }

@@ -29,6 +29,8 @@ Changes to the replica count don't count as a deploy, so Hybernate's own pause a
 
 Memory isn't a source: it stays allocated whether or not anyone uses the workload.
 
+CPU is measured for the containers in the target's pod template, including native sidecars (init containers with `restartPolicy: Always`). Sidecars injected when the pod is created, such as an Istio or Linkerd proxy, aren't counted: their own background work isn't use of the workload, and they aren't in the template's requests. [Cost](cost-tracking.md) does count them, since they cost the same as any container and pausing frees them too.
+
 ### Activity annotations
 
 Set either annotation on the ManagedWorkload or on its target Deployment or StatefulSet. Values are RFC 3339 times.

@@ -203,17 +203,11 @@ func (r *Reconciler) captureResourceSnapshot(ctx context.Context, workload *v1al
 		snap.Replicas = replicas
 	}
 
-	cpuMillis, err := r.metrics.CPURequestPerReplica(ctx, workload)
+	cpuMillis, memBytes, err := r.metrics.PodRequestsPerReplica(ctx, workload)
 	if err != nil {
-		logger.V(1).Info("could not capture cpu for resource snapshot", "error", err)
+		logger.V(1).Info("could not capture requests for resource snapshot", "error", err)
 	} else {
 		snap.CPUMillis = int64(cpuMillis)
-	}
-
-	memBytes, err := r.metrics.MemoryRequestPerReplica(ctx, workload)
-	if err != nil {
-		logger.V(1).Info("could not capture memory for resource snapshot", "error", err)
-	} else {
 		snap.MemoryBytes = int64(memBytes)
 	}
 

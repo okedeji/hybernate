@@ -150,10 +150,12 @@ func TestEstimateMonthlyCost(t *testing.T) {
 	rates := cost.DefaultRates
 
 	w := WorkloadInfo{
-		CPURequestMillis:   1000,     // 1 core
-		MemoryRequestBytes: 1 << 30,  // 1 GiB
-		StorageBytes:       10 << 30, // 10 GiB
-		Replicas:           2,
+		CPURequestMillis:      100,  // the app's own request
+		PodCPURequestMillis:   1000, // 1 core, sidecars included
+		MemoryRequestBytes:    128 << 20,
+		PodMemoryRequestBytes: 1 << 30,  // 1 GiB
+		StorageBytes:          10 << 30, // 10 GiB
+		Replicas:              2,
 	}
 
 	got := EstimateMonthlyCost(w, rates)
@@ -167,15 +169,17 @@ func TestEstimateSavings_Idle(t *testing.T) {
 	th := DefaultThresholds()
 
 	w := WorkloadInfo{
-		CPURequestMillis:   1000,
-		MemoryRequestBytes: 1 << 30,
-		StorageBytes:       10 << 30,
-		Replicas:           2,
+		CPURequestMillis:      100,
+		PodCPURequestMillis:   1000,
+		MemoryRequestBytes:    128 << 20,
+		PodMemoryRequestBytes: 1 << 30,
+		StorageBytes:          10 << 30,
+		Replicas:              2,
 	}
 
 	got := EstimateSavings(w, v1alpha1.ClassificationIdle, th)
 
-	// Idle saves full compute, not storage.
+	// Idle saves the whole pod's compute, sidecars included, not storage.
 	expected := 2*0.031*730 + 2*0.004*730
 	assert.InDelta(t, expected, got, 0.01)
 }

@@ -39,18 +39,22 @@ func DefaultThresholds() Thresholds {
 	}
 }
 
-// WorkloadInfo captures the resource profile of a single workload for classification.
+// WorkloadInfo captures the resource profile of a single workload. Usage and
+// requests cover the workload's own containers, for classification; the pod
+// requests also cover sidecars injected at creation, for pricing.
 type WorkloadInfo struct {
-	Name               string
-	Kind               v1alpha1.TargetKind
-	Replicas           int32
-	CPUUsageMillis     int64
-	CPURequestMillis   int64
-	MemoryUsageBytes   int64
-	MemoryRequestBytes int64
-	StorageBytes       int64
-	Managed            bool
-	Ignored            bool
+	Name                  string
+	Kind                  v1alpha1.TargetKind
+	Replicas              int32
+	CPUUsageMillis        int64
+	CPURequestMillis      int64
+	MemoryUsageBytes      int64
+	MemoryRequestBytes    int64
+	PodCPURequestMillis   int64
+	PodMemoryRequestBytes int64
+	StorageBytes          int64
+	Managed               bool
+	Ignored               bool
 }
 
 // Classify determines whether a workload is Active or Idle. Idle requires
@@ -86,8 +90,8 @@ func UtilizationPercent(usageMillis, requestMillis int64) int {
 // EstimateMonthlyCost estimates the monthly cost based on current resource requests.
 func EstimateMonthlyCost(w WorkloadInfo, rates cost.Rates) float64 {
 	r := float64(w.Replicas)
-	cpuCores := float64(w.CPURequestMillis) / 1000 * r
-	memGiB := float64(w.MemoryRequestBytes) / (1 << 30) * r
+	cpuCores := float64(w.PodCPURequestMillis) / 1000 * r
+	memGiB := float64(w.PodMemoryRequestBytes) / (1 << 30) * r
 	storageGiB := float64(w.StorageBytes) / (1 << 30)
 
 	return cpuCores*rates.CPUPerHour*hoursPerMonth +
@@ -102,8 +106,8 @@ func EstimateSavings(w WorkloadInfo, class v1alpha1.Classification, t Thresholds
 		return 0
 	}
 	r := float64(w.Replicas)
-	cpuCores := float64(w.CPURequestMillis) / 1000 * r
-	memGiB := float64(w.MemoryRequestBytes) / (1 << 30) * r
+	cpuCores := float64(w.PodCPURequestMillis) / 1000 * r
+	memGiB := float64(w.PodMemoryRequestBytes) / (1 << 30) * r
 	return cpuCores*t.Rates.CPUPerHour*hoursPerMonth +
 		memGiB*t.Rates.MemoryPerHour*hoursPerMonth
 }

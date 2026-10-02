@@ -29,6 +29,7 @@ import (
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
+	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 const maxDiscovered = 500
@@ -36,11 +37,13 @@ const maxDiscovered = 500
 // Scanner lists workloads in a namespace and classifies them.
 type Scanner struct {
 	client client.Client
+	pods   client.Reader
 }
 
-// NewScanner creates a Scanner backed by the given client.
-func NewScanner(c client.Client) *Scanner {
-	return &Scanner{client: c}
+// NewScanner creates a Scanner backed by the given client, reading pods
+// through pods so they needn't be cached.
+func NewScanner(c client.Client, pods client.Reader) *Scanner {
+	return &Scanner{client: c, pods: pods}
 }
 
 // ScanResult holds the output of a namespace scan.
@@ -149,7 +152,7 @@ func (s *Scanner) buildInfo(ctx context.Context, namespace string, kind v1alpha1
 		Ignored: obj.GetLabels()[v1alpha1.LabelIgnore] == "true",
 	}
 
-	replicas, containers, matchLabels := workloadFields(obj)
+	replicas, spec, matchLabels := workloadFields(obj)
 
 	if replicas != nil {
 		info.Replicas = *replicas
@@ -157,18 +160,13 @@ func (s *Scanner) buildInfo(ctx context.Context, namespace string, kind v1alpha1
 		info.Replicas = 1
 	}
 
-	for _, c := range containers {
-		if cpu := c.Resources.Requests.Cpu(); cpu != nil {
-			info.CPURequestMillis += cpu.MilliValue()
-		}
-		if mem := c.Resources.Requests.Memory(); mem != nil {
-			info.MemoryRequestBytes += mem.Value()
-		}
-	}
+	info.CPURequestMillis, info.MemoryRequestBytes = metrics.Requests(metrics.WorkloadContainers(spec))
+	info.PodCPURequestMillis, info.PodMemoryRequestBytes = info.CPURequestMillis, info.MemoryRequestBytes
 
 	if len(matchLabels) > 0 {
 		sel := labels.SelectorFromSet(matchLabels)
-		info.CPUUsageMillis, info.MemoryUsageBytes = s.podMetrics(ctx, namespace, sel)
+		info.CPUUsageMillis, info.MemoryUsageBytes = s.podMetrics(ctx, namespace, sel, spec)
+		info.PodCPURequestMillis, info.PodMemoryRequestBytes = s.podRequests(ctx, namespace, sel, spec)
 		info.StorageBytes = s.pvcBytes(ctx, namespace, sel)
 	}
 
@@ -190,18 +188,22 @@ func (s *Scanner) managedTargets(ctx context.Context, namespace string) (map[str
 	return m, nil
 }
 
-func (s *Scanner) podMetrics(ctx context.Context, namespace string, sel labels.Selector) (cpuMillis, memBytes int64) {
+func (s *Scanner) podMetrics(ctx context.Context, namespace string, sel labels.Selector, spec corev1.PodSpec) (cpuMillis, memBytes int64) {
 	var podMetrics metricsv1beta1.PodMetricsList
 	if err := s.client.List(ctx, &podMetrics, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
 		return 0, 0
 	}
-	for _, pm := range podMetrics.Items {
-		for _, c := range pm.Containers {
-			cpuMillis += c.Usage.Cpu().MilliValue()
-			memBytes += c.Usage.Memory().Value()
-		}
+	return metrics.Usage(podMetrics.Items, spec)
+}
+
+// podRequests returns what one of the workload's pods requests. A pod that
+// can't be listed is priced from the template.
+func (s *Scanner) podRequests(ctx context.Context, namespace string, sel labels.Selector, spec corev1.PodSpec) (cpuMillis, memBytes int64) {
+	var pods corev1.PodList
+	if err := s.pods.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+		return metrics.Requests(metrics.WorkloadContainers(spec))
 	}
-	return cpuMillis, memBytes
+	return metrics.PodRequests(pods.Items, spec)
 }
 
 func (s *Scanner) pvcBytes(ctx context.Context, namespace string, sel labels.Selector) int64 {
@@ -219,17 +221,17 @@ func (s *Scanner) pvcBytes(ctx context.Context, namespace string, sel labels.Sel
 }
 
 // workloadFields extracts the common fields from a Deployment or StatefulSet.
-func workloadFields(obj client.Object) (replicas *int32, containers []corev1.Container, matchLabels map[string]string) {
+func workloadFields(obj client.Object) (replicas *int32, spec corev1.PodSpec, matchLabels map[string]string) {
 	switch t := obj.(type) {
 	case *appsv1.Deployment:
 		replicas = t.Spec.Replicas
-		containers = t.Spec.Template.Spec.Containers
+		spec = t.Spec.Template.Spec
 		if t.Spec.Selector != nil {
 			matchLabels = t.Spec.Selector.MatchLabels
 		}
 	case *appsv1.StatefulSet:
 		replicas = t.Spec.Replicas
-		containers = t.Spec.Template.Spec.Containers
+		spec = t.Spec.Template.Spec
 		if t.Spec.Selector != nil {
 			matchLabels = t.Spec.Selector.MatchLabels
 		}

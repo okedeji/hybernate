@@ -117,6 +117,18 @@ func TestActivityClock_PausesAfterIdleAfter(t *testing.T) {
 	assert.Equal(t, v1alpha1.PhasePaused, workload.Status.Phase)
 }
 
+// A mesh proxy's background work is the proxy's, not use of the workload.
+func TestActivityClock_SidecarCPUIsNotActivity(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	metrics := idleCPU
+	metrics.sidecarCPUMillis = 400
+
+	pauser := runClock(t, workload, target, clockOpts{metrics: metrics})
+
+	assert.Equal(t, 1, pauser.pauseCalls)
+}
+
 func TestActivityClock_DestroyAction(t *testing.T) {
 	target := clockTarget("app:v1", nil)
 	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
