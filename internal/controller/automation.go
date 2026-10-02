@@ -118,13 +118,15 @@ func (reg *engineRegistry) markFed(key string, now time.Time) {
 
 func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	phase := workload.Status.Phase
-
-	if phase == v1alpha1.PhasePaused {
-		return r.reconcileWake(ctx, workload, target)
+	if phase != v1alpha1.PhasePaused && phase != v1alpha1.PhaseRunning && phase != v1alpha1.PhaseIdle {
+		return nil, nil
 	}
 
-	if phase != v1alpha1.PhaseRunning && phase != v1alpha1.PhaseIdle {
-		return nil, nil
+	if err := r.checkDependenciesExist(ctx, workload); err != nil {
+		return nil, err
+	}
+	if phase == v1alpha1.PhasePaused {
+		return r.reconcileWake(ctx, workload, target)
 	}
 
 	logger := log.FromContext(ctx)

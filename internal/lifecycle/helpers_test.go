@@ -31,14 +31,15 @@ import (
 )
 
 type fakeScaler struct {
-	replicas      int32
-	readyReplicas int32
+	replicas int32
+	// existingReplicas is the scale status: pods that exist, ready or not.
+	existingReplicas int32
 }
 
 func (f *fakeScaler) GetScale(_ context.Context, _ client.Object) (*autoscalingv1.Scale, error) {
 	return &autoscalingv1.Scale{
 		Spec:   autoscalingv1.ScaleSpec{Replicas: f.replicas},
-		Status: autoscalingv1.ScaleStatus{Replicas: f.readyReplicas},
+		Status: autoscalingv1.ScaleStatus{Replicas: f.existingReplicas},
 	}, nil
 }
 

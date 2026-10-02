@@ -79,6 +79,13 @@ type ManagedWorkloadSpec struct {
 	// +optional
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
+	// DependsOn lists the workloads this one needs, such as a database or a
+	// message broker. A dependency isn't paused while anything that depends
+	// on it is awake, and waking this workload wakes its dependencies.
+	// +listType=atomic
+	// +optional
+	DependsOn []DependencyRef `json:"dependsOn,omitempty"`
+
 	// Pause configures behavior while the workload is paused, including
 	// automatic expiry and what action to take when the pause expires.
 	// +optional
@@ -121,6 +128,26 @@ const (
 	TargetKindDeployment  TargetKind = "Deployment"
 	TargetKindStatefulSet TargetKind = "StatefulSet"
 )
+
+// DependencyRef names a workload this one needs. It refers to the
+// dependency's Deployment or StatefulSet, not to its ManagedWorkload.
+type DependencyRef struct {
+	// Namespace of the dependency. Defaults to the ManagedWorkload's own.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	Kind TargetKind `json:"kind"`
+
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// WaitForReady holds this workload's resume, without scaling it, until
+	// the dependency's pods are Ready. Use it when this workload fails if it
+	// starts before the dependency can serve, e.g. a database replaying its
+	// write-ahead log. By default dependencies wake at the same time.
+	// +optional
+	WaitForReady bool `json:"waitForReady,omitempty"`
+}
 
 // WorkloadRef identifies the target workload by kind and name.
 // The workload must exist in the same namespace as the ManagedWorkload CR.

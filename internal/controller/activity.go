@@ -354,6 +354,10 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 	}
 
+	if held, err := r.dependencyHold(ctx, workload); held != nil || err != nil {
+		return held, err
+	}
+
 	action := resolveIdleAction(workload)
 	idleFor := now.Sub(workload.Status.Activity.LastActivityTime.Time).Round(time.Minute)
 

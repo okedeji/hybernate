@@ -99,7 +99,7 @@ func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload)
 		return false, fmt.Errorf("scaling to %d: %w", replicas, err)
 	}
 
-	ready, err := checkReady(ctx, p.scaler, target, replicas)
+	ready, err := checkReady(ctx, p.client, target, replicas)
 	if err != nil {
 		return false, fmt.Errorf("checking readiness: %w", err)
 	}

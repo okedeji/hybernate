@@ -18,6 +18,11 @@
 | `idlePolicy.activity.cpuThreshold` | int | No | `10` | CPU utilization % of requests above which the workload is active (0-100) |
 | `idlePolicy.activity.prometheus[].promQL` | string | Yes (per entry) | | PromQL query; a result above zero is activity |
 | `idlePolicy.autoResume` | bool | No | `false` | Wake ahead of confident forecast demand |
+| `dependsOn[]` | `DependencyRef` | No | | Workloads this one needs |
+| `dependsOn[].namespace` | string | No | this namespace | Namespace of the dependency |
+| `dependsOn[].kind` | `Deployment` \| `StatefulSet` | Yes | | Kind of the dependency |
+| `dependsOn[].name` | string | Yes | | Name of the dependency's workload |
+| `dependsOn[].waitForReady` | bool | No | `false` | Hold this workload's resume until the dependency is Ready |
 | `pause` | `PauseSpec` | No | | Pause behavior |
 | `pause.expireAfter` | duration | No | | Max pause duration |
 | `pause.expireAction` | `resume` \| `destroy` | No | `destroy` | Action on expiry |

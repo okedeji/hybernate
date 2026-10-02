@@ -67,6 +67,7 @@ nav:
       - Lifecycle: concepts/lifecycle.md
       - Forecasting: concepts/forecasting.md
       - Idle Detection: concepts/idle-detection.md
+      - Dependencies: concepts/dependencies.md
       - Cost Tracking: concepts/cost-tracking.md
   - Guides:
       - ManagedWorkload: guides/managed-workload.md

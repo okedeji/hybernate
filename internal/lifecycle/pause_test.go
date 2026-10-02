@@ -123,6 +123,7 @@ func TestResume_ScalesBackUp(t *testing.T) {
 				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "app:latest"}}},
 			},
 		},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: 3},
 	}
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
@@ -135,7 +136,7 @@ func TestResume_ScalesBackUp(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dep).Build()
-	scaler := &fakeScaler{replicas: 0, readyReplicas: 3}
+	scaler := &fakeScaler{replicas: 0, existingReplicas: 3}
 	p := newTestPauser(c, scaler)
 
 	done, err := p.Resume(context.Background(), workload)
@@ -145,7 +146,9 @@ func TestResume_ScalesBackUp(t *testing.T) {
 	assert.Equal(t, int32(3), scaler.replicas)
 }
 
-func TestResume_NotReadyRequeues(t *testing.T) {
+// Pods that exist but aren't Ready, such as a database replaying its log,
+// mean the resume isn't done yet.
+func TestResume_WaitsForReadyNotJustExisting(t *testing.T) {
 	scheme := testScheme(t)
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
@@ -169,7 +172,7 @@ func TestResume_NotReadyRequeues(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dep).Build()
-	scaler := &fakeScaler{replicas: 0, readyReplicas: 0}
+	scaler := &fakeScaler{replicas: 0, existingReplicas: 3}
 	p := newTestPauser(c, scaler)
 
 	done, err := p.Resume(context.Background(), workload)

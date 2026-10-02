@@ -169,6 +169,25 @@ spec:
                         maximum: 100
                         minimum: 0
                         type: integer
+                      prometheus:
+                        description: |-
+                          Prometheus queries that measure activity, such as an ingress request
+                          rate. A result above zero counts as activity; an empty result or zero
+                          doesn't. Requires the operator's --prometheus-url.
+                        items:
+                          description: PrometheusActivity is a PromQL instant query
+                            used as an activity source.
+                          properties:
+                            promQL:
+                              description: |-
+                                PromQL is the query. Example:
+                                sum(rate(nginx_ingress_controller_requests{exported_service="api"}[5m]))
+                              minLength: 1
+                              type: string
+                          required:
+                          - promQL
+                          type: object
+                        type: array
                     type: object
                   autoResume:
                     description: |-

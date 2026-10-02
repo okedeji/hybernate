@@ -983,14 +983,14 @@ func TestReconcile_DuplicateRequeuesAndWarnsOnce(t *testing.T) {
 	assert.Len(t, recorder.Events, 1, "duplicate warning should only fire when first detected")
 }
 
-func TestFindWorkloadsSharingTarget(t *testing.T) {
+func TestFindRelatedWorkloads_SharingTarget(t *testing.T) {
 	owner := sharedTargetWorkload("older", "aaa", fixedTime.Add(-1*time.Hour))
 	duplicate := sharedTargetWorkload("newer", "bbb", fixedTime)
 	unrelated := sharedTargetWorkload("other", "ccc", fixedTime)
 	unrelated.Spec.Target.Name = "other-app"
 	r, _ := newSharedTargetReconciler(t, owner, duplicate, unrelated)
 
-	requests := r.findWorkloadsSharingTarget(context.Background(), owner)
+	requests := r.findRelatedWorkloads(context.Background(), owner)
 
 	assert.Equal(t, []reconcile.Request{reconcileFor("newer")}, requests)
 }
