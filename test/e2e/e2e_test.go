@@ -589,7 +589,11 @@ spec:
 			waitForDoorman()
 
 			By("sending a request to the paused app's Service")
-			body := curlInCluster("curl-wake", wakeNamespace, fmt.Sprintf("http://%s/hostname", webName))
+			// kube-proxy programs the doorman's endpoints a moment after the
+			// pause, and until then the Service has none and refuses. curl
+			// retries only that, never a connection the doorman holds.
+			body := curlInCluster("curl-wake", wakeNamespace, fmt.Sprintf("http://%s/hostname", webName),
+				"--retry", "10", "--retry-delay", "1", "--retry-connrefused")
 			Expect(body).To(HavePrefix(webName+"-"), "the held request is answered by the woken pod")
 
 			expectAwake()
@@ -603,7 +607,7 @@ spec:
 			// the pause it still sends to the deleted pod and answers 502. curl
 			// retries only those errors, never a connection the doorman holds.
 			body := curlInCluster("curl-wake-ingress", wakeNamespace, ingressURL, "-H", "Host: "+webHost,
-				"--retry", "10", "--retry-delay", "1")
+				"--retry", "10", "--retry-delay", "1", "--retry-connrefused")
 			Expect(body).To(HavePrefix(webName+"-"), "ingress-nginx passes the held request to the woken pod")
 
 			expectAwake()

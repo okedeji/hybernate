@@ -89,6 +89,7 @@ Callers reach the doorman on ports 20000-29999, so a default-deny policy on the 
 
 - **A pod in the cluster or an Ingress**: one slow response while the workload starts, then a normal one.
 - **The client's source IP**: the woken pod sees the doorman's IP for held connections, not the caller's. Only the connections that arrive while the workload is paused or waking go through the doorman.
+- **Right after the pause**: for a second or two, until kube-proxy and ingress controllers pick up the doorman's EndpointSlice, a request can be refused or get a 502 from an ingress, as after any scale-down. A retry is held.
 - **A connection held past `maxWait`**: it's closed with no response, which most clients report as an empty reply or a connection reset. A `RequestNotServed` warning event on the ManagedWorkload names the Service and how long the request waited; while the wake is slow, it's emitted at most once a minute.
 
 Track wakes with `hybernate_doorman_wakes_total` and `hybernate_doorman_wait_seconds`; see [Metrics](../reference/metrics.md#doorman). The `HybernateDoormanWakesFailing` alert fires when held connections keep timing out or failing for a workload.
