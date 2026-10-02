@@ -95,6 +95,7 @@ status:
 
 A paused workload wakes when:
 
+- A request reaches one of its Services. The request is held while the workload starts, then answered; see [Wake on Request](wake-on-request.md).
 - A `hybernate.io/last-activity` annotation is set to a time after the pause, or an `active-until` hold is in the future. This is how a "start environment" button in a sandbox UI works.
 - `autoResume: true` is set and a confident forecast predicts demand above `cpuThreshold` for the current hour, so the workload is ready before people arrive.
 - `pause.expireAfter` elapses with `expireAction: resume`, or `desiredState` is set to `Running`.

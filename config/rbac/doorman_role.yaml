@@ -1,0 +1,19 @@
+# The doorman reads its routes from ManagedWorkload status, reads the woken
+# workload's endpoints, and wakes it by patching an annotation. Nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+  name: doorman-role
+rules:
+- apiGroups: [hybernate.io]
+  resources: [managedworkloads]
+  verbs: [get, list, watch, patch]
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [get, list, watch]
+- apiGroups: ["", events.k8s.io]
+  resources: [events]
+  verbs: [create, patch]

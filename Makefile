@@ -83,7 +83,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
 
-E2E_IMAGES ?= curlimages/curl:8.7.1 registry.k8s.io/pause:3.10 registry.k8s.io/metrics-server/metrics-server:v0.7.2
+E2E_IMAGES ?= curlimages/curl:8.7.1 registry.k8s.io/pause:3.10 registry.k8s.io/metrics-server/metrics-server:v0.7.2 registry.k8s.io/e2e-test-images/agnhost:2.52
 E2E_PLATFORM ?= linux/$(shell go env GOARCH)
 
 # Streams each image into the Kind node's containerd for one platform only.

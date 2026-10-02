@@ -18,6 +18,9 @@ These flags are passed to the operator binary (`manager`).
 | `--webhook-cert-key` | `tls.key` | Webhook key file name |
 | `--enable-http2` | `false` | Allow HTTP/2 for metrics and webhook servers |
 | `--prometheus-url` | | Base URL of the Prometheus API for Prometheus activity queries (e.g., `http://prometheus.monitoring.svc.cluster.local:9090`). Required only if workloads set `idlePolicy.activity.prometheus`. |
+| `--doorman` | `false` | Run as the doorman instead of the operator. The doorman Deployment sets it |
+| `--doorman-service` | `hybernate-doorman` | Name of the doorman's Service, which the operator routes paused workloads to. Empty disables waking on request |
+| `--doorman-namespace` | the pod's namespace | Namespace of the doorman's Service |
 | `--zap-devel` | `true` | Development mode logging (human-readable) |
 | `--zap-log-level` | `info` | Log level (`debug`, `info`, `error`) |
 | `--zap-encoder` | `console` | Log format (`console` or `json`) |
@@ -55,6 +58,8 @@ For HA deployments with multiple replicas, enable leader election:
 ```
 
 The leader election ID is `479a98fc.hybernate.io`. Only the leader runs reconciliation loops; standby replicas take over if the leader fails.
+
+The doorman doesn't use leader election: every replica serves traffic.
 
 ## TLS Configuration
 

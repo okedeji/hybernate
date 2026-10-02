@@ -23,6 +23,9 @@
 | `dependsOn[].kind` | `Deployment` \| `StatefulSet` | Yes | | Kind of the dependency |
 | `dependsOn[].name` | string | Yes | | Name of the dependency's workload |
 | `dependsOn[].waitForReady` | bool | No | `false` | Hold this workload's resume until the dependency is Ready |
+| `wake` | `WakeSpec` | No | | Waking on request while paused |
+| `wake.onRequest` | bool | No | `true` | Route the workload's Services to the doorman while paused |
+| `wake.maxWait` | duration | No | `2m` | How long a request is held while the workload wakes |
 | `pause` | `PauseSpec` | No | | Pause behavior |
 | `pause.expireAfter` | duration | No | | Max pause duration |
 | `pause.expireAction` | `resume` \| `destroy` | No | `destroy` | Action on expiry |
@@ -56,6 +59,10 @@
 | `activity.pauseAt` | time | When the idle action runs if no further activity is seen |
 | `activity.lastEvaluatedTime` | time | When activity was last checked |
 | `activity.templateHash` | string | Fingerprint of the target's pod template, used to detect deploys |
+| `doorman[]` | `DoormanRoute` | Service ports routed to the doorman while paused |
+| `doorman[].service` | string | Service name |
+| `doorman[].portName` | string | Service port name |
+| `doorman[].doormanPort` | int32 | Doorman port standing in for it |
 | `pause.previousReplicas` | int32 | Replicas before pause |
 | `pause.pausedAt` | time | When paused |
 | `pause.resources` | `ResourceSnapshot` | Resource profile at pause |

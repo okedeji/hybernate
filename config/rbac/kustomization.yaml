@@ -5,6 +5,9 @@ resources:
 # runtime. Be sure to update RoleBinding and ClusterRoleBinding
 # subjects if changing service account names.
 - service_account.yaml
+- doorman_service_account.yaml
+- doorman_role.yaml
+- doorman_role_binding.yaml
 - role.yaml
 - role_binding.yaml
 - leader_election_role.yaml

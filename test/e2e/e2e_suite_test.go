@@ -37,6 +37,11 @@ var (
 	// pauseImage runs the Deployment the lifecycle test manages. The Makefile
 	// preloads it into kind so the test doesn't depend on a registry pull.
 	pauseImage = "registry.k8s.io/pause:3.10"
+	// webImage serves HTTP for the wake-on-request spec; also preloaded.
+	webImage = "registry.k8s.io/e2e-test-images/agnhost:2.52"
+	// ingressNginxManifest is the project's final release; it's archived, but
+	// still widely run, so wake on request is tested through it.
+	ingressNginxManifest = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/baremetal/deploy.yaml"
 	// metricsServerManifest is pinned so the idle clock spec doesn't change
 	// under the suite; its image is preloaded by the Makefile.
 	metricsServerManifest = "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml"

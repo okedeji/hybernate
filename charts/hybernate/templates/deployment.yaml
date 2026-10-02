@@ -47,6 +47,12 @@ spec:
             {{- with .Values.prometheus.url }}
             - --prometheus-url={{ . }}
             {{- end }}
+            - --doorman-service={{ if .Values.doorman.enabled }}{{ include "hybernate.doormanName" . }}{{ end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             {{- if .Values.metrics.enabled }}
             - name: metrics

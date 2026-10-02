@@ -86,6 +86,11 @@ type ManagedWorkloadSpec struct {
 	// +optional
 	DependsOn []DependencyRef `json:"dependsOn,omitempty"`
 
+	// Wake configures waking the workload when a request reaches it while
+	// it's paused.
+	// +optional
+	Wake *WakeSpec `json:"wake,omitempty"`
+
 	// Pause configures behavior while the workload is paused, including
 	// automatic expiry and what action to take when the pause expires.
 	// +optional
@@ -128,6 +133,24 @@ const (
 	TargetKindDeployment  TargetKind = "Deployment"
 	TargetKindStatefulSet TargetKind = "StatefulSet"
 )
+
+// WakeSpec configures waking on request. While the workload is paused, its
+// Services route to the doorman, which holds each connection, wakes the
+// workload, and passes the connection through once it's Ready.
+type WakeSpec struct {
+	// OnRequest routes the workload's Services to the doorman while it's
+	// paused. When false, requests to a paused workload fail.
+	// +kubebuilder:default=true
+	// +optional
+	OnRequest *bool `json:"onRequest,omitempty"`
+
+	// MaxWait is how long the doorman holds a connection while the workload
+	// wakes. After it, the connection is closed; the wake carries on.
+	// +kubebuilder:default="2m"
+	// +kubebuilder:validation:Format=duration
+	// +optional
+	MaxWait *metav1.Duration `json:"maxWait,omitempty"`
+}
 
 // DependencyRef names a workload this one needs. It refers to the
 // dependency's Deployment or StatefulSet, not to its ManagedWorkload.
@@ -348,6 +371,12 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	Cost *CostStatus `json:"cost,omitempty"`
 
+	// Doorman lists the doorman ports routing this workload's Services while
+	// it's paused. Empty while it's awake.
+	// +listType=atomic
+	// +optional
+	Doorman []DoormanRoute `json:"doorman,omitempty"`
+
 	// Activity tracks when the workload was last active, for idle detection.
 	// +optional
 	Activity *ActivityStatus `json:"activity,omitempty"`
@@ -360,6 +389,20 @@ type ManagedWorkloadStatus struct {
 	// LastTransitionTime is when the workload last changed phases.
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+}
+
+// DoormanRoute maps one Service port to the doorman port that stands in for
+// it while the workload is paused.
+type DoormanRoute struct {
+	// Service is the name of the Service in the workload's namespace.
+	Service string `json:"service"`
+
+	// PortName is the Service port's name; empty for an unnamed single port.
+	// +optional
+	PortName string `json:"portName,omitempty"`
+
+	// DoormanPort is the doorman's listening port for this Service port.
+	DoormanPort int32 `json:"doormanPort"`
 }
 
 // +kubebuilder:validation:Enum=created;woke;cpu;rollout;annotation;prometheus;unobserved

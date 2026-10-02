@@ -159,6 +159,7 @@ Hybernate will now:
 - Record activity: CPU above the threshold, deploys, and activity annotations
 - Pause the workload once there has been no activity for `idleAfter`
 - Hold off if a confident forecast expects demand within the hour
+- Wake it when a request reaches its Service, holding the request until it's Ready
 - Wake it when an activity annotation is set, or ahead of forecast demand with `autoResume`
 
 ## What's Next?

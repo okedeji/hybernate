@@ -116,6 +116,16 @@ var _ = Describe("Manager", Ordered, func() {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
 			}
 
+			By("Fetching doorman pod logs")
+			cmd = exec.Command("kubectl", "logs", "-l", "control-plane=doorman", "-n", namespace,
+				"--prefix", "--tail=200")
+			doormanLogs, err := utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Doorman logs:\n %s", doormanLogs)
+			} else {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get doorman logs: %s", err)
+			}
+
 			By("Fetching Kubernetes events")
 			cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
 			eventsOutput, err := utils.Run(cmd)
@@ -476,6 +486,127 @@ spec:
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 		})
 	})
+
+	// Runs after "Idle clock", which installs metrics-server.
+	Context("Wake on request", func() {
+		const (
+			wakeNamespace = "hybernate-e2e-wake"
+			webName       = "e2e-web"
+			webHost       = "e2e-web.example.com"
+			ingressURL    = "http://ingress-nginx-controller.ingress-nginx/hostname"
+		)
+		doormanSlice := webName + "-hybernate-doorman"
+
+		BeforeAll(func() {
+			By("waiting for the doorman to be ready")
+			_, err := utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/hybernate-doorman",
+				"-n", namespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a web app behind a Service")
+			_, err = utils.Run(exec.Command("kubectl", "create", "ns", wakeNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", wakeNamespace, "--wait=false"))
+			})
+			Expect(kubectlApply(webManifest(webName, wakeNamespace))).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+webName,
+				"-n", wakeNamespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("installing ingress-nginx")
+			_, err = utils.Run(exec.Command("kubectl", "apply", "-f", ingressNginxManifest))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "-f", ingressNginxManifest, "--wait=false"))
+			})
+			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/ingress-nginx-controller",
+				"-n", "ingress-nginx", "--timeout=3m"))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("routing a host to the app")
+			// The admission webhook can still be starting after the rollout
+			// reports ready, so the first apply may be refused.
+			Eventually(func() error {
+				return kubectlApply(fmt.Sprintf(`
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: %[1]s, namespace: %[2]s}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: %[3]s
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: {service: {name: %[1]s, port: {name: http}}}
+`, webName, wakeNamespace, webHost))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("checking the route serves the app while it's awake")
+			// nginx loads a new Ingress a few seconds after it's created, so
+			// this retries; the wake spec then fails only on the doorman.
+			body := curlInCluster("curl-ingress-ready", wakeNamespace, ingressURL,
+				"-H", "Host: "+webHost, "--retry", "30", "--retry-delay", "2", "--retry-all-errors")
+			Expect(body).To(HavePrefix(webName + "-"))
+
+			By("managing the app with a one-minute idle clock")
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: %[1]s, namespace: %[2]s}
+spec:
+  target: {kind: Deployment, name: %[1]s}
+  idlePolicy: {idleAfter: 1m}
+  prediction: {confidence: 85}
+`, webName, wakeNamespace))).To(Succeed())
+		})
+
+		waitForDoorman := func() {
+			By("waiting for the app to pause and its Service to point at the doorman")
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", webName, wakeNamespace, "{.status.phase}")).To(Equal("Paused"))
+				g.Expect(jsonpath("managedworkload", webName, wakeNamespace,
+					`{.status.conditions[?(@.type=="WakeOnRequest")].status}`)).To(Equal("True"))
+				g.Expect(jsonpath("endpointslice", doormanSlice, wakeNamespace, "{.endpoints[*].addresses[0]}")).
+					NotTo(BeEmpty())
+			}, 4*time.Minute, 5*time.Second).Should(Succeed())
+		}
+
+		expectAwake := func() {
+			By("checking the app is Running and its Service no longer points at the doorman")
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", webName, wakeNamespace, "{.status.phase}")).To(Equal("Running"))
+				_, err := jsonpath("endpointslice", doormanSlice, wakeNamespace, "{.metadata.name}")
+				g.Expect(err).To(HaveOccurred(), "the doorman's EndpointSlice must be removed")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		}
+
+		It("wakes a paused app on a request to its Service and answers the request", func() {
+			waitForDoorman()
+
+			By("sending a request to the paused app's Service")
+			body := curlInCluster("curl-wake", wakeNamespace, fmt.Sprintf("http://%s/hostname", webName))
+			Expect(body).To(HavePrefix(webName+"-"), "the held request is answered by the woken pod")
+
+			expectAwake()
+		})
+
+		It("wakes a paused app on a request through ingress-nginx", func() {
+			waitForDoorman()
+
+			By("sending a request through the ingress controller")
+			// nginx picks up endpoint changes on a timer, so for a moment after
+			// the pause it still sends to the deleted pod and answers 502. curl
+			// retries only those errors, never a connection the doorman holds.
+			body := curlInCluster("curl-wake-ingress", wakeNamespace, ingressURL, "-H", "Host: "+webHost,
+				"--retry", "10", "--retry-delay", "1")
+			Expect(body).To(HavePrefix(webName+"-"), "ingress-nginx passes the held request to the woken pod")
+
+			expectAwake()
+		})
+	})
 })
 
 // deploymentManifest is a Deployment of the pause container, which uses no
@@ -507,6 +638,81 @@ spec:
             capabilities: {drop: [ALL]}
             seccompProfile: {type: RuntimeDefault}
 `, name, namespace, pauseImage, replicas)
+}
+
+// webManifest is an HTTP server behind a Service. It answers /hostname with
+// the name of the pod that served the request.
+func webManifest(name, namespace string) string {
+	return fmt.Sprintf(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: %[1]s}
+  template:
+    metadata:
+      labels: {app: %[1]s}
+    spec:
+      containers:
+        - name: web
+          image: %[3]s
+          imagePullPolicy: IfNotPresent
+          args: [netexec, --http-port=8080]
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  selector: {app: %[1]s}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+`, name, namespace, webImage)
+}
+
+// curlInCluster runs curl in a pod and returns the last line it printed: the
+// response, after any retried attempts' errors. curl waits longer than the
+// doorman's default maxWait, so a failure is the doorman's.
+func curlInCluster(name, namespace, url string, args ...string) string {
+	curlArgs := append([]string{"curl", "-sS", "--fail-with-body", "--max-time", "150"}, args...)
+	run := append([]string{"run", name, "-n", namespace, "--restart=Never",
+		"--image=curlimages/curl:8.7.1", "--image-pull-policy=IfNotPresent", "--command", "--"},
+		append(curlArgs, url)...)
+	_, err := utils.Run(exec.Command("kubectl", run...))
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() {
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", name, "-n", namespace, "--wait=false"))
+	})
+
+	Eventually(func(g Gomega) {
+		phase, err := jsonpath("pod", name, namespace, "{.status.phase}")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(phase).To(BeElementOf("Succeeded", "Failed"))
+	}, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+	logs, err := utils.Run(exec.Command("kubectl", "logs", name, "-n", namespace))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(jsonpath("pod", name, namespace, "{.status.phase}")).To(Equal("Succeeded"), "curl failed: %s", logs)
+	lines := utils.GetNonEmptyLines(logs)
+	Expect(lines).NotTo(BeEmpty())
+	return lines[len(lines)-1]
 }
 
 // kubectlApply applies a manifest from a string.

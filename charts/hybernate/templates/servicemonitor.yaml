@@ -23,4 +23,31 @@ spec:
   selector:
     matchLabels:
       {{- include "hybernate.selectorLabels" . | nindent 6 }}
+{{- if .Values.doorman.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  endpoints:
+    - path: /metrics
+      port: {{ if .Values.metrics.secure }}https{{ else }}http{{ end }}
+      {{- if .Values.metrics.secure }}
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+      {{- end }}
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+  selector:
+    matchLabels:
+      {{- include "hybernate.doormanSelectorLabels" . | nindent 6 }}
+{{- end }}
 {{- end }}

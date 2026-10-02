@@ -1,0 +1,85 @@
+# The doorman holds connections to paused workloads and wakes them. It's the
+# operator image run with --doorman, as a separate Deployment so operator
+# restarts don't drop held connections. Every replica serves traffic.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doorman
+  namespace: system
+  labels:
+    control-plane: doorman
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      control-plane: doorman
+      app.kubernetes.io/name: hybernate
+  template:
+    metadata:
+      labels:
+        control-plane: doorman
+        app.kubernetes.io/name: hybernate
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - command:
+        - /manager
+        args:
+          - --doorman
+          - --metrics-bind-address=:8443
+          - --health-probe-bind-address=:8081
+        image: controller:latest
+        name: doorman
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      serviceAccountName: doorman
+      terminationGracePeriodSeconds: 30
+---
+# The operator finds the Ready doorman pods through this Service's
+# EndpointSlices, and points paused workloads' Services at them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: doorman
+  namespace: system
+  labels:
+    control-plane: doorman
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    control-plane: doorman
+    app.kubernetes.io/name: hybernate
+  ports:
+  - name: metrics
+    port: 8443
+    protocol: TCP
+    targetPort: 8443

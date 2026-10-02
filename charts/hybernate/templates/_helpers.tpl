@@ -48,6 +48,27 @@ control-plane: controller-manager
 {{- end }}
 
 {{/*
+Doorman name and labels. Distinct from the operator's, so the
+operator's Service and NetworkPolicy don't select doorman pods.
+*/}}
+{{- define "hybernate.doormanName" -}}
+{{- printf "%s-doorman" (include "hybernate.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "hybernate.doormanSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "hybernate.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+control-plane: doorman
+{{- end }}
+
+{{- define "hybernate.doormanLabels" -}}
+helm.sh/chart: {{ include "hybernate.chart" . }}
+{{ include "hybernate.doormanSelectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
 Service account name.
 */}}
 {{- define "hybernate.serviceAccountName" -}}
