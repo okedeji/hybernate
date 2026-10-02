@@ -281,6 +281,25 @@ spec:
                 - kind
                 - name
                 type: object
+              wake:
+                description: |-
+                  Wake configures waking the workload when a request reaches it while
+                  it's paused.
+                properties:
+                  maxWait:
+                    default: 2m
+                    description: |-
+                      MaxWait is how long the doorman holds a connection while the workload
+                      wakes. After it, the connection is closed; the wake carries on.
+                    format: duration
+                    type: string
+                  onRequest:
+                    default: true
+                    description: |-
+                      OnRequest routes the workload's Services to the doorman while it's
+                      paused. When false, requests to a paused workload fail.
+                    type: boolean
+                type: object
             required:
             - prediction
             - target
@@ -517,6 +536,34 @@ spec:
                     - storageBytes
                     type: object
                 type: object
+              doorman:
+                description: |-
+                  Doorman lists the doorman ports routing this workload's Services while
+                  it's paused. Empty while it's awake.
+                items:
+                  description: |-
+                    DoormanRoute maps one Service port to the doorman port that stands in for
+                    it while the workload is paused.
+                  properties:
+                    doormanPort:
+                      description: DoormanPort is the doorman's listening port for
+                        this Service port.
+                      format: int32
+                      type: integer
+                    portName:
+                      description: PortName is the Service port's name; empty for
+                        an unnamed single port.
+                      type: string
+                    service:
+                      description: Service is the name of the Service in the workload's
+                        namespace.
+                      type: string
+                  required:
+                  - doormanPort
+                  - service
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               lastActedAt:
                 description: |-
                   LastActedAt is when the operator last mutated the target workload
