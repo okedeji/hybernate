@@ -14,7 +14,7 @@ Most staging, dev, and test workloads sit idle 60-80% of the time: nights, weeke
 
 Hybernate fixes this by:
 
-- **Detecting idle workloads** with a per-workload activity clock: CPU, deploys, and activity annotations from your own tooling, with no learning period
+- **Detecting idle workloads** with a per-workload activity clock: CPU, deploys, Prometheus queries, and activity annotations from your own tooling, with no learning period
 - **Learning demand patterns** via a per-workload Holt-Winters forecasting model that tracks daily and weekly seasonality
 - **Acting automatically** by pausing idle workloads and resuming proactively before users arrive
 - **Tracking savings** with per-workload cost accounting, resource reduction metrics, and cluster-wide aggregation
@@ -91,7 +91,7 @@ spec:
 
 ### Core
 
-- **Activity-based idle detection**: any sign of use (CPU, a deploy, an activity annotation) keeps a workload awake; it pauses after `idleAfter` with none
+- **Activity-based idle detection**: any sign of use (CPU, a deploy, a Prometheus query such as request rate, an activity annotation) keeps a workload awake; it pauses after `idleAfter` with none
 - **Demand forecasting** via a Holt-Winters double seasonal model that learns daily and weekly patterns per workload, with confidence scoring and anomaly detection
 - **Pause, resume, and destroy** with scale to zero, automatic expiry, forecast-driven resume, and PVC retention
 

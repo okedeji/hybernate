@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -420,4 +422,95 @@ func TestActivityClock_FirstFingerprintIsNotARollout(t *testing.T) {
 
 	assert.Equal(t, 1, pauser.pauseCalls)
 	assert.Equal(t, podTemplateHash(target), workload.Status.Activity.TemplateHash)
+}
+
+func prometheusServer(t *testing.T, status int, body string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func promValue(v string) string {
+	return `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1234567890,"` + v + `"]}]}}`
+}
+
+func TestActivityClock_PrometheusSource(t *testing.T) {
+	tests := []struct {
+		name       string
+		endpoint   func(t *testing.T) string
+		wantPause  bool
+		wantSource v1alpha1.ActivitySource
+		wantReason string
+	}{
+		{
+			name:       "requests flowing keeps it awake",
+			endpoint:   func(t *testing.T) string { return prometheusServer(t, http.StatusOK, promValue("3.5")) },
+			wantSource: v1alpha1.ActivitySourcePrometheus,
+		},
+		{
+			name:      "zero requests lets it pause",
+			endpoint:  func(t *testing.T) string { return prometheusServer(t, http.StatusOK, promValue("0")) },
+			wantPause: true,
+		},
+		{
+			name: "empty result lets it pause",
+			endpoint: func(t *testing.T) string {
+				return prometheusServer(t, http.StatusOK, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
+			},
+			wantPause: true,
+		},
+		{
+			name:       "no endpoint configured",
+			endpoint:   func(*testing.T) string { return "" },
+			wantReason: "EndpointNotConfigured",
+		},
+		{
+			name:       "query fails",
+			endpoint:   func(t *testing.T) string { return prometheusServer(t, http.StatusInternalServerError, "") },
+			wantReason: "QueryFailed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := clockTarget("app:v1", nil)
+			workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+			workload.Spec.IdlePolicy.Activity = &v1alpha1.ActivitySpec{
+				Prometheus: []v1alpha1.PrometheusActivity{{PromQL: `sum(rate(nginx_ingress_controller_requests[5m]))`}},
+			}
+			metrics := idleCPU
+			pauser := &stubPauser{pauseDone: true}
+			r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics, pauser: pauser})
+			r.prometheusURL = tt.endpoint(t)
+
+			_, err := r.reconcileAutomation(context.Background(), workload, target)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantPause, pauser.pauseCalls == 1)
+			if tt.wantSource != "" {
+				assert.Equal(t, tt.wantSource, workload.Status.Activity.LastActivitySource)
+			}
+			cond := meta.FindStatusCondition(workload.Status.Conditions, conditionPrometheusAvailable)
+			require.NotNil(t, cond)
+			if tt.wantReason == "" {
+				assert.Equal(t, metav1.ConditionTrue, cond.Status)
+				return
+			}
+			assert.Equal(t, metav1.ConditionFalse, cond.Status, "a source the clock can't read must stop it from pausing")
+			assert.Equal(t, tt.wantReason, cond.Reason)
+		})
+	}
+}
+
+func TestActivityClock_NoPrometheusConditionWithoutQueries(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-30*time.Minute), target)
+
+	runClock(t, workload, target, clockOpts{metrics: idleCPU})
+
+	assert.Nil(t, meta.FindStatusCondition(workload.Status.Conditions, conditionPrometheusAvailable))
 }

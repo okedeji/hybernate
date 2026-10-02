@@ -527,6 +527,9 @@ func recordPhase(workload *v1alpha1.ManagedWorkload) {
 const (
 	conditionTargetAvailable  = "TargetAvailable"
 	conditionMetricsAvailable = "MetricsAvailable"
+	// conditionPrometheusAvailable is only set when Prometheus activity
+	// queries are configured.
+	conditionPrometheusAvailable = "PrometheusAvailable"
 )
 
 // checkTarget verifies the target workload exists. Returns the target object

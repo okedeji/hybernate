@@ -16,6 +16,7 @@
 | `idlePolicy.action` | `pause` \| `destroy` | No | `pause` | Action once idle for `idleAfter` |
 | `idlePolicy.idleAfter` | duration | No | `1h` | Time without activity before acting |
 | `idlePolicy.activity.cpuThreshold` | int | No | `10` | CPU utilization % of requests above which the workload is active (0-100) |
+| `idlePolicy.activity.prometheus[].promQL` | string | Yes (per entry) | | PromQL query; a result above zero is activity |
 | `idlePolicy.autoResume` | bool | No | `false` | Wake ahead of confident forecast demand |
 | `pause` | `PauseSpec` | No | | Pause behavior |
 | `pause.expireAfter` | duration | No | | Max pause duration |
@@ -46,7 +47,7 @@
 | `conditions[]` | `Condition` | Standard K8s conditions |
 | `pause` | `PauseStatus` | State while paused |
 | `activity.lastActivityTime` | time | Most recent activity from any source |
-| `activity.lastActivitySource` | string | `created`, `woke`, `cpu`, `rollout`, `annotation`, or `unobserved` |
+| `activity.lastActivitySource` | string | `created`, `woke`, `cpu`, `rollout`, `annotation`, `prometheus`, or `unobserved` |
 | `activity.pauseAt` | time | When the idle action runs if no further activity is seen |
 | `activity.lastEvaluatedTime` | time | When activity was last checked |
 | `activity.templateHash` | string | Fingerprint of the target's pod template, used to detect deploys |

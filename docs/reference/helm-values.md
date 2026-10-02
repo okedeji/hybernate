@@ -47,11 +47,11 @@ When running multiple replicas, leader election ensures only one instance runs r
 
 Memory usage scales with the number of ManagedWorkloads. Each workload's forecast engine state is ~10KB. For 1000 workloads, expect ~10MB of additional memory.
 
-## Prometheus Signals
+## Prometheus Activity
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `prometheus.url` | `""` | Base URL of the Prometheus API used for PromQL idle signals. Passed to the operator as `--prometheus-url`. Leave empty if no workload uses Prometheus signals. |
+| `prometheus.url` | `""` | Base URL of the Prometheus API used for Prometheus activity queries. Passed to the operator as `--prometheus-url`. Leave empty if no workload sets `idlePolicy.activity.prometheus`. |
 
 ## Metrics
 

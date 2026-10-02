@@ -17,7 +17,7 @@ These flags are passed to the operator binary (`manager`).
 | `--webhook-cert-name` | `tls.crt` | Webhook certificate file name |
 | `--webhook-cert-key` | `tls.key` | Webhook key file name |
 | `--enable-http2` | `false` | Allow HTTP/2 for metrics and webhook servers |
-| `--prometheus-url` | | Base URL of the Prometheus API for PromQL signals (e.g., `http://prometheus.monitoring.svc.cluster.local:9090`). Required only if workloads use Prometheus signals. |
+| `--prometheus-url` | | Base URL of the Prometheus API for Prometheus activity queries (e.g., `http://prometheus.monitoring.svc.cluster.local:9090`). Required only if workloads set `idlePolicy.activity.prometheus`. |
 | `--zap-devel` | `true` | Development mode logging (human-readable) |
 | `--zap-log-level` | `info` | Log level (`debug`, `info`, `error`) |
 | `--zap-encoder` | `console` | Log format (`console` or `json`) |

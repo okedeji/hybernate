@@ -23,6 +23,7 @@ Every source is checked, and the most recent one wins. None has priority over an
 | **Deploy** | The target's pod template changes: a new image, environment variable, or other template edit | None |
 | **`hybernate.io/last-activity`** | The annotation holds a time newer than the last recorded activity | Set by your own tooling |
 | **`hybernate.io/active-until`** | The annotation holds a time in the future (a hold, not an activity time) | Set by your own tooling |
+| **Prometheus** | Any query in `activity.prometheus` returns a value above zero | `--prometheus-url`; see the [Prometheus Activity Guide](../guides/prometheus-signals.md) |
 
 Changes to the replica count don't count as a deploy, so Hybernate's own pause and resume never look like activity.
 
@@ -60,9 +61,9 @@ With `dryRun: true`, the phase still becomes `Idle` and a "would pause" event is
 
 The forecast never blocks a pause until it's confident, so a workload with no history is handled by the clock alone.
 
-## When CPU can't be read
+## When a source can't be read
 
-Without CPU data, a busy workload looks idle, so Hybernate doesn't act. The `MetricsAvailable` condition says why:
+Hybernate never pauses a workload while one of its activity sources can't be read: without that data a busy workload looks idle. For CPU, the `MetricsAvailable` condition says why:
 
 | Reason | Meaning |
 |--------|---------|
@@ -72,6 +73,8 @@ Without CPU data, a busy workload looks idle, so Hybernate doesn't act. The `Met
 
 A target scaled to zero isn't an error: it has no usage, which is real data.
 
+For Prometheus queries, the `PrometheusAvailable` condition reports `EndpointNotConfigured` or `QueryFailed`.
+
 ## Restarts and outages
 
 The clock is stored in `status.activity`, so it survives operator restarts. If the operator wasn't running for more than two check intervals, it can't know whether there was activity in the meantime, so the clock restarts from the time it resumes watching (`lastActivitySource: unobserved`). An outage can delay a pause, but never cause one.
@@ -80,7 +83,7 @@ The clock is stored in `status.activity`, so it survives operator restarts. If t
 status:
   activity:
     lastActivityTime: "2026-10-02T09:14:00Z"
-    lastActivitySource: cpu    # created, woke, cpu, rollout, annotation, or unobserved
+    lastActivitySource: cpu    # created, woke, cpu, rollout, annotation, prometheus, or unobserved
     pauseAt: "2026-10-02T10:14:00Z"
     lastEvaluatedTime: "2026-10-02T09:41:00Z"
 ```

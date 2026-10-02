@@ -197,6 +197,20 @@ type ActivitySpec struct {
 	// +kubebuilder:default=10
 	// +optional
 	CPUThreshold int `json:"cpuThreshold,omitempty"`
+
+	// Prometheus queries that measure activity, such as an ingress request
+	// rate. A result above zero counts as activity; an empty result or zero
+	// doesn't. Requires the operator's --prometheus-url.
+	// +optional
+	Prometheus []PrometheusActivity `json:"prometheus,omitempty"`
+}
+
+// PrometheusActivity is a PromQL instant query used as an activity source.
+type PrometheusActivity struct {
+	// PromQL is the query. Example:
+	// sum(rate(nginx_ingress_controller_requests{exported_service="api"}[5m]))
+	// +kubebuilder:validation:MinLength=1
+	PromQL string `json:"promQL"`
 }
 
 // +kubebuilder:validation:Enum=destroy;resume
@@ -321,7 +335,7 @@ type ManagedWorkloadStatus struct {
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=created;woke;cpu;rollout;annotation;unobserved
+// +kubebuilder:validation:Enum=created;woke;cpu;rollout;annotation;prometheus;unobserved
 type ActivitySource string
 
 const (
@@ -330,6 +344,7 @@ const (
 	ActivitySourceCPU        ActivitySource = "cpu"
 	ActivitySourceRollout    ActivitySource = "rollout"
 	ActivitySourceAnnotation ActivitySource = "annotation"
+	ActivitySourcePrometheus ActivitySource = "prometheus"
 	// ActivitySourceUnobserved restarts the clock after the operator could
 	// not watch the workload, so a gap in observation never causes a pause.
 	ActivitySourceUnobserved ActivitySource = "unobserved"

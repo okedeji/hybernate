@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Prometheus activity sources: `idlePolicy.activity.prometheus` queries count as activity when they return a value above zero, such as an ingress request rate. Configure the endpoint with `--prometheus-url` (Helm value `prometheus.url`); path-prefixed endpoints (Thanos, Mimir, reverse proxies) work as-is. If a query can't be evaluated, the `PrometheusAvailable` condition reports `EndpointNotConfigured` or `QueryFailed` and the workload isn't paused
 - `MetricsAvailable` reason `NoCPURequests`: idle detection doesn't act on a workload whose CPU utilization can't be measured
 - `hybernate_idle_seconds{namespace, workload}`: time since the workload's last activity
 - `hybernate_workload_phase{namespace, workload, phase}`: 1 for each workload's current phase, and a `HybernateWorkloadStuck` alert for workloads left in `Pausing`, `Resuming`, or `Destroying` for 15 minutes
@@ -33,9 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Prometheus signals now work. The operator never received a Prometheus URL, and signal checkers were built without an HTTP client, so any workload with `idlePolicy.signals` or `scalePolicy.down.guard` panicked on evaluation. Configure the endpoint with the new `--prometheus-url` flag (Helm value `prometheus.url`); the documented `PROMETHEUS_ENDPOINT` environment variable was never read and is removed from the docs
-- Prometheus endpoints served under a path prefix (Thanos, Mimir, reverse proxies) no longer have their prefix replaced by `/api/v1/query`
-- Evaluating a Prometheus signal without a configured endpoint now fails with a clear `prometheus endpoint not configured` error
 - `HybernatePVCRetentionExpiring` no longer fires permanently once PVCs are cleaned up or retention is cancelled; the gauge is set to 0 in both cases, which matched `< 86400`
 - Resuming a paused workload restores its previous replica count. Since 0.1.7 the controller created the pause status early to hold the resource snapshot, which made the pauser skip recording the replica count, so every resume came back with a single replica
 

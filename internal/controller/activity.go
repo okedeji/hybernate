@@ -27,6 +27,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,6 +36,7 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/forecast"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
+	"github.com/okedeji/hybernate/internal/signal"
 )
 
 const (
@@ -62,6 +64,9 @@ type activityObservation struct {
 	// cpuErr is set when CPU utilization couldn't be read. Without it the
 	// operator can't tell a busy workload from an idle one, so it won't act.
 	cpuErr error
+	// prometheusErr is set when a configured Prometheus query couldn't be
+	// evaluated, which blinds the clock to that source in the same way.
+	prometheusErr error
 }
 
 func idleAfterFor(workload *v1alpha1.ManagedWorkload) time.Duration {
@@ -156,6 +161,13 @@ func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.Man
 		recordActivity(status, now, v1alpha1.ActivitySourceCPU)
 	}
 
+	active, err = r.prometheusActive(ctx, workload)
+	if err != nil {
+		obs.prometheusErr = err
+	} else if active {
+		recordActivity(status, now, v1alpha1.ActivitySourcePrometheus)
+	}
+
 	evaluated := metav1.NewTime(now)
 	status.LastEvaluatedTime = &evaluated
 	pauseAt := metav1.NewTime(status.LastActivityTime.Add(idleAfterFor(workload)))
@@ -216,6 +228,30 @@ func (r *Reconciler) cpuActive(ctx context.Context, workload *v1alpha1.ManagedWo
 	return usage/requested*100 > float64(cpuThresholdFor(workload)), nil
 }
 
+// prometheusActive reports whether any configured Prometheus activity query
+// returns a value above zero.
+func (r *Reconciler) prometheusActive(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error) {
+	p := workload.Spec.IdlePolicy
+	if p == nil || p.Activity == nil {
+		return false, nil
+	}
+	for _, q := range p.Activity.Prometheus {
+		res, err := signal.NewPrometheus(r.prometheusURL, q.PromQL).Check(ctx, workload.Namespace, workload.Name)
+		if err != nil {
+			return false, fmt.Errorf("evaluating %q: %w", q.PromQL, err)
+		}
+		if res.Confirm {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func hasPrometheusActivity(workload *v1alpha1.ManagedWorkload) bool {
+	p := workload.Spec.IdlePolicy
+	return p != nil && p.Activity != nil && len(p.Activity.Prometheus) > 0
+}
+
 // podTemplateHash fingerprints the target's pod template. Scaling changes
 // spec.replicas and bumps metadata.generation, so the generation can't tell
 // a deploy from Hybernate's own pause and resume; the template can.
@@ -250,6 +286,13 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		return r.reportMetricsUnavailable(ctx, workload, obs.cpuErr)
 	}
 	r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionTrue, "MetricsReported", "")
+
+	if obs.prometheusErr != nil {
+		return r.reportPrometheusUnavailable(ctx, workload, obs.prometheusErr)
+	}
+	if hasPrometheusActivity(workload) {
+		r.setCondition(workload, conditionPrometheusAvailable, metav1.ConditionTrue, "QueriesEvaluated", "")
+	}
 
 	if obs.activeUntil.After(now) || now.Before(pauseAt) {
 		if workload.Status.Phase == v1alpha1.PhaseIdle {
@@ -341,6 +384,26 @@ func (r *Reconciler) wokenByActivity(ctx context.Context, workload *v1alpha1.Man
 		}
 	}
 	return false
+}
+
+// reportPrometheusUnavailable surfaces a Prometheus activity source that can't
+// be evaluated. The clock can't see that activity, so it doesn't act.
+func (r *Reconciler) reportPrometheusUnavailable(ctx context.Context, workload *v1alpha1.ManagedWorkload, err error) (*ctrl.Result, error) {
+	reason := "QueryFailed"
+	msg := fmt.Sprintf("a Prometheus activity query failed, so idle detection is paused: %v", err)
+	if errors.Is(err, signal.ErrEndpointNotConfigured) {
+		reason = "EndpointNotConfigured"
+		msg = "Prometheus activity queries are configured but the operator has no --prometheus-url, so idle detection is paused"
+	}
+
+	firstFailure := !meta.IsStatusConditionFalse(workload.Status.Conditions, conditionPrometheusAvailable)
+	r.setCondition(workload, conditionPrometheusAvailable, metav1.ConditionFalse, reason, msg)
+	if firstFailure {
+		r.emitEvent(workload, false, "Warning", reason, actionEvaluateIdle, "%s", msg)
+	}
+	log.FromContext(ctx).V(1).Info("Prometheus activity unavailable",
+		"workload", workload.Name, "namespace", workload.Namespace, "reason", reason, "error", err.Error())
+	return r.requeueActivity(ctx, workload, activityCheckInterval)
 }
 
 func (r *Reconciler) requeueActivity(ctx context.Context, workload *v1alpha1.ManagedWorkload, after time.Duration) (*ctrl.Result, error) {

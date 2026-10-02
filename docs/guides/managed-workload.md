@@ -38,6 +38,8 @@ spec:
     idleAfter: 1h
     activity:
       cpuThreshold: 10
+      prometheus:
+        - promQL: 'sum(rate(nginx_ingress_controller_requests{exported_service="my-api"}[5m]))'
     autoResume: true
 
   pause:
@@ -91,6 +93,7 @@ See [Idle Detection](../concepts/idle-detection.md) for how the activity clock w
 | `action` | `pause`, `destroy` | `pause` | What to do once the workload has been idle for `idleAfter` |
 | `idleAfter` | duration | `1h` | How long without any activity before acting |
 | `activity.cpuThreshold` | int (percent) | `10` | CPU utilization, as % of requests, above which the workload counts as active (0-100) |
+| `activity.prometheus[].promQL` | string | _(none)_ | PromQL query; a result above zero counts as activity. See the [Prometheus Activity Guide](prometheus-signals.md) |
 | `autoResume` | bool | `false` | Wake ahead of the demand a confident forecast predicts |
 
 Deploys and the `hybernate.io/last-activity` and `hybernate.io/active-until` annotations always count as activity; see [Idle Detection](../concepts/idle-detection.md#activity-annotations).
