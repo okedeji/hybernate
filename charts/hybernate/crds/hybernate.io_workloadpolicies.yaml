@@ -143,81 +143,45 @@ spec:
                 default:
                   action: pause
                   autoResume: true
-                  cpuIdleThreshold: 10
-                  gracePeriod: 5m0s
-                  memoryIdleThreshold: 10
+                  idleAfter: 1h0m0s
                 description: Default idle policy copied into exported/auto-created
                   ManagedWorkloads.
                 properties:
                   action:
-                    default: auto
+                    default: pause
                     description: |-
-                      Action to take when the workload is confirmed idle. "auto" and "pause"
-                      both scale to zero; "destroy" deletes the workload entirely.
+                      Action to take once the workload has been idle for IdleAfter. "pause"
+                      scales to zero; "destroy" deletes the workload.
                     enum:
-                    - auto
                     - pause
                     - destroy
                     type: string
+                  activity:
+                    description: |-
+                      Activity configures what counts as activity, beyond the deploys and
+                      activity annotations that always count.
+                    properties:
+                      cpuThreshold:
+                        default: 10
+                        description: |-
+                          CPUThreshold is the CPU utilization, as a percentage of the workload's
+                          CPU requests, above which the workload counts as active.
+                        maximum: 100
+                        minimum: 0
+                        type: integer
+                    type: object
                   autoResume:
                     description: |-
-                      AutoResume re-enables the workload when idle detection clears
-                      (i.e. signals no longer confirm idle).
+                      AutoResume wakes a paused workload ahead of the demand the forecast
+                      predicts.
                     type: boolean
-                  cpuIdleThreshold:
-                    default: 10
+                  idleAfter:
+                    default: 1h
                     description: |-
-                      CPUIdleThreshold is the CPU utilization percentage of request below
-                      which the workload is considered potentially idle (e.g. 10 means idle
-                      if CPU usage < 10% of CPU request).
-                    maximum: 100
-                    minimum: 0
-                    type: integer
-                  gracePeriod:
-                    description: |-
-                      GracePeriod is how long signals must continuously confirm idle before
-                      the operator acts. Protects against brief quiet moments triggering
-                      a false idle.
+                      IdleAfter is how long the workload must go without any activity
+                      before the operator acts.
                     format: duration
                     type: string
-                  memoryIdleThreshold:
-                    default: 10
-                    description: |-
-                      MemoryIdleThreshold is the memory utilization percentage of request
-                      below which the workload is considered potentially idle. Both CPU and
-                      memory must be below their respective thresholds for idle detection
-                      to confirm.
-                    maximum: 100
-                    minimum: 0
-                    type: integer
-                  signals:
-                    description: |-
-                      Signals are additional checks that must all confirm before the workload
-                      is considered idle. An internal CPU usage check runs automatically;
-                      these signals are layered on top for application-level confirmation.
-                    items:
-                      description: |-
-                        ProbeSpec defines an external check used as an idle detection signal. For
-                        Prometheus probes, the PromQL query must return a non-zero value to confirm
-                        the workload is idle. An empty result or zero value denies it.
-                      properties:
-                        promQL:
-                          description: |-
-                            PromQL is an instant query evaluated against the configured Prometheus
-                            endpoint. The query must return a non-zero scalar to confirm idle.
-                            Example: rate(http_requests_total{service="api"}[10m]) == 0
-                          type: string
-                        source:
-                          default: prometheus
-                          enum:
-                          - prometheus
-                          type: string
-                      required:
-                      - source
-                      type: object
-                    type: array
-                required:
-                - action
                 type: object
               memoryIdleThreshold:
                 default: 10
