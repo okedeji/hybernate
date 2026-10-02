@@ -1,0 +1,157 @@
+{{- if .Values.doorman.enabled }}
+{{- /*
+The doorman holds connections to paused workloads and wakes them. It runs
+the operator image with --doorman, separately so operator restarts don't
+drop held connections. Every replica serves traffic.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.doorman.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "hybernate.doormanSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hybernate.doormanSelectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "hybernate.doormanName" . }}
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: doorman
+          image: {{ include "hybernate.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/manager]
+          args:
+            - --doorman
+            - --health-probe-bind-address=:8081
+            {{- if .Values.metrics.enabled }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            {{- if .Values.metrics.secure }}
+            - --metrics-secure
+            {{- end }}
+            {{- end }}
+            - --zap-log-level={{ .Values.logLevel }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.doorman.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+{{- /*
+The operator finds the Ready doorman pods through this Service's
+EndpointSlices and points paused workloads' Services at them.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "hybernate.doormanSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: {{ if .Values.metrics.secure }}https{{ else }}http{{ end }}
+      port: {{ .Values.metrics.port }}
+      protocol: TCP
+      targetPort: {{ .Values.metrics.port }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+---
+{{- /*
+The doorman reads its routes from ManagedWorkload status, reads the woken
+workload's endpoints, and wakes it by patching an annotation. Nothing else.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [hybernate.io]
+    resources: [managedworkloads]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: ["", events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "hybernate.doormanName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hybernate.doormanName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.metrics.secure }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "hybernate.doormanName" . }}-auth-delegator
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hybernate.doormanName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

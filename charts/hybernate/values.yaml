@@ -41,6 +41,18 @@ metrics:
 prometheus:
   url: "" # required only for Prometheus activity queries, e.g. http://prometheus.monitoring.svc:9090
 
+# The doorman wakes paused workloads when a request reaches them.
+doorman:
+  enabled: true
+  replicaCount: 2
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
 networkPolicy:
   enabled: false
 

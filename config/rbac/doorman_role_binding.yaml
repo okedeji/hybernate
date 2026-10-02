@@ -1,0 +1,32 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+  name: doorman-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: doorman-role
+subjects:
+- kind: ServiceAccount
+  name: doorman
+  namespace: system
+---
+# Lets the doorman authenticate scrapes of its secure metrics endpoint.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+  name: doorman-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: doorman
+  namespace: system

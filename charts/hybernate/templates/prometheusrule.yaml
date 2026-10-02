@@ -31,6 +31,14 @@ spec:
             description: "No healthy Hybernate operator target has been scraped for 5 minutes."
     - name: hybernate.warning
       rules:
+        - alert: HybernateDoormanWakesFailing
+          expr: sum by (namespace, workload) (increase(hybernate_doorman_wakes_total{result!="success"}[15m])) > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Doorman wakes failing for {{ "{{" }} $labels.workload {{ "}}" }}"
+            description: "Requests to paused workload {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.workload {{ "}}" }} are timing out or failing while it wakes. Check its events and the doorman logs."
         - alert: HybernateWorkloadStuck
           expr: max by (namespace, workload, phase) (hybernate_workload_phase{phase=~"Pausing|Resuming|Destroying"}) == 1
           for: 15m
