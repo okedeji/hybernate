@@ -72,6 +72,19 @@ func TestAccumulateCost_InitializesCostStatus(t *testing.T) {
 	assert.NotNil(t, w.Status.Cost.LastAccumulatedAt)
 }
 
+// An injected sidecar's CPU isn't activity, but it is cost.
+func TestAccumulateCost_RunningIncludesSidecars(t *testing.T) {
+	lastMeta := metav1.NewTime(fixedTime.Add(-1 * time.Hour))
+	w := costWorkload(v1alpha1.PhaseRunning)
+	w.Status.Cost = &v1alpha1.CostStatus{LastAccumulatedAt: &lastMeta}
+	m := &stubMetrics{cpuMillis: 1000, sidecarCPUMillis: 500}
+
+	r := costReconciler(fixedTime, m)
+	r.accumulateCost(context.Background(), w)
+
+	assert.InDelta(t, 1.5, w.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64(), 0.01)
+}
+
 func TestAccumulateCost_RunningAccumulatesUsage(t *testing.T) {
 	lastAccumulated := fixedTime.Add(-1 * time.Hour)
 	lastMeta := metav1.NewTime(lastAccumulated)

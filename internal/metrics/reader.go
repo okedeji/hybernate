@@ -23,7 +23,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
@@ -36,147 +35,118 @@ import (
 // workload: it has no running pods, or metrics-server isn't reporting them.
 var ErrNoPodMetrics = errors.New("no pod metrics found")
 
-// Reader reads workload metrics from the Kubernetes Metrics API.
-// All methods aggregate across every pod belonging to the workload
-// using the target's spec.selector.matchLabels to find pods.
+// Reader reads workload metrics from the Kubernetes Metrics API and the
+// workload's pods, finding them by the target's spec.selector.matchLabels.
 type Reader struct {
 	client client.Client
+	pods   client.Reader
 }
 
-func NewReader(c client.Client) *Reader {
-	return &Reader{client: c}
+// NewReader returns a Reader. Pods are read through pods rather than c so
+// they needn't be cached: they're only read when a workload pauses, and a
+// cluster's pods are the largest thing an operator could cache.
+func NewReader(c client.Client, pods client.Reader) *Reader {
+	return &Reader{client: c, pods: pods}
 }
 
-// CPUUsage returns aggregate CPU usage across all pods for a workload.
-func (r *Reader) CPUUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
-	millis, err := r.TotalCPUMillis(ctx, workload)
+// WorkloadCPUMillis returns the CPU in millicores used by the workload's own
+// containers across its pods, for deciding whether it's active. See
+// WorkloadContainers.
+func (r *Reader) WorkloadCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	target, pods, err := r.podMetrics(ctx, workload)
 	if err != nil {
-		return resource.Quantity{}, err
+		return 0, err
 	}
-	return *resource.NewMilliQuantity(int64(millis), resource.DecimalSI), nil
+	cpuMillis, _ := Usage(pods, podSpecFromTarget(target))
+	return float64(cpuMillis), nil
 }
 
-// TotalCPUMillis returns aggregate CPU in millicores across all pods
-// for the workload.
+// TotalCPUMillis returns the CPU in millicores used by every container in
+// the workload's pods, sidecars included, for what it costs.
 func (r *Reader) TotalCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
-	target, err := r.getTarget(ctx, workload)
+	_, pods, err := r.podMetrics(ctx, workload)
 	if err != nil {
 		return 0, err
 	}
-
-	selector, err := selectorFromTarget(target)
-	if err != nil {
-		return 0, err
-	}
-
-	var podMetrics metricsv1beta1.PodMetricsList
-	err = r.client.List(ctx, &podMetrics,
-		client.InNamespace(workload.Namespace),
-		client.MatchingLabelsSelector{Selector: selector},
-	)
-	if err != nil {
-		return 0, fmt.Errorf("listing pod metrics for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
-	}
-
-	if len(podMetrics.Items) == 0 {
-		return 0, fmt.Errorf("%w for %s/%s", ErrNoPodMetrics, workload.Namespace, workload.Spec.Target.Name)
-	}
-
-	var total float64
-	for _, pod := range podMetrics.Items {
-		for _, container := range pod.Containers {
-			total += float64(container.Usage.Cpu().MilliValue())
+	var total int64
+	for _, pod := range pods {
+		for _, c := range pod.Containers {
+			total += c.Usage.Cpu().MilliValue()
 		}
 	}
-	return total, nil
+	return float64(total), nil
 }
 
-// CPURequestPerReplica returns the total CPU request (in millicores) for one
-// replica by summing requests across all containers in the pod template.
+// TotalMemoryBytes returns the memory used by every container in the
+// workload's pods, sidecars included, for what it costs.
+func (r *Reader) TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	_, pods, err := r.podMetrics(ctx, workload)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, pod := range pods {
+		for _, c := range pod.Containers {
+			total += c.Usage.Memory().Value()
+		}
+	}
+	return float64(total), nil
+}
+
+func (r *Reader) podMetrics(ctx context.Context, workload *v1alpha1.ManagedWorkload) (client.Object, []metricsv1beta1.PodMetrics, error) {
+	target, err := r.getTarget(ctx, workload)
+	if err != nil {
+		return nil, nil, err
+	}
+	selector, err := selectorFromTarget(target)
+	if err != nil {
+		return nil, nil, err
+	}
+	var list metricsv1beta1.PodMetricsList
+	if err := r.client.List(ctx, &list, client.InNamespace(workload.Namespace),
+		client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return nil, nil, fmt.Errorf("listing pod metrics for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
+	}
+	if len(list.Items) == 0 {
+		return nil, nil, fmt.Errorf("%w for %s/%s", ErrNoPodMetrics, workload.Namespace, workload.Spec.Target.Name)
+	}
+	return target, list.Items, nil
+}
+
+// CPURequestPerReplica returns the CPU request in millicores of one replica's
+// own containers, the counterpart of WorkloadCPUMillis.
 func (r *Reader) CPURequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
 	target, err := r.getTarget(ctx, workload)
 	if err != nil {
 		return 0, err
 	}
-
-	var total float64
-	for _, c := range containersFromTarget(target) {
-		if cpu := c.Resources.Requests.Cpu(); cpu != nil {
-			total += float64(cpu.MilliValue())
-		}
-	}
-
-	if total == 0 {
+	cpuMillis, _ := Requests(WorkloadContainers(podSpecFromTarget(target)))
+	if cpuMillis == 0 {
 		return 0, fmt.Errorf("no cpu requests found in pod template for %s %s", workload.Spec.Target.Kind, workload.Spec.Target.Name)
 	}
-
-	return total, nil
+	return float64(cpuMillis), nil
 }
 
-// MemoryRequestPerReplica returns the total memory request (in bytes) for one
-// replica by summing requests across all containers in the pod template.
-func (r *Reader) MemoryRequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+// PodRequestsPerReplica returns the CPU (millicores) and memory (bytes) that
+// one replica's pod requests, sidecars injected at creation included: what
+// pausing a replica frees. It reads a running pod, and falls back to the pod
+// template when none is running.
+func (r *Reader) PodRequestsPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cpuMillis, memBytes float64, err error) {
 	target, err := r.getTarget(ctx, workload)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-
-	var total float64
-	for _, c := range containersFromTarget(target) {
-		if mem := c.Resources.Requests.Memory(); mem != nil {
-			total += float64(mem.Value())
-		}
-	}
-
-	if total == 0 {
-		return 0, fmt.Errorf("no memory requests found in pod template for %s %s", workload.Spec.Target.Kind, workload.Spec.Target.Name)
-	}
-
-	return total, nil
-}
-
-// MemoryUsage returns aggregate memory usage across all pods for a workload.
-func (r *Reader) MemoryUsage(ctx context.Context, workload *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
-	bytes, err := r.TotalMemoryBytes(ctx, workload)
-	if err != nil {
-		return resource.Quantity{}, err
-	}
-	return *resource.NewQuantity(int64(bytes), resource.BinarySI), nil
-}
-
-// TotalMemoryBytes returns aggregate memory usage in bytes across all pods
-// for the workload.
-func (r *Reader) TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
-	target, err := r.getTarget(ctx, workload)
-	if err != nil {
-		return 0, err
-	}
-
 	selector, err := selectorFromTarget(target)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-
-	var podMetrics metricsv1beta1.PodMetricsList
-	err = r.client.List(ctx, &podMetrics,
-		client.InNamespace(workload.Namespace),
-		client.MatchingLabelsSelector{Selector: selector},
-	)
-	if err != nil {
-		return 0, fmt.Errorf("listing pod metrics for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
+	var pods corev1.PodList
+	if err := r.pods.List(ctx, &pods, client.InNamespace(workload.Namespace),
+		client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return 0, 0, fmt.Errorf("listing pods for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
 	}
-
-	if len(podMetrics.Items) == 0 {
-		return 0, fmt.Errorf("%w for %s/%s", ErrNoPodMetrics, workload.Namespace, workload.Spec.Target.Name)
-	}
-
-	var total float64
-	for _, pod := range podMetrics.Items {
-		for _, container := range pod.Containers {
-			total += float64(container.Usage.Memory().Value())
-		}
-	}
-	return total, nil
+	cpu, mem := PodRequests(pods.Items, podSpecFromTarget(target))
+	return float64(cpu), float64(mem), nil
 }
 
 // TotalPVCBytes returns the total provisioned PVC capacity in bytes for
@@ -254,15 +224,75 @@ func (r *Reader) getTarget(ctx context.Context, workload *v1alpha1.ManagedWorklo
 	return obj, nil
 }
 
-func containersFromTarget(obj client.Object) []corev1.Container {
+func podSpecFromTarget(obj client.Object) corev1.PodSpec {
 	switch t := obj.(type) {
 	case *appsv1.Deployment:
-		return t.Spec.Template.Spec.Containers
+		return t.Spec.Template.Spec
 	case *appsv1.StatefulSet:
-		return t.Spec.Template.Spec.Containers
+		return t.Spec.Template.Spec
 	default:
-		return nil
+		return corev1.PodSpec{}
 	}
+}
+
+// WorkloadContainers returns the containers a workload's pod template
+// defines: its containers and its native sidecars, the init containers that
+// always restart and so run alongside them.
+//
+// Containers injected when a pod is created, such as a service mesh proxy,
+// aren't in the template, so they have no request to measure usage against.
+// Usage is counted only for these containers too: counting a sidecar's CPU
+// without its request makes an idle workload look busy.
+func WorkloadContainers(spec corev1.PodSpec) []corev1.Container {
+	containers := make([]corev1.Container, 0, len(spec.Containers)+len(spec.InitContainers))
+	containers = append(containers, spec.Containers...)
+	for _, c := range spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			containers = append(containers, c)
+		}
+	}
+	return containers
+}
+
+// Requests sums the CPU (millicores) and memory (bytes) requested by
+// containers.
+func Requests(containers []corev1.Container) (cpuMillis, memBytes int64) {
+	for _, c := range containers {
+		cpuMillis += c.Resources.Requests.Cpu().MilliValue()
+		memBytes += c.Resources.Requests.Memory().Value()
+	}
+	return cpuMillis, memBytes
+}
+
+// PodRequests returns what one of a workload's pods requests, from the first
+// of pods that isn't being deleted. Injected sidecars appear only in a real
+// pod, so the template is the fallback when no pod is running.
+func PodRequests(pods []corev1.Pod, template corev1.PodSpec) (cpuMillis, memBytes int64) {
+	for _, pod := range pods {
+		if pod.DeletionTimestamp == nil {
+			return Requests(WorkloadContainers(pod.Spec))
+		}
+	}
+	return Requests(WorkloadContainers(template))
+}
+
+// Usage sums the CPU and memory used by the WorkloadContainers of spec across
+// the given pods.
+func Usage(pods []metricsv1beta1.PodMetrics, spec corev1.PodSpec) (cpuMillis, memBytes int64) {
+	own := map[string]bool{}
+	for _, c := range WorkloadContainers(spec) {
+		own[c.Name] = true
+	}
+	for _, pod := range pods {
+		for _, c := range pod.Containers {
+			if !own[c.Name] {
+				continue
+			}
+			cpuMillis += c.Usage.Cpu().MilliValue()
+			memBytes += c.Usage.Memory().Value()
+		}
+	}
+	return cpuMillis, memBytes
 }
 
 func selectorFromTarget(obj client.Object) (labels.Selector, error) {

@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -64,6 +63,7 @@ func (f *stubForecaster) AnomalyDetected() bool              { return f.anomalyD
 
 type stubMetrics struct {
 	cpuMillis        float64
+	sidecarCPUMillis float64 // used by injected sidecars: cost, not activity
 	cpuPerReplica    float64
 	memoryBytes      float64
 	memoryPerReplica float64
@@ -72,30 +72,20 @@ type stubMetrics struct {
 	err              error
 }
 
-func (m *stubMetrics) CPUUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
-	if m.err != nil {
-		return resource.Quantity{}, m.err
-	}
-	return *resource.NewMilliQuantity(int64(m.cpuMillis), resource.DecimalSI), nil
-}
-
-func (m *stubMetrics) MemoryUsage(_ context.Context, _ *v1alpha1.ManagedWorkload) (resource.Quantity, error) {
-	if m.err != nil {
-		return resource.Quantity{}, m.err
-	}
-	return *resource.NewQuantity(int64(m.memoryBytes), resource.BinarySI), nil
+func (m *stubMetrics) WorkloadCPUMillis(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
+	return m.cpuMillis, m.err
 }
 
 func (m *stubMetrics) TotalCPUMillis(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
-	return m.cpuMillis, m.err
+	return m.cpuMillis + m.sidecarCPUMillis, m.err
 }
 
 func (m *stubMetrics) CPURequestPerReplica(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
 	return m.cpuPerReplica, m.err
 }
 
-func (m *stubMetrics) MemoryRequestPerReplica(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
-	return m.memoryPerReplica, m.err
+func (m *stubMetrics) PodRequestsPerReplica(_ context.Context, _ *v1alpha1.ManagedWorkload) (cpuMillis, memBytes float64, err error) {
+	return m.cpuPerReplica, m.memoryPerReplica, m.err
 }
 
 func (m *stubMetrics) Replicas(_ context.Context, _ *v1alpha1.ManagedWorkload) (int32, error) {

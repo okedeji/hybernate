@@ -14,7 +14,7 @@ Cost tracking is always enabled. Every ManagedWorkload accumulates resource cons
 
 ### Resource Accumulation
 
-Every reconcile, Hybernate reads the workload's current resource usage and accumulates time-weighted consumption:
+Every reconcile, Hybernate reads the workload's current resource usage, across every container in its pods including sidecars, and accumulates time-weighted consumption:
 
 ```
 CPU Hours    += cpu_cores × elapsed_hours
@@ -53,7 +53,8 @@ Estimated savings are accumulated when Hybernate takes action. These projections
 
 - **Paused workloads**: CPU and memory savings accrue every reconcile while paused. Storage savings are zero (PVCs persist while paused).
 - **Destroyed workloads**: CPU and memory savings accrue. Storage savings accrue only after PVC retention expires and PVCs are cleaned up.
-- **Scaled-down workloads**: Savings from the difference between previous and current replica counts.
+
+Savings are priced on the CPU and memory a running pod requests, read just before the pause. That includes sidecars injected when the pod was created, such as a service mesh proxy, which the Deployment's own template doesn't list but which pausing frees too.
 
 ## Resource Reduction
 

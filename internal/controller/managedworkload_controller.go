@@ -66,6 +66,9 @@ type Reconciler struct {
 	DoormanService   string
 	DoormanNamespace string
 
+	// PodReader reads pods without caching them. Defaults to Client.
+	PodReader client.Reader
+
 	pauser        lifecyclePauser
 	destroyer     lifecycleDestroyer
 	metrics       metricsReader
@@ -94,6 +97,7 @@ type lifecycleDestroyer interface {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
@@ -884,7 +888,11 @@ func (r *Reconciler) initDefaults() {
 		r.destroyer = lifecycle.NewDestroyer(r.Client)
 	}
 	if r.metrics == nil {
-		r.metrics = metrics.NewReader(r.Client)
+		pods := r.PodReader
+		if pods == nil {
+			pods = r.Client
+		}
+		r.metrics = metrics.NewReader(r.Client, pods)
 	}
 	if r.engines == nil {
 		r.engines = newEngineRegistry(func(threshold int) forecaster {

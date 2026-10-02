@@ -44,6 +44,9 @@ type WorkloadPolicyReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
+
+	// PodReader reads pods without caching them. Defaults to Client.
+	PodReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=hybernate.io,resources=workloadpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -52,6 +55,7 @@ type WorkloadPolicyReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 
 // Reconcile scans the namespace for workloads, classifies them, and updates
 // the WorkloadPolicy status with discovery results and savings estimates.
@@ -69,7 +73,11 @@ func (r *WorkloadPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		kinds = []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment, v1alpha1.TargetKindStatefulSet}
 	}
 
-	scanner := discovery.NewScanner(r.Client)
+	pods := r.PodReader
+	if pods == nil {
+		pods = r.Client
+	}
+	scanner := discovery.NewScanner(r.Client, pods)
 
 	start := time.Now()
 	result, err := scanner.Scan(ctx, policy.Namespace, kinds, th)

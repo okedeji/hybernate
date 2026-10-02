@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Workloads with an injected sidecar, such as an Istio or Linkerd proxy, can pause. CPU usage was counted for every container in the pod but measured against requests from the pod template, which doesn't include injected sidecars, so the proxy's background work alone could keep a workload above the CPU threshold. Usage and requests now both cover the template's containers and native sidecars; discovery classifies workloads the same way
+- Cost and savings include injected sidecars. Savings were priced on the pod template's requests, which leave out a sidecar injected at pod creation, often as large as the app itself; they're now priced on a running pod's requests, and running cost counts every container's usage. The operator's ClusterRole gains `get` and `list` on pods, which are read when a workload pauses and during discovery scans, not cached
 - A resume completes when the workload's replicas are Ready, not when its pods exist. The check read the scale subresource, which counts pods that are still starting, such as a database replaying its log
 - Cost is tracked for running workloads. Cost accumulation ran at the end of a reconcile that the automation step always returned from first, so `status.cost` was only ever updated for paused and destroyed workloads
 - ManagedWorkload status is no longer written on every check. Values that change continuously (cost totals and the activity clock's timestamps) are written at most every 5 minutes, and phase, condition, and lifecycle changes are written immediately; activity seen between writes is held in memory
