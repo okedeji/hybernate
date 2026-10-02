@@ -103,7 +103,9 @@ load-test-e2e-images: ## Preload the images the e2e specs run into the Kind clus
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	$(MAKE) load-test-e2e-images
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	@# The idle clock and dependency specs wait on real clocks, so the suite
+	@# runs well past go test's default 10-minute limit on CI runners.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
