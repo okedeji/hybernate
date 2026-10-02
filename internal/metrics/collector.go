@@ -122,6 +122,26 @@ var (
 	}, []string{"namespace", "workload"})
 )
 
+// --- Doorman ---
+
+var (
+	DoormanWakes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "hybernate_doorman_wakes_total",
+		Help: "Connections the doorman held for a paused workload, by result (success, timeout, error).",
+	}, []string{"namespace", "workload", "result"})
+
+	DoormanWaitSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "hybernate_doorman_wait_seconds",
+		Help:    "How long the doorman held a connection before passing it through or closing it.",
+		Buckets: prometheus.ExponentialBuckets(0.25, 2, 10),
+	}, []string{"result"})
+
+	DoormanHeldConnections = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_doorman_held_connections",
+		Help: "Connections the doorman is holding or proxying right now.",
+	})
+)
+
 // --- Discovery ---
 
 var (
@@ -166,6 +186,11 @@ func init() {
 		AutomationSkipped,
 		DryrunActions,
 		TargetUnavailable,
+
+		// Doorman
+		DoormanWakes,
+		DoormanWaitSeconds,
+		DoormanHeldConnections,
 
 		// Discovery
 		DiscoveryScanDuration,
