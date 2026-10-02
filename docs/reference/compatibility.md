@@ -2,7 +2,7 @@
 
 [Wake on request](../concepts/wake-on-request.md) adds an EndpointSlice to each Service of a paused workload, pointing at the doorman. Anything that finds a Service's backends through its EndpointSlices sends traffic to the doorman without changes. Each project reads them a little differently, so this page records what's been checked.
 
-**Tested** means an end-to-end test runs it on every change. **Checked against source** means the project's endpoint code was read for the release listed, but nothing runs it yet.
+**Tested** means an end-to-end test runs it on every change. **Tried by hand** means it was run once on a test cluster for the release listed. **Checked against source** means the project's endpoint code was read for the release listed, but nothing runs it yet.
 
 ## Service proxies
 
@@ -37,6 +37,9 @@
 | Mesh | Status | Notes |
 |------|--------|-------|
 | Linkerd (edge-26.9) | Checked against source | Connections to the doorman are plain TCP, without mTLS. Services with `internalTrafficPolicy: Local` aren't reached |
-| Istio (sidecar and ambient) | **Not supported yet** | Planned |
+| Istio sidecar mode, PERMISSIVE mTLS (v1.31) | Tried by hand | Istio's default. Callers in the mesh reach the doorman in plain text, and the doorman passes the connection to the woken pod, whose sidecar accepts it |
+| Istio sidecar mode, STRICT mTLS (v1.31) | **Partial** | The request wakes the workload, but the woken pod's sidecar refuses the doorman's plain-text connection, so the caller gets a 503. Requests once it's Running succeed |
+| Istio ambient mode (v1.31) | **Not supported** | ztunnel builds a Service's backends from its pods, not its EndpointSlices, so callers in the mesh never reach the doorman and the workload doesn't wake. Callers outside the mesh still do |
+| Istio AuthorizationPolicies that match on the caller's identity | **Not supported** (not tried) | Connections from the doorman carry no caller identity, so a policy that allows only certain callers denies them |
 
 If you run something that isn't listed, or hit a problem with something that is, please [open an issue](https://github.com/okedeji/hybernate/issues). To turn wake on request off for one workload, set `wake.onRequest: false`; for the whole cluster, set the Helm value `doorman.enabled: false`.
