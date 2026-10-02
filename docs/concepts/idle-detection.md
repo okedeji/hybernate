@@ -88,7 +88,7 @@ If the operator wasn't running for more than about 7 minutes (two missed checks 
 status:
   activity:
     lastActivityTime: "2026-10-02T09:14:00Z"
-    lastActivitySource: cpu    # created, woke, cpu, rollout, annotation, prometheus, or unobserved
+    lastActivitySource: cpu    # created, woke, request, cpu, rollout, annotation, prometheus, or unobserved
     pauseAt: "2026-10-02T10:14:00Z"
     lastEvaluatedTime: "2026-10-02T09:41:00Z"
 ```
@@ -102,7 +102,7 @@ A paused workload wakes when:
 - `autoResume: true` is set and a confident forecast predicts demand above `cpuThreshold` for the current hour, so the workload is ready before people arrive.
 - `pause.expireAfter` elapses with `expireAction: resume`, or `desiredState` is set to `Running`.
 
-Each wake restarts the clock (`lastActivitySource: woke`), so a woken workload gets a full `idleAfter` before it can pause again.
+Each wake restarts the clock, so a woken workload gets a full `idleAfter` before it can pause again. The clock records `lastActivitySource: request` when a held request woke it, and `woke` for any other wake.
 
 ## Idle actions
 

@@ -358,23 +358,43 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 	pausedAt := metav1.NewTime(fixedTime.Add(-2 * time.Hour))
 
 	tests := []struct {
-		name     string
-		target   *appsv1.Deployment
-		wantWake bool
+		name       string
+		target     *appsv1.Deployment
+		onWorkload map[string]string
+		wantWake   bool
+		wantSource v1alpha1.ActivitySource
 	}{
 		{
 			name: "last-activity newer than the pause",
 			target: clockTarget("app:v1", map[string]string{
 				v1alpha1.AnnotationLastActivity: fixedTime.Add(-time.Minute).Format(time.RFC3339),
 			}),
-			wantWake: true,
+			wantWake:   true,
+			wantSource: v1alpha1.ActivitySourceWoke,
+		},
+		{
+			name:   "a request the doorman is holding",
+			target: clockTarget("app:v1", nil),
+			onWorkload: map[string]string{
+				v1alpha1.AnnotationLastRequest: fixedTime.Add(-time.Second).Format(time.RFC3339),
+			},
+			wantWake:   true,
+			wantSource: v1alpha1.ActivitySourceRequest,
+		},
+		{
+			name:   "a request from before the pause",
+			target: clockTarget("app:v1", nil),
+			onWorkload: map[string]string{
+				v1alpha1.AnnotationLastRequest: fixedTime.Add(-3 * time.Hour).Format(time.RFC3339),
+			},
 		},
 		{
 			name: "active-until in the future",
 			target: clockTarget("app:v1", map[string]string{
 				v1alpha1.AnnotationActiveUntil: fixedTime.Add(time.Hour).Format(time.RFC3339),
 			}),
-			wantWake: true,
+			wantWake:   true,
+			wantSource: v1alpha1.ActivitySourceWoke,
 		},
 		{
 			name: "last-activity from before the pause",
@@ -387,6 +407,7 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			workload := clockWorkload(fixedTime.Add(-3*time.Hour), tt.target)
+			workload.Annotations = tt.onWorkload
 			workload.Status.Phase = v1alpha1.PhasePaused
 			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 2, PausedAt: &pausedAt}
 
@@ -395,8 +416,8 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 			assert.Equal(t, tt.wantWake, pauser.resumeCalls == 1)
 			if tt.wantWake {
 				assert.Equal(t, v1alpha1.PhaseRunning, workload.Status.Phase)
-				assert.Equal(t, v1alpha1.ActivitySourceWoke, workload.Status.Activity.LastActivitySource,
-					"a woken workload gets a full idleAfter before it can pause again")
+				assert.Equal(t, tt.wantSource, workload.Status.Activity.LastActivitySource,
+					"the clock records what woke it")
 				assert.True(t, workload.Status.Activity.LastActivityTime.Time.Equal(fixedTime))
 			}
 		})

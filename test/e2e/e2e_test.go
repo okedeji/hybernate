@@ -578,6 +578,8 @@ spec:
 			By("checking the app is Running and its Service no longer points at the doorman")
 			Eventually(func(g Gomega) {
 				g.Expect(jsonpath("managedworkload", webName, wakeNamespace, "{.status.phase}")).To(Equal("Running"))
+				g.Expect(jsonpath("managedworkload", webName, wakeNamespace,
+					"{.status.activity.lastActivitySource}")).To(Equal("request"))
 				_, err := jsonpath("endpointslice", doormanSlice, wakeNamespace, "{.metadata.name}")
 				g.Expect(err).To(HaveOccurred(), "the doorman's EndpointSlice must be removed")
 			}, 2*time.Minute, 5*time.Second).Should(Succeed())

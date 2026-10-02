@@ -405,12 +405,14 @@ type DoormanRoute struct {
 	DoormanPort int32 `json:"doormanPort"`
 }
 
-// +kubebuilder:validation:Enum=created;woke;cpu;rollout;annotation;prometheus;unobserved
+// +kubebuilder:validation:Enum=created;woke;request;cpu;rollout;annotation;prometheus;unobserved
 type ActivitySource string
 
 const (
-	ActivitySourceCreated    ActivitySource = "created"
-	ActivitySourceWoke       ActivitySource = "woke"
+	ActivitySourceCreated ActivitySource = "created"
+	ActivitySourceWoke    ActivitySource = "woke"
+	// ActivitySourceRequest is a wake by a request the doorman held.
+	ActivitySourceRequest    ActivitySource = "request"
 	ActivitySourceCPU        ActivitySource = "cpu"
 	ActivitySourceRollout    ActivitySource = "rollout"
 	ActivitySourceAnnotation ActivitySource = "annotation"

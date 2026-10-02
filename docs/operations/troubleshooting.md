@@ -70,7 +70,7 @@ kubectl get managedworkload my-api -n staging \
 
 If the condition is `DoormanRouted` but requests still fail:
 
-- **The request is closed after a while with no response**: the workload didn't become Ready within `wake.maxWait`. `hybernate_doorman_wakes_total{result="timeout"}` counts these. Raise `maxWait`, or check why the pods are slow to become Ready.
+- **The request is closed after a while with no response**: the workload didn't become Ready within `wake.maxWait`. A `RequestNotServed` warning event says so, and `hybernate_doorman_wakes_total{result="timeout"}` counts these. Raise `maxWait`, or check why the pods are slow to become Ready.
 - **A 502 from ingress-nginx right after the workload paused**: nginx hadn't picked up the change yet and sent the request to the removed pod. A retry a second later is held and wakes the workload.
 - **A 504 from an Ingress after 60 seconds**: the ingress controller gave up first. Raise its upstream timeout, for ingress-nginx `nginx.ingress.kubernetes.io/proxy-read-timeout`.
 - **The request is refused or times out right away**: a NetworkPolicy may block traffic to the doorman (ports 20000-29999) or from it to the workload's pods. See [Network policies](../concepts/wake-on-request.md#network-policies).
@@ -79,7 +79,7 @@ The doorman's logs name the workload and Service for each held connection: `kube
 
 ### Workload keeps cycling between paused and running
 
-Something keeps waking it. Check the events for `WokeByActivity` (an activity annotation newer than the pause) or `AutoResume` (the forecast expected demand). A tool that refreshes `hybernate.io/last-activity` on a timer, rather than on real use, will keep waking the workload.
+Something keeps waking it. Check the events for `WokeByActivity` (an activity annotation newer than the pause, or a held request: `WokenByRequest` names the Service) or `AutoResume` (the forecast expected demand). A health check or monitor that calls the Service on a timer wakes the workload each time; point it elsewhere or opt the workload out with `wake.onRequest: false`. A tool that refreshes `hybernate.io/last-activity` on a timer, rather than on real use, will keep waking the workload.
 
 ### Prediction confidence stays at 0
 

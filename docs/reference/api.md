@@ -55,7 +55,7 @@
 | `conditions[]` | `Condition` | Standard K8s conditions |
 | `pause` | `PauseStatus` | State while paused |
 | `activity.lastActivityTime` | time | Most recent activity from any source |
-| `activity.lastActivitySource` | string | `created`, `woke`, `cpu`, `rollout`, `annotation`, `prometheus`, or `unobserved` |
+| `activity.lastActivitySource` | string | `created`, `woke`, `request`, `cpu`, `rollout`, `annotation`, `prometheus`, or `unobserved` |
 | `activity.pauseAt` | time | When the idle action runs if no further activity is seen |
 | `activity.lastEvaluatedTime` | time | When activity was last checked |
 | `activity.templateHash` | string | Fingerprint of the target's pod template, used to detect deploys |

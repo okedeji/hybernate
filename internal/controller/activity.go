@@ -240,10 +240,31 @@ func (r *Reconciler) activityAnnotations(ctx context.Context, obj client.Object,
 	}
 
 	lastActivity = parse(v1alpha1.AnnotationLastActivity)
+	if lastRequest := parse(v1alpha1.AnnotationLastRequest); lastRequest.After(lastActivity) {
+		lastActivity = lastRequest
+	}
 	if lastActivity.After(now) {
 		lastActivity = now
 	}
 	return lastActivity, parse(v1alpha1.AnnotationActiveUntil)
+}
+
+// wakeSource is what to record as the activity that woke a paused workload:
+// a request the doorman stamped after the pause, or any other wake. It must
+// be read before the resume completes, which clears the pause.
+func wakeSource(workload *v1alpha1.ManagedWorkload) v1alpha1.ActivitySource {
+	if workload.Status.Pause == nil || workload.Status.Pause.PausedAt == nil {
+		return v1alpha1.ActivitySourceWoke
+	}
+	raw, ok := workload.Annotations[v1alpha1.AnnotationLastRequest]
+	if !ok {
+		return v1alpha1.ActivitySourceWoke
+	}
+	requested, err := time.Parse(time.RFC3339, raw)
+	if err != nil || !requested.After(workload.Status.Pause.PausedAt.Time) {
+		return v1alpha1.ActivitySourceWoke
+	}
+	return v1alpha1.ActivitySourceRequest
 }
 
 // cpuActive reports whether CPU usage is above the activity threshold, as a

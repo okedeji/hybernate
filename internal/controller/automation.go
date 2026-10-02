@@ -187,8 +187,11 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 	}
 
 	if r.wokenByActivity(ctx, workload, target) {
-		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonWokeByActivity, actionResume,
-			"activity annotation is newer than the pause, waking")
+		message := "activity annotation is newer than the pause, waking"
+		if wakeSource(workload) == v1alpha1.ActivitySourceRequest {
+			message = "a request is waiting, waking"
+		}
+		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonWokeByActivity, actionResume, "%s", message)
 		if workload.Spec.DryRun {
 			return nil, nil
 		}
