@@ -42,6 +42,10 @@ spec:
         - promQL: 'sum(rate(nginx_ingress_controller_requests{exported_service="my-api"}[5m]))'
     autoResume: true
 
+  wake:
+    onRequest: true
+    maxWait: 2m
+
   pause:
     expireAfter: "24h"
     expireAction: Resume
@@ -108,6 +112,17 @@ Workloads this one needs. A dependency isn't paused while this workload is awake
 | `kind` | `Deployment`, `StatefulSet` | _(required)_ | Kind of the dependency |
 | `name` | string | _(required)_ | Name of the dependency's workload |
 | `waitForReady` | bool | `false` | Don't scale this workload up on resume until the dependency's pods are Ready |
+
+### `wake`
+
+While the workload is paused, a request to any of its Services wakes it and is answered once it's Ready. See [Wake on Request](../concepts/wake-on-request.md).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `onRequest` | bool | `true` | Hold requests to the paused workload and wake it. When `false`, requests fail while it's paused |
+| `maxWait` | duration | `2m` | How long a request is held while the workload wakes. After it, the connection is closed; the wake carries on |
+
+A workload paused with `desiredState: Paused` doesn't wake on request.
 
 ### `pause`
 

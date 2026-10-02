@@ -56,6 +56,27 @@ kubectl get managedworkload postgres -n staging \
 
 `WaitingForDependencies=True` means a `waitForReady` dependency isn't Ready yet; the condition names it and how many replicas are ready. Check that dependency's pods. Otherwise, the workload's own pods aren't becoming Ready: resume completes only when every replica is Ready.
 
+### Requests to a paused workload fail instead of waking it
+
+```bash
+kubectl get managedworkload my-api -n staging \
+  -o jsonpath='{.status.conditions[?(@.type=="WakeOnRequest")]}'
+```
+
+- **No condition, or `NotPaused`**: the workload isn't routed. A workload paused with `desiredState: Paused`, or with `wake.onRequest: false`, doesn't wake on request.
+- **`NoServices`**: no Service with a selector and a ClusterIP selects the workload's pods. Headless Services aren't routed; see [Wake on Request](../concepts/wake-on-request.md#when-a-workload-isnt-routed).
+- **`UnsupportedLoadBalancer`**, or a Service named in the message as not routed: the Service is behind GKE container-native load balancing, which can't use the doorman. See [Compatibility](../reference/compatibility.md#cloud-load-balancers).
+- **`DoormanUnavailable`**: no doorman pod is Ready. Check `kubectl get pods -n hybernate-system -l control-plane=doorman`.
+
+If the condition is `DoormanRouted` but requests still fail:
+
+- **The request is closed after a while with no response**: the workload didn't become Ready within `wake.maxWait`. `hybernate_doorman_wakes_total{result="timeout"}` counts these. Raise `maxWait`, or check why the pods are slow to become Ready.
+- **A 502 from ingress-nginx right after the workload paused**: nginx hadn't picked up the change yet and sent the request to the removed pod. A retry a second later is held and wakes the workload.
+- **A 504 from an Ingress after 60 seconds**: the ingress controller gave up first. Raise its upstream timeout, for ingress-nginx `nginx.ingress.kubernetes.io/proxy-read-timeout`.
+- **The request is refused or times out right away**: a NetworkPolicy may block traffic to the doorman (ports 20000-29999) or from it to the workload's pods. See [Network policies](../concepts/wake-on-request.md#network-policies).
+
+The doorman's logs name the workload and Service for each held connection: `kubectl logs -n hybernate-system -l control-plane=doorman`.
+
 ### Workload keeps cycling between paused and running
 
 Something keeps waking it. Check the events for `WokeByActivity` (an activity annotation newer than the pause) or `AutoResume` (the forecast expected demand). A tool that refreshes `hybernate.io/last-activity` on a timer, rather than on real use, will keep waking the workload.

@@ -40,6 +40,16 @@ These metrics help troubleshoot specific workload behavior.
 | `hybernate_dryrun_actions_total` | Counter | `action` | Actions that would have been taken in dry-run |
 | `hybernate_target_unavailable_total` | Counter | `namespace`, `workload` | Target workload not found |
 
+## Doorman
+
+Served by the doorman pods, on the same port and path as the operator's metrics.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `hybernate_doorman_wakes_total` | Counter | `namespace`, `workload`, `result` | Connections held for a paused workload, by `result`: `success` (passed to a woken pod), `timeout` (no pod Ready within `wake.maxWait`), `error` |
+| `hybernate_doorman_wait_seconds` | Histogram | `result` | How long a connection was held before it was passed through or closed |
+| `hybernate_doorman_held_connections` | Gauge | | Connections being held or proxied right now |
+
 ## Discovery
 
 | Metric | Type | Labels | Description |
@@ -68,4 +78,7 @@ hybernate_prediction_confidence_percent{season="daily"} < 70
 
 # Workloads that will pause within 10 minutes (with the default 1h idleAfter)
 hybernate_idle_seconds > 3000
+
+# How long a request to a paused workload waits for it to wake (p95)
+histogram_quantile(0.95, sum by (le) (rate(hybernate_doorman_wait_seconds_bucket{result="success"}[1h])))
 ```

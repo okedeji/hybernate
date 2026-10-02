@@ -93,6 +93,7 @@ spec:
 
 - **Activity-based idle detection**: any sign of use (CPU, a deploy, a Prometheus query such as request rate, an activity annotation) keeps a workload awake; it pauses after `idleAfter` with none
 - **Demand forecasting** via a Holt-Winters double seasonal model that learns daily and weekly patterns per workload, with confidence scoring and anomaly detection
+- **Wake on request**: a request to a paused workload's Service wakes it and is held until the workload is Ready, so callers see a slow response instead of an error
 - **Pause, resume, and destroy** with scale to zero, automatic expiry, forecast-driven resume, and PVC retention
 
 ### Operations

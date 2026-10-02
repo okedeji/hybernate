@@ -80,6 +80,21 @@ When `metrics.secure` is `true`, the chart creates a `ClusterRoleBinding` to `sy
 
 The PrometheusRule includes alerts for reconciliation errors, operator downtime, workloads stuck in a transition, missing targets, and PVC retention expiry.
 
+## Doorman
+
+The doorman holds requests to paused workloads and wakes them. See [Wake on Request](../concepts/wake-on-request.md).
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `doorman.enabled` | `true` | Deploy the doorman. When `false`, requests to paused workloads fail |
+| `doorman.replicaCount` | `2` | Doorman replicas. Every replica serves traffic |
+| `doorman.resources.requests.cpu` | `10m` | CPU request |
+| `doorman.resources.requests.memory` | `32Mi` | Memory request |
+| `doorman.resources.limits.cpu` | `500m` | CPU limit |
+| `doorman.resources.limits.memory` | `128Mi` | Memory limit |
+
+The doorman uses the operator image and the `metrics.*` settings. With `metrics.serviceMonitor.enabled`, it gets its own ServiceMonitor.
+
 ## Network Policy
 
 | Value | Default | Description |
@@ -136,6 +151,9 @@ The chart creates a ClusterRole with permissions to:
 - Read PersistentVolumeClaims (for retention cleanup)
 - Read pod metrics from metrics-server
 - Create Events for user-facing status updates
+- Read Services, and manage the EndpointSlices that route paused workloads to the doorman
+
+The doorman has its own ServiceAccount and ClusterRole: it reads ManagedWorkloads and EndpointSlices, patches ManagedWorkloads to wake them, and creates Events.
 
 If leader election is enabled, a namespaced Role is created for Lease and ConfigMap access.
 

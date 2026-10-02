@@ -68,6 +68,7 @@ nav:
       - Forecasting: concepts/forecasting.md
       - Idle Detection: concepts/idle-detection.md
       - Dependencies: concepts/dependencies.md
+      - Wake on Request: concepts/wake-on-request.md
       - Cost Tracking: concepts/cost-tracking.md
   - Guides:
       - ManagedWorkload: guides/managed-workload.md
@@ -83,6 +84,7 @@ nav:
       - Metrics: reference/metrics.md
       - Labels & Annotations: reference/labels-annotations.md
       - Configuration: reference/configuration.md
+      - Compatibility: reference/compatibility.md
   - Operations:
       - Monitoring: operations/monitoring.md
       - Troubleshooting: operations/troubleshooting.md

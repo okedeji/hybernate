@@ -5,6 +5,7 @@
 | Label | Value | Applied To | Description |
 |-------|-------|-----------|-------------|
 | `hybernate.io/ignore` | `"true"` | Deployments, StatefulSets | Excludes the workload from discovery and auto-management. The workload still appears in `status.discovered` with `ignored: true` but is skipped by auto-manage and export. |
+| `hybernate.io/managed-workload` | ManagedWorkload name | EndpointSlices | Set on the EndpointSlices that route a paused workload's Services to the doorman, along with `endpointslice.kubernetes.io/managed-by: doorman.hybernate.io`. They're removed when the workload is Running. |
 | `hybernate.io/auto-discovered` | `"true"` | ManagedWorkloads | Set on ManagedWorkloads created automatically by a WorkloadPolicy in `auto-manage` mode. Useful for filtering and identifying auto-created vs manually-created resources. |
 
 ### Usage
