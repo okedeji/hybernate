@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workload dependencies: `spec.dependsOn` lists the workloads a ManagedWorkload needs, in its own or another namespace. A dependency isn't paused while anything that depends on it is awake (`HeldByDependents`), waking a workload wakes its dependencies, and `waitForReady: true` holds a resume until a dependency's pods are Ready (`WaitingForDependencies`). Cycles stop both workloads from pausing (`DependencyCycle`); a dependency that doesn't exist is reported (`DependencyNotFound`) but doesn't block
 - Prometheus activity sources: `idlePolicy.activity.prometheus` queries count as activity when they return a value above zero, such as an ingress request rate. Configure the endpoint with `--prometheus-url` (Helm value `prometheus.url`); path-prefixed endpoints (Thanos, Mimir, reverse proxies) work as-is. If a query can't be evaluated, the `PrometheusAvailable` condition reports `EndpointNotConfigured` or `QueryFailed` and the workload isn't paused
 - `MetricsAvailable` reason `NoCPURequests`: idle detection doesn't act on a workload whose CPU utilization can't be measured
 - `hybernate_idle_seconds{namespace, workload}`: time since the workload's last activity
@@ -34,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A resume completes when the workload's replicas are Ready, not when its pods exist. The check read the scale subresource, which counts pods that are still starting, such as a database replaying its log
 - Cost is tracked for running workloads. Cost accumulation ran at the end of a reconcile that the automation step always returned from first, so `status.cost` was only ever updated for paused and destroyed workloads
 - ManagedWorkload status is no longer written on every check. Values that change continuously (cost totals and the activity clock's timestamps) are written at most every 5 minutes, and phase, condition, and lifecycle changes are written immediately; activity seen between writes is held in memory
 - `HybernatePVCRetentionExpiring` no longer fires permanently once PVCs are cleaned up or retention is cancelled; the gauge is set to 0 in both cases, which matched `< 86400`

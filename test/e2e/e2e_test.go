@@ -403,6 +403,72 @@ spec:
 			}).Should(Succeed())
 		})
 	})
+
+	// Runs after "Idle clock", which installs metrics-server.
+	Context("Dependencies", func() {
+		const depsNamespace = "hybernate-e2e-deps"
+
+		BeforeAll(func() {
+			By("creating an app and the database it depends on")
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", depsNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", depsNamespace, "--wait=false"))
+			})
+			for _, name := range []string{"e2e-db", "e2e-app"} {
+				Expect(kubectlApply(deploymentManifest(name, depsNamespace, 1))).To(Succeed())
+				_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+name,
+					"-n", depsNamespace, "--timeout=2m"))
+				Expect(err).NotTo(HaveOccurred())
+			}
+		})
+
+		It("holds a dependency while its dependent is awake, and wakes it with the dependent", func() {
+			By("managing the database with a shorter clock than the app that depends on it")
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: e2e-db, namespace: %[1]s}
+spec:
+  target: {kind: Deployment, name: e2e-db}
+  idlePolicy: {idleAfter: 1m}
+  prediction: {confidence: 85}
+---
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: e2e-app, namespace: %[1]s}
+spec:
+  target: {kind: Deployment, name: e2e-app}
+  dependsOn:
+    - {kind: Deployment, name: e2e-db}
+  idlePolicy: {idleAfter: 2m}
+  prediction: {confidence: 85}
+`, depsNamespace))).To(Succeed())
+
+			By("checking the database is held awake once its own clock runs out")
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", "e2e-db", depsNamespace,
+					`{.status.conditions[?(@.type=="HeldByDependents")].status}`)).To(Equal("True"))
+				g.Expect(jsonpath("managedworkload", "e2e-db", depsNamespace, "{.status.phase}")).To(Equal("Running"))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("checking both pause once the app's clock runs out")
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", "e2e-app", depsNamespace, "{.status.phase}")).To(Equal("Paused"))
+				g.Expect(jsonpath("managedworkload", "e2e-db", depsNamespace, "{.status.phase}")).To(Equal("Paused"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waking the app, which must wake the database too")
+			_, err := utils.Run(exec.Command("kubectl", "annotate", "managedworkload", "e2e-app", "-n", depsNamespace,
+				"--overwrite", "hybernate.io/last-activity="+time.Now().UTC().Format(time.RFC3339)))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", "e2e-app", depsNamespace, "{.status.phase}")).To(Equal("Running"))
+				g.Expect(jsonpath("managedworkload", "e2e-db", depsNamespace, "{.status.phase}")).To(Equal("Running"))
+				g.Expect(jsonpath("deployment", "e2e-db", depsNamespace, "{.status.readyReplicas}")).To(Equal("1"))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		})
+	})
 })
 
 // deploymentManifest is a Deployment of the pause container, which uses no

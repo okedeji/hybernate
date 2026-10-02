@@ -43,6 +43,19 @@ A target scaled to zero replicas is not an error: it's recorded as zero usage.
 
 Look for an `IdleVetoed` event in `kubectl describe managedworkload my-api -n staging`. A confident forecast that expects demand in the next hour defers the pause.
 
+**Check 5: Is something depending on it?**
+
+```bash
+kubectl get managedworkload postgres -n staging \
+  -o jsonpath='{.status.conditions[?(@.type=="HeldByDependents")]}'
+```
+
+`HeldByDependents=True` names the awake workloads that list this one in `dependsOn`. It pauses once they have. `DependencyCycle=True` means two workloads depend on each other; remove the cycle. See [Dependencies](../concepts/dependencies.md).
+
+### Workload stuck in Resuming
+
+`WaitingForDependencies=True` means a `waitForReady` dependency isn't Ready yet; the condition names it and how many replicas are ready. Check that dependency's pods. Otherwise, the workload's own pods aren't becoming Ready: resume completes only when every replica is Ready.
+
 ### Workload keeps cycling between paused and running
 
 Something keeps waking it. Check the events for `WokeByActivity` (an activity annotation newer than the pause) or `AutoResume` (the forecast expected demand). A tool that refreshes `hybernate.io/last-activity` on a timer, rather than on real use, will keep waking the workload.

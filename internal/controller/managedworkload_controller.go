@@ -223,7 +223,15 @@ func (r *Reconciler) reconcileDesiredState(ctx context.Context, workload *v1alph
 		return nil, nil
 	}
 
-	switch *workload.Spec.DesiredState {
+	desired := *workload.Spec.DesiredState
+	if desired != v1alpha1.DesiredStateRunning && isAwake(workload.Status.Phase) &&
+		workload.Status.Phase != v1alpha1.PhasePausing && workload.Status.Phase != v1alpha1.PhaseDestroying {
+		if err := r.warnIfDependentsAwake(ctx, workload); err != nil {
+			return nil, err
+		}
+	}
+
+	switch desired {
 	case v1alpha1.DesiredStatePaused:
 		return r.handlePause(ctx, workload)
 	case v1alpha1.DesiredStateRunning:
@@ -291,6 +299,13 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 		if _, err := r.transition(ctx, workload, v1alpha1.PhaseResuming, "ResumeRequested"); err != nil {
 			return nil, err
 		}
+		if err := r.wakeDependencies(ctx, workload); err != nil {
+			return nil, err
+		}
+	}
+
+	if waiting, err := r.waitForDependencies(ctx, workload); waiting != nil || err != nil {
+		return waiting, err
 	}
 
 	done, err := r.pauser.Resume(ctx, workload)
@@ -717,25 +732,36 @@ func claimsTargetFirst(a, b *v1alpha1.ManagedWorkload) bool {
 	return a.UID < b.UID
 }
 
-// findWorkloadsSharingTarget enqueues the other ManagedWorkloads that target
-// the same workload, so a blocked duplicate takes over as soon as the owner
-// is deleted.
-func (r *Reconciler) findWorkloadsSharingTarget(ctx context.Context, obj client.Object) []reconcile.Request {
+// findRelatedWorkloads enqueues the ManagedWorkloads affected by a change to
+// another: those sharing its target, so a blocked duplicate takes over when
+// the owner is deleted; its dependencies, so they re-check the hold when it
+// pauses; and its dependents, so they re-check when it wakes.
+func (r *Reconciler) findRelatedWorkloads(ctx context.Context, obj client.Object) []reconcile.Request {
 	changed, ok := obj.(*v1alpha1.ManagedWorkload)
 	if !ok {
 		return nil
 	}
 
 	var list v1alpha1.ManagedWorkloadList
-	if err := r.List(ctx, &list, client.InNamespace(changed.Namespace)); err != nil {
-		log.FromContext(ctx).Error(err, "listing managed workloads sharing a target",
+	if err := r.List(ctx, &list); err != nil {
+		log.FromContext(ctx).Error(err, "listing related managed workloads",
 			"workload", changed.Name, "namespace", changed.Namespace)
 		return nil
 	}
 
+	dependsOn := map[workloadID]bool{}
+	for _, ref := range changed.Spec.DependsOn {
+		dependsOn[dependencyID(changed, ref)] = true
+	}
+	changedTarget := targetID(changed)
+
 	var requests []reconcile.Request
-	for _, w := range list.Items {
-		if w.UID != changed.UID && w.Spec.Target == changed.Spec.Target {
+	for i := range list.Items {
+		w := &list.Items[i]
+		if w.UID == changed.UID {
+			continue
+		}
+		if targetID(w) == changedTarget || dependsOn[targetID(w)] || dependsOnTarget(w, changedTarget) {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: w.Name, Namespace: w.Namespace},
 			})
@@ -758,28 +784,42 @@ func targetRefFor(obj client.Object) (v1alpha1.WorkloadRef, bool) {
 	}
 }
 
+// findWorkloadsForTarget enqueues the ManagedWorkloads that manage a changed
+// Deployment or StatefulSet, and those that depend on it, so a resume waiting
+// for the dependency to become Ready re-checks promptly.
 func (r *Reconciler) findWorkloadsForTarget(ctx context.Context, obj client.Object) []reconcile.Request {
 	target, ok := targetRefFor(obj)
 	if !ok {
 		return nil
 	}
+	id := workloadID{namespace: obj.GetNamespace(), kind: target.Kind, name: target.Name}
 
 	var workloads v1alpha1.ManagedWorkloadList
-	if err := r.List(ctx, &workloads, client.InNamespace(obj.GetNamespace())); err != nil {
+	if err := r.List(ctx, &workloads); err != nil {
 		log.FromContext(ctx).Error(err, "listing managed workloads for target",
 			"target", target.Name, "kind", target.Kind, "namespace", obj.GetNamespace())
 		return nil
 	}
 
 	var requests []reconcile.Request
-	for _, w := range workloads.Items {
-		if w.Spec.Target == target {
+	for i := range workloads.Items {
+		w := &workloads.Items[i]
+		if targetID(w) == id || dependsOnTarget(w, id) {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: w.Name, Namespace: w.Namespace},
 			})
 		}
 	}
 	return requests
+}
+
+func dependsOnTarget(workload *v1alpha1.ManagedWorkload, id workloadID) bool {
+	for _, ref := range workload.Spec.DependsOn {
+		if dependencyID(workload, ref) == id {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Helpers ---
@@ -845,7 +885,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	targetHandler := handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForTarget)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ManagedWorkload{}).
-		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsSharingTarget)).
+		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findRelatedWorkloads)).
 		Watches(&appsv1.Deployment{}, targetHandler).
 		Watches(&appsv1.StatefulSet{}, targetHandler).
 		Named("managedworkload").

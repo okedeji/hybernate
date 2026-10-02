@@ -88,10 +88,41 @@ func scaleTo(ctx context.Context, scaler WorkloadScaler, target client.Object, n
 	return nil
 }
 
-func checkReady(ctx context.Context, scaler WorkloadScaler, target client.Object, desired int32) (bool, error) {
-	scale, err := scaler.GetScale(ctx, target)
-	if err != nil {
-		return false, fmt.Errorf("getting scale subresource: %w", err)
+// checkReady re-reads the target and reports whether at least desired
+// replicas are Ready. The scale subresource's status counts pods that exist,
+// which includes pods still starting, such as a database replaying its log.
+func checkReady(ctx context.Context, c client.Client, target client.Object, desired int32) (bool, error) {
+	if err := c.Get(ctx, client.ObjectKeyFromObject(target), target); err != nil {
+		return false, fmt.Errorf("getting %s: %w", target.GetName(), err)
 	}
-	return scale.Status.Replicas >= desired, nil
+	return ReadyReplicas(target) >= desired, nil
+}
+
+// ReadyReplicas returns how many of the target's replicas are Ready.
+func ReadyReplicas(target client.Object) int32 {
+	switch t := target.(type) {
+	case *appsv1.Deployment:
+		return t.Status.ReadyReplicas
+	case *appsv1.StatefulSet:
+		return t.Status.ReadyReplicas
+	default:
+		return 0
+	}
+}
+
+// IsReady reports whether every replica the target asks for is Ready, and
+// it asks for at least one.
+func IsReady(target client.Object) bool {
+	desired := int32(1)
+	switch t := target.(type) {
+	case *appsv1.Deployment:
+		if t.Spec.Replicas != nil {
+			desired = *t.Spec.Replicas
+		}
+	case *appsv1.StatefulSet:
+		if t.Spec.Replicas != nil {
+			desired = *t.Spec.Replicas
+		}
+	}
+	return desired > 0 && ReadyReplicas(target) >= desired
 }

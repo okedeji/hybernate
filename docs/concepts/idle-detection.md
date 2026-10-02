@@ -55,7 +55,8 @@ Each check runs in this order:
 2. `active-until` is in the future: stay awake.
 3. The last activity is less than `idleAfter` ago: stay awake.
 4. The [forecast](forecasting.md) is confident (`DailyActive` or later) and predicts demand above `cpuThreshold` in the next hour: stay awake.
-5. Otherwise the clock has run out. The phase becomes `Idle` and the idle action runs.
+5. Another workload that [depends on](dependencies.md) this one is awake, or the dependencies form a cycle: stay awake.
+6. Otherwise the clock has run out. The phase becomes `Idle` and the idle action runs.
 
 With `dryRun: true`, the phase still becomes `Idle` and a "would pause" event is emitted once, but nothing is changed. If activity resumes, the phase goes back to `Running`.
 

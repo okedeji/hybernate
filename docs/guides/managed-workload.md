@@ -98,6 +98,17 @@ See [Idle Detection](../concepts/idle-detection.md) for how the activity clock w
 
 Deploys and the `hybernate.io/last-activity` and `hybernate.io/active-until` annotations always count as activity; see [Idle Detection](../concepts/idle-detection.md#activity-annotations).
 
+### `dependsOn`
+
+Workloads this one needs. A dependency isn't paused while this workload is awake, and waking this workload wakes it. See [Dependencies](../concepts/dependencies.md).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `namespace` | string | this namespace | Namespace of the dependency |
+| `kind` | `Deployment`, `StatefulSet` | _(required)_ | Kind of the dependency |
+| `name` | string | _(required)_ | Name of the dependency's workload |
+| `waitForReady` | bool | `false` | Don't scale this workload up on resume until the dependency's pods are Ready |
+
 ### `pause`
 
 See [Pause & Destroy](pause-destroy.md) for detailed behavior.
