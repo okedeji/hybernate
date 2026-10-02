@@ -33,8 +33,7 @@ These metrics help troubleshoot specific workload behavior.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `hybernate_idle_signal_result` | Gauge | `namespace`, `workload` | Idle signal status (1=active, 2=signals_confirm, 3=grace_period, 4=idle) |
-| `hybernate_idle_fluke_total` | Counter | `namespace`, `workload` | Signals confirmed idle but prediction disagreed |
+| `hybernate_idle_seconds` | Gauge | `namespace`, `workload` | Seconds since the workload's last activity |
 | `hybernate_prediction_regime_changes_total` | Counter | `namespace`, `workload` | Regime changes detected |
 | `hybernate_pvc_retention_remaining_seconds` | Gauge | `namespace`, `workload` | Seconds until PVC cleanup |
 | `hybernate_automation_skipped_total` | Counter | `namespace`, `workload` | Automation skipped (manual override active) |
@@ -67,9 +66,6 @@ The `hybernate_prediction_phase` gauge uses numeric values:
 # Workloads with low prediction confidence
 hybernate_prediction_confidence_percent{season="daily"} < 70
 
-# Idle flukes (signals say idle, prediction disagrees)
-rate(hybernate_idle_fluke_total[1h]) > 0
-
-# Workloads stuck in grace period
-hybernate_idle_signal_result == 3
+# Workloads that will pause within 10 minutes (with the default 1h idleAfter)
+hybernate_idle_seconds > 3000
 ```

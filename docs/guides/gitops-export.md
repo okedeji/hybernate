@@ -82,9 +82,7 @@ spec:
     name: idle-worker
   idlePolicy:
     action: pause
-    cpuIdleThreshold: 10
-    memoryIdleThreshold: 10
-    gracePeriod: "5m"
+    idleAfter: 1h
     autoResume: true
   # ... other defaults from the policy
   dryRun: true  # Start safe
@@ -122,5 +120,5 @@ kubectl hybernate export \
 
 - **Start with `dryRun: true`** in exported manifests. Review events before enabling.
 - **Use `--classification Idle`** to export only the workloads Hybernate would pause.
-- **Customize per-workload** when defaults don't fit. Adjust grace periods, idle thresholds, or add Prometheus signals as needed.
+- **Customize per-workload** when defaults don't fit. Adjust `idleAfter` or the CPU activity threshold as needed.
 - **Keep the WorkloadPolicy in suggest mode** alongside GitOps. It continues scanning and reporting new discoveries without creating anything automatically.

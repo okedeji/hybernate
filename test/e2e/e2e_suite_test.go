@@ -37,6 +37,9 @@ var (
 	// pauseImage runs the Deployment the lifecycle test manages. The Makefile
 	// preloads it into kind so the test doesn't depend on a registry pull.
 	pauseImage = "registry.k8s.io/pause:3.10"
+	// metricsServerManifest is pinned so the idle clock spec doesn't change
+	// under the suite; its image is preloaded by the Makefile.
+	metricsServerManifest = "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )

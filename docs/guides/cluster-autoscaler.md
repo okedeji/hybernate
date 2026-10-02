@@ -27,8 +27,8 @@ extraArgs:
   scale-down-delay-after-delete: 1m
 
   # How long a node must be underutilized before it's eligible for removal.
-  # 5m works well with Hybernate's grace period (default 5m).
-  # If this is longer than the grace period, nodes linger after pods are gone.
+  # Nodes free up this long after Hybernate pauses their pods.
+  # Much longer than Hybernate's idleAfter, and nodes linger after pods are gone.
   scale-down-unneeded-time: 5m
 
   # CPU utilization threshold below which a node is considered underutilized.
@@ -55,7 +55,7 @@ extraArgs:
 
 ### Things to Watch
 
-- **`scale-down-unneeded-time` vs Hybernate's grace period**: If the autoscaler's unneeded time is much longer than Hybernate's grace period, nodes will sit idle after Hybernate pauses workloads. Align them or keep the autoscaler's shorter.
+- **`scale-down-unneeded-time`**: Nodes sit empty for this long after Hybernate pauses their pods. Keep it short relative to `idleAfter`, or a paused workload's node lingers for most of the time it's asleep.
 - **Pod Disruption Budgets**: The autoscaler must evict pods before removing a node, and PDBs can block eviction. Hybernate bypasses this because it scales replica counts directly, not through eviction. However, non-managed pods with PDBs on the same node can still prevent the autoscaler from removing it.
 - **DaemonSets**: Nodes running only DaemonSet pods are still considered underutilized and can be removed. This is usually the desired behavior.
 

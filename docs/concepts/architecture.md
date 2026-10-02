@@ -16,7 +16,7 @@ The primary reconciler. Watches `ManagedWorkload` CRs and drives each workload t
 2. Detects a paused workload scaled up externally
 3. Processes manual overrides (`desiredState`)
 4. Checks pause expiry and PVC retention cleanup
-5. Runs idle detection (signals + prediction + grace period)
+5. Runs the activity clock: records activity, and pauses once there has been none for `idleAfter`
 6. Accumulates cost data
 
 Each ManagedWorkload gets its own forecast engine instance, serialized into the CR status so it survives operator restarts.
@@ -33,7 +33,6 @@ In `auto-manage` mode, it creates `ManagedWorkload` CRs for idle workloads using
 |---------|---------------|
 | `internal/controller` | Reconciliation logic for all three CRDs |
 | `internal/forecast` | Holt-Winters model, phase lifecycle, confidence scoring, anomaly detection |
-| `internal/policy` | Idle state machine and grace period tracking |
 | `internal/signal` | Signal interface, CPU threshold checker, Prometheus PromQL prober |
 | `internal/lifecycle` | Pause, resume, and destroy operations against the K8s API |
 | `internal/discovery` | Namespace scanning and workload classification |

@@ -41,8 +41,7 @@ func TestAllMetricsRegistered(t *testing.T) {
 		"hybernate_drift_detections_total",
 
 		// Tier 3
-		"hybernate_idle_signal_result",
-		"hybernate_idle_fluke_total",
+		"hybernate_idle_seconds",
 		"hybernate_prediction_regime_changes_total",
 		"hybernate_pvc_retention_remaining_seconds",
 		"hybernate_automation_skipped_total",
@@ -76,8 +75,7 @@ func TestAllMetricsRegistered(t *testing.T) {
 	IdleDetections.WithLabelValues("pause", "ns", "w").Inc()
 	PauseExpiryActions.WithLabelValues("resume").Inc()
 	DriftDetections.WithLabelValues("adopt").Inc()
-	IdleSignalResult.WithLabelValues("ns", "w").Set(1)
-	IdleFlukes.WithLabelValues("ns", "w").Inc()
+	IdleSeconds.WithLabelValues("ns", "w").Set(60)
 	PredictionRegimeChanges.WithLabelValues("ns", "w").Inc()
 	PVCRetentionRemaining.WithLabelValues("ns", "w").Set(3600)
 	AutomationSkipped.WithLabelValues("ns", "w").Inc()

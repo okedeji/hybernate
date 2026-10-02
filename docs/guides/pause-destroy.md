@@ -57,7 +57,8 @@ kubectl patch managedworkload my-api -n staging \
 **Automatically:**
 
 - When `expireAfter` elapses with `expireAction: Resume`
-- When `autoResume: true` is set and signals no longer confirm idle
+- When a `hybernate.io/last-activity` annotation newer than the pause, or a future `hybernate.io/active-until`, is set on the ManagedWorkload or its target
+- When `autoResume: true` is set and a confident forecast expects demand
 
 ## Destroy
 

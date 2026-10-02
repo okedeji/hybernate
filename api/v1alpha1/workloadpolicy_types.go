@@ -75,7 +75,7 @@ type WorkloadPolicySpec struct {
 	DryRun bool `json:"dryRun,omitempty"`
 
 	// Default idle policy copied into exported/auto-created ManagedWorkloads.
-	// +kubebuilder:default={"action":"pause","cpuIdleThreshold":10,"memoryIdleThreshold":10,"gracePeriod":"5m0s","autoResume":true}
+	// +kubebuilder:default={"action":"pause","idleAfter":"1h0m0s","autoResume":true}
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
 	// Default pause behavior copied into exported/auto-created ManagedWorkloads.

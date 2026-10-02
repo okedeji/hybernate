@@ -1,6 +1,6 @@
 # Lifecycle
 
-Every ManagedWorkload moves through a defined set of phases. The operator drives transitions based on signals, predictions, manual overrides, and timers.
+Every ManagedWorkload moves through a defined set of phases. The operator drives transitions based on workload activity, predictions, manual overrides, and timers.
 
 ## Phases
 
@@ -19,7 +19,7 @@ Creating ──► Running ──► Idle ──► Pausing ──► Paused
 |-------|-------------|
 | **Creating** | Initial phase on CR creation. Transitions to Running after first reconcile. |
 | **Running** | Workload is active. Idle detection is evaluated on each reconcile. |
-| **Idle** | All signals confirm idle, prediction agrees, and grace period has elapsed. Operator will execute the configured idle action. |
+| **Idle** | No activity for `idleAfter`. The operator executes the configured idle action, or in dry-run reports what it would do. |
 | **Pausing** | Workload is being scaled to zero. In-progress until replicas reach 0. |
 | **Paused** | Workload is at zero replicas. Expiry timers and PVC retention are tracked here. |
 | **Resuming** | Previous replica count is being restored. Transitions to Running when pods are ready. |
@@ -30,10 +30,11 @@ Creating ──► Running ──► Idle ──► Pausing ──► Paused
 
 ### Automatic (no `desiredState` set)
 
-- **Running → Idle**: Idle detection confirms idle (signals + prediction + grace period)
-- **Idle → Pausing**: Idle action is `pause` or `auto`
+- **Running → Idle**: No activity for `idleAfter`, and no confident forecast of demand
+- **Idle → Pausing**: Idle action is `pause`
+- **Idle → Running**: Activity resumes (dry-run only; otherwise the idle action has already run)
 - **Idle → Destroying**: Idle action is `destroy`
-- **Paused → Resuming**: Pause expiry elapses with `expireAction: Resume`, or `autoResume` triggers when signals clear
+- **Paused → Resuming**: An activity annotation newer than the pause, pause expiry with `expireAction: resume`, or `autoResume` ahead of forecast demand
 - **Paused → Destroying**: Pause expiry elapses with `expireAction: Destroy`
 
 ### Manual (`desiredState` set)

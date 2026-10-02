@@ -12,57 +12,40 @@ kubectl get managedworkload my-api -n staging -o jsonpath='{.spec.dryRun}'
 
 If `true`, the operator evaluates but doesn't act. Set to `false` to enable.
 
-**Check 2: Are all signals confirming?**
+**Check 2: When was it last active?**
 
 ```bash
-kubectl describe managedworkload my-api -n staging
+kubectl get managedworkload my-api -n staging -o jsonpath='{.status.activity}'
 ```
 
-Look at events for signal evaluation results. If any signal denies, idle detection resets.
+`lastActivitySource` says what last kept it awake, and `pauseAt` is when it will pause if nothing else happens. If `pauseAt` keeps moving forward, something is still counting as activity:
 
-**Check 3: Is the grace period still running?**
+- **`cpu`**: usage is above `activity.cpuThreshold`% of requests. Background work (polling, cron loops) can keep a workload busy; raise the threshold if that's expected.
+- **`annotation`**: a `hybernate.io/last-activity` annotation is being refreshed, or `hybernate.io/active-until` is in the future. Check both the ManagedWorkload and its target.
+- **`rollout`**: the pod template changed recently.
 
-Check the idle signal metric:
-
-```bash
-# 3 = InGracePeriod, 4 = Idle
-kubectl get --raw /metrics | grep hybernate_idle_signal_result
-```
-
-**Check 4: Is the prediction engine active?**
-
-```bash
-kubectl get managedworkload my-api -n staging -o jsonpath='{.status.prediction}'
-```
-
-If `dailyPhase` is `Observing`, the engine hasn't collected enough data yet (needs 24+ hours).
-
-If it has been `Observing` for well over 24 hours, check whether the engine is being fed at all:
+**Check 3: Can Hybernate read CPU?**
 
 ```bash
 kubectl get managedworkload my-api -n staging \
   -o jsonpath='{.status.conditions[?(@.type=="MetricsAvailable")]}'
 ```
 
-`MetricsAvailable=False` means the operator can't read the workload's CPU usage, so the forecast isn't learning:
+Without CPU data a busy workload looks idle, so Hybernate doesn't act. `MetricsAvailable=False` says why:
 
 - **`NoPodMetrics`**: the target has replicas, but the Metrics API reports no pods for it. Check that metrics-server is installed (`kubectl top pods -n staging`) and that the target's pods are running.
+- **`NoCPURequests`**: the target's containers set no CPU requests, so utilization can't be measured. Set CPU requests.
 - **`MetricsUnavailable`**: the Metrics API itself failed. The condition message has the error; a missing `metrics.k8s.io` API means metrics-server isn't installed.
 
-A target scaled to zero replicas is not an error: it's recorded as zero demand.
+A target scaled to zero replicas is not an error: it's recorded as zero usage.
+
+**Check 4: Is the forecast holding it awake?**
+
+Look for an `IdleVetoed` event in `kubectl describe managedworkload my-api -n staging`. A confident forecast that expects demand in the next hour defers the pause.
 
 ### Workload keeps cycling between paused and running
 
-This usually means idle detection triggers pause, then auto-resume immediately detects "not idle" (because paused workloads have zero CPU, which is below threshold, but the workload has no pods to measure).
-
-**Fix:** Ensure your Prometheus signals check for actual traffic, not just CPU:
-
-```yaml title="managedworkload.yaml" linenums="1"
-idlePolicy:
-  signals:
-    - source: prometheus
-      promQL: 'rate(http_requests_total{service="my-api"}[10m]) == 0'
-```
+Something keeps waking it. Check the events for `WokeByActivity` (an activity annotation newer than the pause) or `AutoResume` (the forecast expected demand). A tool that refreshes `hybernate.io/last-activity` on a timer, rather than on real use, will keep waking the workload.
 
 ### Prediction confidence stays at 0
 

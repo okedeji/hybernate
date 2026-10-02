@@ -40,7 +40,6 @@ import (
 	"github.com/okedeji/hybernate/internal/forecast"
 	"github.com/okedeji/hybernate/internal/lifecycle"
 	"github.com/okedeji/hybernate/internal/metrics"
-	"github.com/okedeji/hybernate/internal/policy"
 )
 
 const (
@@ -62,7 +61,6 @@ type Reconciler struct {
 
 	pauser        lifecyclePauser
 	destroyer     lifecycleDestroyer
-	idle          idleEvaluator
 	metrics       metricsReader
 	engines       *engineRegistry
 	prometheusURL string
@@ -130,8 +128,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// --- Target check + drift detection ---
 
+	var target client.Object
 	if workload.Status.Phase != v1alpha1.PhaseDestroyed && workload.Status.Phase != v1alpha1.PhaseDestroying {
-		target, err := r.checkTarget(ctx, &workload)
+		var err error
+		target, err = r.checkTarget(ctx, &workload)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -178,7 +178,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// --- Automation ---
 
-	result, err = r.reconcileAutomation(ctx, &workload)
+	result, err = r.reconcileAutomation(ctx, &workload, target)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -299,6 +299,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 
 	r.stampLastActed(workload)
 	r.observeActionDuration(workload, "resume")
+	r.resetActivity(workload, v1alpha1.ActivitySourceWoke)
 	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed")
 	if err != nil {
 		return nil, err
@@ -508,9 +509,9 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 	if err := r.Update(ctx, workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
 	}
-	metrics.WorkloadPhase.DeletePartialMatch(prometheus.Labels{
-		"namespace": workload.Namespace, "workload": workload.Name,
-	})
+	labels := prometheus.Labels{"namespace": workload.Namespace, "workload": workload.Name}
+	metrics.WorkloadPhase.DeletePartialMatch(labels)
+	metrics.IdleSeconds.DeletePartialMatch(labels)
 	return ctrl.Result{}, nil
 }
 
@@ -820,9 +821,6 @@ func (r *Reconciler) initDefaults() {
 	}
 	if r.metrics == nil {
 		r.metrics = metrics.NewReader(r.Client)
-	}
-	if r.idle == nil {
-		r.idle = policy.NewIdleDetector()
 	}
 	if r.engines == nil {
 		r.engines = newEngineRegistry(func(threshold int) forecaster {

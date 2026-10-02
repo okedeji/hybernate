@@ -2,7 +2,7 @@
 
 **Intelligent Kubernetes workload lifecycle management.**
 
-Hybernate is a Kubernetes operator that predicts your workload demand using Holt-Winters forecasting and pauses, resumes, or destroys workloads to cut infrastructure costs. It requires consensus across multiple signals before acting, and supports dry run mode so you can observe its recommendations and build confidence before letting it drive actions.
+Hybernate is a Kubernetes operator that predicts your workload demand using Holt-Winters forecasting and pauses, resumes, or destroys workloads to cut infrastructure costs. It pauses a workload once nothing has used it for a configurable time, and supports dry run mode so you can observe its recommendations and build confidence before letting it drive actions.
 
 ---
 
@@ -20,11 +20,11 @@ Hybernate fixes this by learning your workload patterns and acting on them:
 ### Demand Forecasting
 A Holt-Winters double seasonal model learns daily and weekly traffic patterns for each workload. After observing your traffic for a few hours, it starts predicting demand, and its confidence improves over time. If traffic patterns shift, a built-in anomaly detector notices the drift, demotes the model's confidence, and re-learns from the new baseline.
 
-### Multi-Signal Consensus
-CPU metrics alone aren't enough. Hybernate combines built-in Kubernetes metrics with your own custom PromQL queries (active connections, queue depth, request rates, or anything else you care about) and requires **all signals to agree** before taking action.
+### Activity Clock
+Hybernate records the last time each workload was in use: CPU above a threshold, a deploy, or an activity annotation from your own tooling. Once nothing has been active for `idleAfter`, it pauses the workload. There's no learning period.
 
 ### Safe by Default
-Every action goes through a grace period, signal consensus, and confidence threshold. Enable `dryRun` mode to see what Hybernate would do without it actually doing anything. Conflict detection catches external changes to your workloads.
+Hybernate never pauses a workload it can't measure, and a confident forecast can hold off a pause. Enable `dryRun` mode to see what Hybernate would do without it actually doing anything. Conflict detection catches external changes to your workloads.
 
 ### Cost Tracking
 Track per-workload resource consumption and savings. See exactly how much you're saving from paused and destroyed workloads.
@@ -59,17 +59,15 @@ spec:
     kind: Deployment
     name: my-api
   idlePolicy:
-    action: auto
-    cpuIdleThreshold: 10
-    memoryIdleThreshold: 10
-    gracePeriod: 10m
+    action: pause
+    idleAfter: 1h
   prediction:
     confidence: 85
 ```
 
 This watches the `my-api` Deployment and pauses it when both CPU and memory stay below 10% of their respective requests for 10 minutes. The forecast engine learns daily and weekly patterns and must agree before any action is taken.
 
-For idle policies, custom PromQL signals, cost rate overrides, and the full spec, see the [ManagedWorkload Guide](guides/managed-workload.md).
+For idle policies, cost rate overrides, and the full spec, see the [ManagedWorkload Guide](guides/managed-workload.md).
 
 ---
 
