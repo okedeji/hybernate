@@ -39,6 +39,7 @@ import (
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/controller"
+	"github.com/okedeji/hybernate/internal/doorman"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -61,6 +62,8 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var prometheusURL string
+	var runDoorman bool
+	var doormanService, doormanNamespace string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
@@ -77,6 +80,12 @@ func main() {
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "Metrics server certificate file name.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "Metrics server key file name.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false, "Enable HTTP/2 for metrics and webhook servers.")
+	flag.BoolVar(&runDoorman, "doorman", false,
+		"Run as the doorman, which holds connections to paused workloads and wakes them, instead of the operator.")
+	flag.StringVar(&doormanService, "doorman-service", "hybernate-doorman",
+		"Name of the doorman's Service. Empty disables waking on request.")
+	flag.StringVar(&doormanNamespace, "doorman-namespace", envOr("POD_NAMESPACE", "hybernate-system"),
+		"Namespace of the doorman's Service.")
 	flag.StringVar(&prometheusURL, "prometheus-url", "",
 		"Base URL of the Prometheus API used for activity queries, e.g. http://prometheus.monitoring.svc:9090.")
 
@@ -123,8 +132,9 @@ func main() {
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhook.NewServer(webhookServerOptions),
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "479a98fc.hybernate.io",
+		// Every doorman replica serves traffic, so only the operator elects a leader.
+		LeaderElection:   enableLeaderElection && !runDoorman,
+		LeaderElectionID: "479a98fc.hybernate.io",
 		Client: client.Options{
 			Cache: &client.CacheOptions{
 				DisableFor: []client.Object{&metricsv1beta1.PodMetrics{}},
@@ -136,30 +146,42 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.Reconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Recorder:      mgr.GetEventRecorder("hybernate"),
-		PrometheusURL: prometheusURL,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ManagedWorkload")
-		os.Exit(1)
+	readyz := healthz.Ping
+	if runDoorman {
+		server := doorman.NewServer(mgr.GetClient(), mgr.GetEventRecorder("hybernate-doorman"), "")
+		if err := mgr.Add(server); err != nil {
+			setupLog.Error(err, "unable to add doorman")
+			os.Exit(1)
+		}
+		readyz = server.Ready
+	} else {
+		if err := (&controller.Reconciler{
+			Client:           mgr.GetClient(),
+			Scheme:           mgr.GetScheme(),
+			Recorder:         mgr.GetEventRecorder("hybernate"),
+			PrometheusURL:    prometheusURL,
+			DoormanService:   doormanService,
+			DoormanNamespace: doormanNamespace,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ManagedWorkload")
+			os.Exit(1)
+		}
+		if err := (&controller.WorkloadPolicyReconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorder("workloadpolicy"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "WorkloadPolicy")
+			os.Exit(1)
+		}
+		// +kubebuilder:scaffold:builder
 	}
-	if err := (&controller.WorkloadPolicyReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("workloadpolicy"),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "WorkloadPolicy")
-		os.Exit(1)
-	}
-	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", readyz); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -169,6 +191,13 @@ func main() {
 		setupLog.Error(err, "manager exited with error")
 		os.Exit(1)
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // validatePrometheusURL fails fast on a malformed URL so a typo surfaces at

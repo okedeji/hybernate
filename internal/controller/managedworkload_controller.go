@@ -23,6 +23,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,6 +61,11 @@ type Reconciler struct {
 	Recorder      events.EventRecorder
 	PrometheusURL string
 
+	// DoormanService and DoormanNamespace locate the doorman, whose Ready
+	// pods paused workloads' Services are routed to. Empty disables it.
+	DoormanService   string
+	DoormanNamespace string
+
 	pauser        lifecyclePauser
 	destroyer     lifecycleDestroyer
 	metrics       metricsReader
@@ -86,6 +93,8 @@ type lifecycleDestroyer interface {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile evaluates the current state of a ManagedWorkload and acts on it.
@@ -148,6 +157,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 			}
 			return *result, nil
 		}
+	}
+
+	// --- Wake on request ---
+
+	if err := r.reconcileDoorman(ctx, &workload, target); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling doorman routes: %w", err)
 	}
 
 	// --- In-flight transitions ---
@@ -888,6 +903,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findRelatedWorkloads)).
 		Watches(&appsv1.Deployment{}, targetHandler).
 		Watches(&appsv1.StatefulSet{}, targetHandler).
+		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForDoorman)).
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.findPausedWorkloadsInNamespace)).
 		Named("managedworkload").
 		Complete(r)
 }
