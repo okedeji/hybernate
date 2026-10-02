@@ -162,17 +162,10 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 		opmetrics.AutomationSkipped.WithLabelValues(workload.Namespace, workload.Name).Inc()
 		r.emitEvent(workload, false, "Normal", ReasonAutomationSkipped, actionEvaluate,
 			"automation skipped, desiredState is manually set to %s", *workload.Spec.DesiredState)
-		if err := r.Status().Update(ctx, workload); err != nil {
-			return nil, fmt.Errorf("updating prediction status: %w", err)
-		}
-		result := ctrl.Result{RequeueAfter: 1 * time.Hour}
-		return &result, nil
+		return &ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
 	}
 
 	if workload.Spec.IdlePolicy == nil {
-		if err := r.Status().Update(ctx, workload); err != nil {
-			return nil, fmt.Errorf("updating prediction status: %w", err)
-		}
 		return &ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
 	}
 
@@ -262,9 +255,6 @@ func (r *Reconciler) reportMetricsUnavailable(ctx context.Context, workload *v1a
 
 	firstFailure := !meta.IsStatusConditionFalse(workload.Status.Conditions, conditionMetricsAvailable)
 	r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionFalse, reason, msg)
-	if uerr := r.Status().Update(ctx, workload); uerr != nil {
-		return nil, fmt.Errorf("updating metrics condition: %w", uerr)
-	}
 	if firstFailure {
 		r.emitEvent(workload, false, "Warning", reason, actionForecast, "%s", msg)
 	}

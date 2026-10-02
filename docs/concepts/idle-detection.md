@@ -77,7 +77,9 @@ For Prometheus queries, the `PrometheusAvailable` condition reports `EndpointNot
 
 ## Restarts and outages
 
-The clock is stored in `status.activity`, so it survives operator restarts. If the operator wasn't running for more than two check intervals, it can't know whether there was activity in the meantime, so the clock restarts from the time it resumes watching (`lastActivitySource: unobserved`). An outage can delay a pause, but never cause one.
+The clock is stored in `status.activity`, so it survives operator restarts. While a workload is awake it's checked about once a minute; the clock's timestamps are written to status at most every 5 minutes, along with cost, and immediately whenever the phase or a condition changes. Activity seen between writes is held in memory, so it still counts.
+
+If the operator wasn't running for more than about 7 minutes (two missed checks beyond the write interval), it can't know whether there was activity in the meantime, so the clock restarts from the time it resumes watching (`lastActivitySource: unobserved`). An outage can delay a pause, but never cause one.
 
 ```yaml
 status:

@@ -23,12 +23,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -45,13 +47,46 @@ const (
 	activityCheckInterval = 1 * time.Minute
 
 	// unobservedGap is how stale the last evaluation may be before the clock
-	// restarts. Two missed checks means the operator wasn't watching, so it
-	// can't claim the workload was idle in the meantime.
-	unobservedGap = 2 * activityCheckInterval
+	// restarts. Evaluations are only written every statusFlushInterval, so a
+	// gap beyond that plus two missed checks means the operator wasn't
+	// watching, and it can't claim the workload was idle in the meantime.
+	unobservedGap = 2*activityCheckInterval + statusFlushInterval
 
 	defaultIdleAfter    = 1 * time.Hour
 	defaultCPUThreshold = 10
 )
+
+// activityMemo keeps each workload's latest clock between status writes.
+// Status is written every statusFlushInterval at most when only the clock
+// has moved, so without this, activity seen on an unwritten check would be
+// lost and the workload could pause up to one flush interval early. It's
+// in-memory only: after a restart the written status is the baseline.
+type activityMemo struct {
+	mu     sync.Mutex
+	clocks map[types.UID]v1alpha1.ActivityStatus
+}
+
+func (m *activityMemo) get(uid types.UID) (v1alpha1.ActivityStatus, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clock, ok := m.clocks[uid]
+	return clock, ok
+}
+
+func (m *activityMemo) put(uid types.UID, clock v1alpha1.ActivityStatus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.clocks == nil {
+		m.clocks = make(map[types.UID]v1alpha1.ActivityStatus)
+	}
+	m.clocks[uid] = clock
+}
+
+func (m *activityMemo) forget(uid types.UID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.clocks, uid)
+}
 
 // errNoCPURequests means CPU utilization can't be computed for the target.
 var errNoCPURequests = errors.New("target has no CPU requests")
@@ -125,6 +160,13 @@ func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.Man
 		r.resetActivity(workload, v1alpha1.ActivitySourceCreated)
 	}
 	status := workload.Status.Activity
+	if remembered, ok := r.activityMemo.get(workload.UID); ok {
+		recordActivity(status, remembered.LastActivityTime.Time, remembered.LastActivitySource)
+		if remembered.LastEvaluatedTime != nil &&
+			(status.LastEvaluatedTime == nil || remembered.LastEvaluatedTime.After(status.LastEvaluatedTime.Time)) {
+			status.LastEvaluatedTime = remembered.LastEvaluatedTime.DeepCopy()
+		}
+	}
 
 	if last := status.LastEvaluatedTime; last != nil && now.Sub(last.Time) > unobservedGap {
 		status.LastActivityTime = metav1.NewTime(now)
@@ -172,6 +214,7 @@ func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.Man
 	status.LastEvaluatedTime = &evaluated
 	pauseAt := metav1.NewTime(status.LastActivityTime.Add(idleAfterFor(workload)))
 	status.PauseAt = &pauseAt
+	r.activityMemo.put(workload.UID, *status.DeepCopy())
 	opmetrics.IdleSeconds.WithLabelValues(workload.Namespace, workload.Name).
 		Set(now.Sub(status.LastActivityTime.Time).Seconds())
 	return obs
@@ -302,13 +345,13 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 				return nil, err
 			}
 		}
-		return r.requeueActivity(ctx, workload, nextCheck(now, pauseAt, obs.activeUntil))
+		return &ctrl.Result{RequeueAfter: nextCheck(now, pauseAt, obs.activeUntil)}, nil
 	}
 
 	if vetoed, predicted := r.forecastVeto(ctx, workload, engine); vetoed {
 		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleVetoed, actionEvaluateIdle,
 			"idle, but the forecast expects demand within the hour (%.0f%% of requests); not pausing yet", predicted)
-		return r.requeueActivity(ctx, workload, activityCheckInterval)
+		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 	}
 
 	action := resolveIdleAction(workload)
@@ -327,7 +370,7 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 	}
 
 	if workload.Spec.DryRun {
-		return r.requeueActivity(ctx, workload, activityCheckInterval)
+		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 	}
 	if action == v1alpha1.IdleActionDestroy {
 		return r.handleDestroy(ctx, workload)
@@ -403,12 +446,5 @@ func (r *Reconciler) reportPrometheusUnavailable(ctx context.Context, workload *
 	}
 	log.FromContext(ctx).V(1).Info("Prometheus activity unavailable",
 		"workload", workload.Name, "namespace", workload.Namespace, "reason", reason, "error", err.Error())
-	return r.requeueActivity(ctx, workload, activityCheckInterval)
-}
-
-func (r *Reconciler) requeueActivity(ctx context.Context, workload *v1alpha1.ManagedWorkload, after time.Duration) (*ctrl.Result, error) {
-	if err := r.Status().Update(ctx, workload); err != nil {
-		return nil, fmt.Errorf("updating activity status: %w", err)
-	}
-	return &ctrl.Result{RequeueAfter: after}, nil
+	return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 }

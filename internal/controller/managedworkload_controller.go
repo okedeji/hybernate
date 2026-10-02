@@ -63,6 +63,7 @@ type Reconciler struct {
 	destroyer     lifecycleDestroyer
 	metrics       metricsReader
 	engines       *engineRegistry
+	activityMemo  activityMemo
 	prometheusURL string
 	clock         func() time.Time
 }
@@ -110,6 +111,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	// Re-published every reconcile so the gauge is populated after an
 	// operator restart, not only after the next transition.
 	recordPhase(&workload)
+
+	// The status as last written, to tell what this reconcile changed.
+	observed := workload.Status.DeepCopy()
 
 	if err := r.ensureFinalizer(ctx, &workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring finalizer: %w", err)
@@ -182,17 +186,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// --- Cost tracking and status ---
+
+	r.accumulateCost(ctx, &workload)
+	if err := r.persistStatus(ctx, &workload, observed); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.V(1).Info("reconciled", "workload", workload.Name, "namespace", workload.Namespace, "phase", workload.Status.Phase)
 	if result != nil {
 		return *result, nil
 	}
-
-	// --- Cost tracking ---
-	r.accumulateCost(ctx, &workload)
-	if err := r.Status().Update(ctx, &workload); err != nil {
-		return ctrl.Result{}, fmt.Errorf("persisting cost status: %w", err)
-	}
-
-	logger.Info("reconciled", "phase", workload.Status.Phase)
 	return ctrl.Result{}, nil
 }
 
@@ -509,6 +514,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 	if err := r.Update(ctx, workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
 	}
+	r.activityMemo.forget(workload.UID)
 	labels := prometheus.Labels{"namespace": workload.Namespace, "workload": workload.Name}
 	metrics.WorkloadPhase.DeletePartialMatch(labels)
 	metrics.IdleSeconds.DeletePartialMatch(labels)

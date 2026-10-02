@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -281,9 +280,7 @@ func TestAutomation_PredictionStatusUpdated(t *testing.T) {
 	_, err := r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 
-	w := &v1alpha1.ManagedWorkload{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, w))
-
+	w := workload
 	require.NotNil(t, w.Status.Prediction)
 	assert.Equal(t, "Active", w.Status.Prediction.DailyPhase)
 	assert.Equal(t, "Suggesting", w.Status.Prediction.WeeklyPhase)
@@ -291,9 +288,10 @@ func TestAutomation_PredictionStatusUpdated(t *testing.T) {
 	assert.Equal(t, 72, w.Status.Prediction.WeeklyConfidence)
 }
 
-func metricsCondition(t *testing.T, r *Reconciler) *metav1.Condition {
-	t.Helper()
-	return meta.FindStatusCondition(getWorkload(t, r, "api").Status.Conditions, conditionMetricsAvailable)
+// metricsCondition reads the condition from the in-memory workload: the
+// automation step sets it, and the reconcile writes status once at the end.
+func metricsCondition(workload *v1alpha1.ManagedWorkload) *metav1.Condition {
+	return meta.FindStatusCondition(workload.Status.Conditions, conditionMetricsAvailable)
 }
 
 func TestAutomation_MissingMetricsSurfacesCondition(t *testing.T) {
@@ -323,7 +321,7 @@ func TestAutomation_MissingMetricsSurfacesCondition(t *testing.T) {
 			}
 
 			assert.Equal(t, 0, engine.observeCalls)
-			cond := metricsCondition(t, r)
+			cond := metricsCondition(workload)
 			require.NotNil(t, cond, "the user must be able to see why the forecast isn't learning")
 			assert.Equal(t, metav1.ConditionFalse, cond.Status)
 			assert.Equal(t, tt.wantReason, cond.Reason)
@@ -345,7 +343,7 @@ func TestAutomation_ZeroReplicasFeedsZeroDemand(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, engine.observeCalls, "a target scaled to zero is an observation of zero demand")
-	cond := metricsCondition(t, r)
+	cond := metricsCondition(workload)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 }
@@ -358,14 +356,13 @@ func TestAutomation_MetricsConditionRecovers(t *testing.T) {
 
 	_, err := r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
-	require.Equal(t, metav1.ConditionFalse, metricsCondition(t, r).Status)
+	require.Equal(t, metav1.ConditionFalse, metricsCondition(workload).Status)
 
 	metrics.err = nil
 	metrics.cpuMillis = 120
-	workload = getWorkload(t, r, "api")
 	_, err = r.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, engine.observeCalls)
-	assert.Equal(t, metav1.ConditionTrue, metricsCondition(t, r).Status)
+	assert.Equal(t, metav1.ConditionTrue, metricsCondition(workload).Status)
 }
