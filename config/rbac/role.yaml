@@ -18,6 +18,15 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - namespaces
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
   - delete
@@ -31,14 +40,6 @@ rules:
   verbs:
   - get
   - list
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - ""
   - events.k8s.io
