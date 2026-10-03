@@ -527,6 +527,10 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 		return ctrl.Result{}, nil
 	}
 
+	if err := r.restoreBeforeDelete(ctx, workload); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// If destroyed with PVC retention pending, clean up.
 	if workload.Status.Destroy != nil && workload.Status.Destroy.PVCRetentionExpiresAt != nil {
 		now := r.now()
@@ -554,6 +558,25 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 	metrics.WorkloadPhase.DeletePartialMatch(labels)
 	metrics.IdleSeconds.DeletePartialMatch(labels)
 	return ctrl.Result{}, nil
+}
+
+// restoreBeforeDelete scales a paused workload back to the replicas it had,
+// so that no longer managing it never leaves it switched off. It doesn't
+// wait for the pods to be Ready, which would hold up the deletion; a
+// workload that's gone has nothing to restore.
+func (r *Reconciler) restoreBeforeDelete(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
+	if workload.Status.Pause == nil || workload.Status.Phase == v1alpha1.PhaseDestroyed {
+		return nil
+	}
+	if _, err := r.pauser.Resume(ctx, workload); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("restoring paused workload before deletion: %w", err)
+	}
+	r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume,
+		"restored to %d replicas: no longer managed", workload.Status.Pause.PreviousReplicas)
+	return nil
 }
 
 func recordPhase(workload *v1alpha1.ManagedWorkload) {
