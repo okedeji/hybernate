@@ -11,8 +11,8 @@ Most workloads follow predictable patterns:
 
 Hybernate learns these two patterns independently by feeding hourly CPU observations into a Holt-Winters model. Once it has enough data and confidence, it uses the learned patterns to:
 
-- Confirm that a workload is genuinely idle (not just in a temporary lull)
-- Wake paused workloads ahead of predicted demand
+- Hold off a pause when it's confident demand is coming in the next hour. It never causes a pause: the [activity clock](idle-detection.md) decides that
+- Wake paused workloads ahead of predicted demand, starting 15 minutes before an hour it expects to be busy
 
 ## How It Works
 
@@ -110,6 +110,7 @@ The entire engine state (model parameters, seasonal factors, confidence scores, 
 Seasonal slots are keyed to wall-clock time (UTC), not to a running counter. This means:
 
 - If a workload is paused for 6 hours, the model doesn't lose alignment. The next observation goes into the correct hour-of-day slot
+- While a workload is paused behind the [doorman](wake-on-request.md) (`WakeOnRequest=True`), each paused hour is recorded as zero demand: a request would have woken it, so an hour without one is an hour nobody asked for it. That's how the model learns that nights and weekends are quiet. A workload paused without the doorman records nothing while paused, since demand it can't see isn't zero
 - Monday 9am always maps to the same slot, regardless of gaps
 
 ## Tuning

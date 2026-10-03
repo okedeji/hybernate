@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -43,6 +44,8 @@ type stubForecaster struct {
 	weeklyConfidence int
 	dataPoints       int
 	predictValue     float64
+	predictByHour    map[int]float64 // overrides predictValue for an hour ahead
+	observed         []float64
 	observeCalls     int
 	regimeChanged    bool
 	anomalyDetected  bool
@@ -50,16 +53,22 @@ type stubForecaster struct {
 
 func (f *stubForecaster) Observe(actual float64, _ time.Time) float64 {
 	f.observeCalls++
+	f.observed = append(f.observed, actual)
 	return f.predictValue
 }
-func (f *stubForecaster) Predict(_ int, _ time.Time) float64 { return f.predictValue }
-func (f *stubForecaster) Export() ([]byte, error)            { return []byte("{}"), nil }
-func (f *stubForecaster) GetPhase() forecast.Phase           { return f.phase }
-func (f *stubForecaster) DailyConfidence() int               { return f.dailyConfidence }
-func (f *stubForecaster) WeeklyConfidence() int              { return f.weeklyConfidence }
-func (f *stubForecaster) GetDataPoints() int                 { return f.dataPoints }
-func (f *stubForecaster) RegimeChanged() bool                { return f.regimeChanged }
-func (f *stubForecaster) AnomalyDetected() bool              { return f.anomalyDetected }
+func (f *stubForecaster) Predict(h int, _ time.Time) float64 {
+	if v, ok := f.predictByHour[h]; ok {
+		return v
+	}
+	return f.predictValue
+}
+func (f *stubForecaster) Export() ([]byte, error)  { return []byte("{}"), nil }
+func (f *stubForecaster) GetPhase() forecast.Phase { return f.phase }
+func (f *stubForecaster) DailyConfidence() int     { return f.dailyConfidence }
+func (f *stubForecaster) WeeklyConfidence() int    { return f.weeklyConfidence }
+func (f *stubForecaster) GetDataPoints() int       { return f.dataPoints }
+func (f *stubForecaster) RegimeChanged() bool      { return f.regimeChanged }
+func (f *stubForecaster) AnomalyDetected() bool    { return f.anomalyDetected }
 
 type stubMetrics struct {
 	cpuMillis        float64
@@ -355,4 +364,86 @@ func TestAutomation_MetricsConditionRecovers(t *testing.T) {
 
 	assert.Equal(t, 1, engine.observeCalls)
 	assert.Equal(t, metav1.ConditionTrue, metricsCondition(workload).Status)
+}
+
+func pausedForecastWorkload() *v1alpha1.ManagedWorkload {
+	w := automationWorkload(v1alpha1.PhasePaused)
+	w.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{AutoResume: true}
+	w.Status.Pause = &v1alpha1.PauseStatus{
+		PreviousReplicas: 1,
+		PausedAt:         ptr.To(metav1.NewTime(fixedTime.Add(-6 * time.Hour))),
+		Resources:        &v1alpha1.ResourceSnapshot{CPUMillis: 100, Replicas: 1},
+	}
+	return w
+}
+
+// Behind the doorman, a request would have woken the workload, so an hour
+// spent paused is an hour of no demand, and the forecast learns it.
+func TestPausedHour_FeedsNoDemandBehindTheDoorman(t *testing.T) {
+	tests := []struct {
+		name        string
+		routed      bool
+		fedThisHour bool
+		want        []float64
+	}{
+		{name: "routed to the doorman", routed: true, want: []float64{0}},
+		{name: "not routed, so demand can't be seen", routed: false},
+		{name: "already fed this hour", routed: true, fedThisHour: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := pausedForecastWorkload()
+			workload.Spec.IdlePolicy.AutoResume = false
+			if tt.routed {
+				meta.SetStatusCondition(&workload.Status.Conditions, metav1.Condition{
+					Type: conditionWakeOnRequest, Status: metav1.ConditionTrue, Reason: "DoormanRouted"})
+			}
+			engine := &stubForecaster{phase: forecast.Observing}
+			r := newAutomationReconciler(t, workload, engine, automationOpts{needsFeed: !tt.fedThisHour})
+
+			_, err := r.reconcileAutomation(context.Background(), workload, nil)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, engine.observed)
+		})
+	}
+}
+
+// Pre-waking starts before a predicted busy hour, so the workload is Ready
+// when people arrive rather than starting as they do.
+func TestAutoResume_WakesAheadOfPredictedDemand(t *testing.T) {
+	busy, quiet := 50.0, 1.0 // millicores of the 100m requested: 50% and 1%
+	tests := []struct {
+		name       string
+		at         time.Time
+		phase      forecast.Phase
+		thisHour   float64
+		nextHour   float64
+		wantResume bool
+	}{
+		{name: "busy this hour", at: fixedTime.Add(5 * time.Minute), phase: forecast.DailyActive,
+			thisHour: busy, nextHour: quiet, wantResume: true},
+		{name: "busy next hour, 10 minutes before it", at: fixedTime.Add(50 * time.Minute), phase: forecast.DailyActive,
+			thisHour: quiet, nextHour: busy, wantResume: true},
+		{name: "busy next hour, still 30 minutes away", at: fixedTime.Add(30 * time.Minute), phase: forecast.DailyActive,
+			thisHour: quiet, nextHour: busy},
+		{name: "quiet", at: fixedTime.Add(50 * time.Minute), phase: forecast.DailyActive,
+			thisHour: quiet, nextHour: quiet},
+		{name: "forecast not confident yet", at: fixedTime.Add(50 * time.Minute), phase: forecast.Observing,
+			thisHour: busy, nextHour: busy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := pausedForecastWorkload()
+			engine := &stubForecaster{phase: tt.phase, predictByHour: map[int]float64{0: tt.thisHour, 1: tt.nextHour}}
+			pauser := &stubPauser{resumeDone: true}
+			r := newAutomationReconciler(t, workload, engine, automationOpts{pauser: pauser})
+			r.clock = func() time.Time { return tt.at }
+
+			_, err := r.reconcileAutomation(context.Background(), workload, nil)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantResume, pauser.resumeCalls == 1)
+		})
+	}
 }

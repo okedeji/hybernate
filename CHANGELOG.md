@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `autoResume` wakes a workload 15 minutes before an hour the forecast expects to be busy, instead of once that hour has started, so it's Ready when people arrive
+- The forecast keeps learning while a workload is paused behind the doorman: each paused hour is recorded as zero demand, since a request would have woken it. It learns quiet hours, and reaches confidence sooner, from workloads that spend most of the day paused
 - `kubectl hybernate export` uses the current kubeconfig context's namespace when `-n` isn't given, as kubectl does, instead of `default`
 - **Breaking:** idle detection is an activity clock. Each ManagedWorkload records its last activity in `status.activity`, and the idle action runs once there has been none for `idlePolicy.idleAfter` (default 1h). CPU above `idlePolicy.activity.cpuThreshold`% of requests, a pod template change, and the `hybernate.io/last-activity` / `hybernate.io/active-until` annotations count as activity; any one keeps the workload awake. There is no learning period: the forecast no longer gates idle detection, and only defers a pause when it is confident demand is coming
 - **Breaking:** `idlePolicy.cpuIdleThreshold`, `memoryIdleThreshold`, `gracePeriod`, and `signals` are removed, along with the `auto` idle action (use `pause`). The WorkloadPolicy default idle policy is now `{action: pause, idleAfter: 1h, autoResume: true}`
