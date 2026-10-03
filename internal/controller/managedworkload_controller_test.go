@@ -28,6 +28,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/lifecycle"
 	"github.com/okedeji/hybernate/internal/metrics"
 )
 
@@ -555,6 +557,56 @@ func TestReconcile_DeletionRemovesFinalizerWhenNoPVCRetention(t *testing.T) {
 	var w v1alpha1.ManagedWorkload
 	err = r.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, &w)
 	assert.True(t, err != nil, "object should be deleted after finalizer removal")
+}
+
+// No longer managing a workload must never leave it switched off: deleting
+// the ManagedWorkload of a paused one restores the replicas it had.
+func TestReconcileDelete_RestoresAPausedWorkload(t *testing.T) {
+	tests := []struct {
+		name         string
+		phase        v1alpha1.WorkloadPhase
+		pause        *v1alpha1.PauseStatus
+		withTarget   bool
+		wantReplicas int32
+	}{
+		{name: "paused", phase: v1alpha1.PhasePaused, pause: &v1alpha1.PauseStatus{PreviousReplicas: 3},
+			withTarget: true, wantReplicas: 3},
+		{name: "running", phase: v1alpha1.PhaseRunning, withTarget: true, wantReplicas: 0},
+		{name: "paused, but its Deployment is gone", phase: v1alpha1.PhasePaused,
+			pause: &v1alpha1.PauseStatus{PreviousReplicas: 3}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := metav1.Now()
+			workload := &v1alpha1.ManagedWorkload{
+				ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", Finalizers: []string{finalizerName},
+					DeletionTimestamp: &now},
+				Spec:   v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}},
+				Status: v1alpha1.ManagedWorkloadStatus{Phase: tt.phase, Pause: tt.pause},
+			}
+			builder := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(workload)
+			if tt.withTarget {
+				builder = builder.WithObjects(targetDeploymentWithReplicas("api", "default", 0))
+			}
+			c := builder.Build()
+			r := &Reconciler{Client: c, Scheme: testScheme(t), Recorder: events.NewFakeRecorder(10),
+				pauser: lifecycle.NewPauser(c), destroyer: &stubDestroyer{},
+				engines: newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+				clock:   func() time.Time { return fixedTime }}
+
+			_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+			require.NoError(t, err)
+
+			var w v1alpha1.ManagedWorkload
+			assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, &w)),
+				"the deletion still completes")
+			if tt.withTarget {
+				var d appsv1.Deployment
+				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "api", Namespace: "default"}, &d))
+				assert.Equal(t, tt.wantReplicas, *d.Spec.Replicas)
+			}
+		})
+	}
 }
 
 // --- Target check ---

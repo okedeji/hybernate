@@ -702,6 +702,86 @@ spec:
 			}, 4*time.Minute, 10*time.Second).Should(Succeed())
 		})
 	})
+
+	// Runs after "Idle clock", which installs metrics-server.
+	Context("Label opt-in", func() {
+		const (
+			optInNamespace = "hybernate-e2e-optin"
+			optInName      = "e2e-labelled"
+		)
+
+		BeforeAll(func() {
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", optInNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", optInNamespace, "--wait=false"))
+			})
+			Expect(kubectlApply(deploymentManifest(optInName, optInNamespace, 2))).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+optInName,
+				"-n", optInNamespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("measures a labelled workload, pauses it once enabled, and restores it when the label goes", func() {
+			By("opting the Deployment in with a label, measuring first")
+			_, err := utils.Run(exec.Command("kubectl", "annotate", "deployment", optInName, "-n", optInNamespace,
+				"hybernate.io/dry-run=true", "hybernate.io/idle-after=1m"))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("kubectl", "label", "deployment", optInName, "-n", optInNamespace,
+				"hybernate.io/managed=true"))
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", optInName, optInNamespace,
+					`{.metadata.labels.hybernate\.io/from-label}`)).To(Equal("true"))
+				g.Expect(jsonpath("managedworkload", optInName, optInNamespace,
+					"{.metadata.ownerReferences[0].name}")).To(Equal(optInName))
+				g.Expect(jsonpath("managedworkload", optInName, optInNamespace, "{.spec.dryRun}")).To(Equal("true"))
+				g.Expect(jsonpath("managedworkload", optInName, optInNamespace,
+					"{.spec.idlePolicy.idleAfter}")).To(Equal("1m0s"))
+			}).Should(Succeed())
+
+			By("checking dry-run reaches Idle without pausing")
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", optInName, optInNamespace, "{.status.phase}")).To(Equal("Idle"))
+			}, 4*time.Minute, 5*time.Second).Should(Succeed())
+			Expect(jsonpath("deployment", optInName, optInNamespace, "{.spec.replicas}")).To(Equal("2"))
+			Expect(jsonpath("managedworkload", optInName, optInNamespace, "{.status.dryRun.pauses}")).To(Equal("1"))
+
+			By("marking it active, which ends the would-be pause dry-run counted")
+			_, err = utils.Run(exec.Command("kubectl", "annotate", "deployment", optInName, "-n", optInNamespace,
+				"--overwrite", "hybernate.io/last-activity="+time.Now().UTC().Format(time.RFC3339)))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", optInName, optInNamespace, "{.status.phase}")).To(Equal("Running"))
+				out, err := utils.Run(exec.Command("kubectl", "get", "events.events.k8s.io", "-n", optInNamespace,
+					"-o", `jsonpath={range .items[?(@.reason=="ActivityResumed")]}{.note}{"\n"}{end}`))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("would have paused 1 time"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("enabling it with kubectl hybernate enable")
+			out, err := utils.Run(exec.Command(pluginBinary, "enable", optInName, "-n", optInNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("dry-run ended"))
+
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", optInName, optInNamespace, "{.status.phase}")).To(Equal("Paused"))
+				g.Expect(jsonpath("deployment", optInName, optInNamespace, "{.spec.replicas}")).To(Equal("0"))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("removing the label, which must scale it back up before releasing it")
+			_, err = utils.Run(exec.Command("kubectl", "label", "deployment", optInName, "-n", optInNamespace,
+				"hybernate.io/managed-"))
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				_, err := jsonpath("managedworkload", optInName, optInNamespace, "{.metadata.name}")
+				g.Expect(err).To(HaveOccurred(), "the ManagedWorkload must be deleted")
+				g.Expect(jsonpath("deployment", optInName, optInNamespace, "{.spec.replicas}")).To(Equal("2"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		})
+	})
 })
 
 // deploymentManifest is a Deployment of the pause container, which uses no

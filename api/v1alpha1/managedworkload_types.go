@@ -388,6 +388,12 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	Activity *ActivityStatus `json:"activity,omitempty"`
 
+	// DryRun is what dry-run has measured: what Hybernate would have done
+	// had it been allowed to pause the workload. Set only while spec.dryRun
+	// is true.
+	// +optional
+	DryRun *DryRunStatus `json:"dryRun,omitempty"`
+
 	// LastActedAt is when the operator last mutated the target workload
 	// (pause, resume, destroy, or drift correction).
 	// +optional
@@ -450,6 +456,32 @@ type ActivityStatus struct {
 	// configuration change counts as activity while replica changes don't.
 	// +optional
 	TemplateHash string `json:"templateHash,omitempty"`
+}
+
+// DryRunStatus sums up the pauses Hybernate would have made in dry-run. A
+// would-be pause starts when the activity clock runs out and ends at the
+// next activity, when a paused workload would have been woken.
+type DryRunStatus struct {
+	// Since is when dry-run started measuring the workload.
+	Since metav1.Time `json:"since"`
+
+	// Pauses is how many times the workload would have been paused,
+	// including one under way.
+	Pauses int32 `json:"pauses"`
+
+	// Slept is how long the finished would-be pauses lasted in all. One
+	// under way, which began at status.lastTransitionTime while the phase
+	// is Idle, is added when it ends.
+	Slept metav1.Duration `json:"slept"`
+
+	// EstimatedSavings is what the replicas freed during Slept would have
+	// cost, at the workload's cost rates.
+	EstimatedSavings string `json:"estimatedSavings"`
+
+	// Resources is what the workload ran when the current would-be pause
+	// began, which is what pausing it would free.
+	// +optional
+	Resources *ResourceSnapshot `json:"resources,omitempty"`
 }
 
 // ResourceSnapshot captures the workload's resource profile at the moment of a

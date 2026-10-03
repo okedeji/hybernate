@@ -16,15 +16,23 @@ limitations under the License.
 
 package v1alpha1
 
+// True is the value that turns a Hybernate label or boolean annotation on.
+// Any other value, "True" and "yes" included, leaves it off.
+const True = "true"
+
 const (
-	// LabelIgnore excludes a workload from discovery and management.
+	// LabelManaged opts a Deployment or StatefulSet, or every one in a
+	// namespace, in to Hybernate: "true" gets it a ManagedWorkload.
+	LabelManaged = "hybernate.io/managed"
+
+	// LabelIgnore excludes a workload from management, even in a managed
+	// namespace.
 	LabelIgnore = "hybernate.io/ignore"
 
-	// LabelAutoDiscovered marks a ManagedWorkload created by auto-manage mode.
-	LabelAutoDiscovered = "hybernate.io/auto-discovered"
-
-	// AnnotationWorkloadPolicy links a ManagedWorkload back to the WorkloadPolicy that created it.
-	AnnotationWorkloadPolicy = "hybernate.io/workload-policy"
+	// LabelFromLabel marks a ManagedWorkload created because its workload
+	// or namespace carries LabelManaged. Its spec follows the annotations
+	// and is rewritten from them.
+	LabelFromLabel = "hybernate.io/from-label"
 
 	// AnnotationLastActivity records activity seen by another tool, such as a
 	// sandbox UI or CI pipeline, as an RFC 3339 time. Set on the ManagedWorkload
@@ -39,6 +47,17 @@ const (
 	// doorman is holding for a paused workload. It wakes the workload like
 	// AnnotationLastActivity, and the clock records the wake as a request.
 	AnnotationLastRequest = "hybernate.io/last-request"
+
+	// Settings for a workload opted in with LabelManaged, set on the
+	// workload or its namespace; the workload's own wins.
+	AnnotationDryRun        = "hybernate.io/dry-run"
+	AnnotationIdleAfter     = "hybernate.io/idle-after"
+	AnnotationCPUThreshold  = "hybernate.io/cpu-threshold"
+	AnnotationAutoResume    = "hybernate.io/auto-resume"
+	AnnotationDependsOn     = "hybernate.io/depends-on"
+	AnnotationWakeOnRequest = "hybernate.io/wake-on-request"
+	AnnotationWakeMaxWait   = "hybernate.io/wake-max-wait"
+	AnnotationWakePage      = "hybernate.io/wake-page"
 
 	// FinalizerCleanup is the finalizer added to ManagedWorkloads for PVC retention cleanup.
 	FinalizerCleanup = "hybernate.io/cleanup"

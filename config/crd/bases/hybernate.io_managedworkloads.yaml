@@ -572,6 +572,70 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              dryRun:
+                description: |-
+                  DryRun is what dry-run has measured: what Hybernate would have done
+                  had it been allowed to pause the workload. Set only while spec.dryRun
+                  is true.
+                properties:
+                  estimatedSavings:
+                    description: |-
+                      EstimatedSavings is what the replicas freed during Slept would have
+                      cost, at the workload's cost rates.
+                    type: string
+                  pauses:
+                    description: |-
+                      Pauses is how many times the workload would have been paused,
+                      including one under way.
+                    format: int32
+                    type: integer
+                  resources:
+                    description: |-
+                      Resources is what the workload ran when the current would-be pause
+                      began, which is what pausing it would free.
+                    properties:
+                      cpuMillis:
+                        description: CPUMillis is total CPU request in millicores
+                          per replica.
+                        format: int64
+                        type: integer
+                      memoryBytes:
+                        description: MemoryBytes is total memory request in bytes
+                          per replica.
+                        format: int64
+                        type: integer
+                      replicas:
+                        description: Replicas is the replica count at the time of
+                          the snapshot.
+                        format: int32
+                        type: integer
+                      storageBytes:
+                        description: StorageBytes is total PVC provisioned capacity
+                          in bytes.
+                        format: int64
+                        type: integer
+                    required:
+                    - cpuMillis
+                    - memoryBytes
+                    - replicas
+                    - storageBytes
+                    type: object
+                  since:
+                    description: Since is when dry-run started measuring the workload.
+                    format: date-time
+                    type: string
+                  slept:
+                    description: |-
+                      Slept is how long the finished would-be pauses lasted in all. One
+                      under way, which began at status.lastTransitionTime while the phase
+                      is Idle, is added when it ends.
+                    type: string
+                required:
+                - estimatedSavings
+                - pauses
+                - since
+                - slept
+                type: object
               lastActedAt:
                 description: |-
                   LastActedAt is when the operator last mutated the target workload

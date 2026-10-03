@@ -49,9 +49,6 @@ func TestAllMetricsRegistered(t *testing.T) {
 		"hybernate_target_unavailable_total",
 
 		// Discovery
-		"hybernate_discovery_scan_duration_seconds",
-		"hybernate_discovery_workloads",
-		"hybernate_discovery_auto_managed_total",
 	}
 
 	gathered, err := ctrlmetrics.Registry.Gather()
@@ -81,9 +78,6 @@ func TestAllMetricsRegistered(t *testing.T) {
 	AutomationSkipped.WithLabelValues("ns", "w").Inc()
 	DryrunActions.WithLabelValues("scale_up").Inc()
 	TargetUnavailable.WithLabelValues("ns", "w").Inc()
-	DiscoveryScanDuration.Observe(1.5)
-	DiscoveryWorkloads.WithLabelValues("Idle").Set(5)
-	DiscoveryAutoManaged.Inc()
 
 	gathered, err = ctrlmetrics.Registry.Gather()
 	assert.NoError(t, err)

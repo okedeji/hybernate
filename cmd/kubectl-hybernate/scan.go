@@ -253,6 +253,7 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 		if len(judged) > 0 {
 			writeWorkloads(p, judged, limit)
 		}
+		writeMeasured(p, c.Workloads)
 		notes := append(unjudgedNotes(unjudged), c.Notes...)
 		if len(notes) > 0 {
 			p.line("Notes:")
@@ -276,8 +277,8 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 		p.line("What pausing would save depends on how often they'd be woken, which one moment can't show.")
 		p.line("Labelling them dry-run measures it, below; scanning with Prometheus history estimates it.")
 		p.line("")
-		writeNextSteps(p, result)
 	}
+	writeNextSteps(p, result)
 	p.line("Hybernate Hub verifies savings against your cloud bill, with history across all your")
 	p.line("clusters. Free for up to 2 clusters: %s", hubURL)
 	return p.err
@@ -380,32 +381,84 @@ func writeWorkloads(p *printer, workloads []Workload, limit int) {
 }
 
 func writeNextSteps(p *printer, result scanResult) {
-	var example *Workload
+	var idle, measuring *Workload
+	installed := false
 	for _, c := range result.Clusters {
 		if c.ClusterReport == nil {
 			continue
 		}
 		for i := range c.Workloads {
-			if c.Workloads[i].State == discovery.StateIdle && !c.Workloads[i].Managed {
-				example = &c.Workloads[i]
-				break
+			wl := &c.Workloads[i]
+			installed = installed || wl.Managed
+			if idle == nil && result.Totals.Idle > 0 && wl.State == discovery.StateIdle && !wl.Managed {
+				idle = wl
+			}
+			if measuring == nil && wl.Measured != nil {
+				measuring = wl
 			}
 		}
-		if example != nil {
-			break
-		}
+	}
+	if idle == nil && measuring == nil {
+		return
 	}
 	p.line("Next steps:")
-	p.line("  1. Install Hybernate in the cluster:")
-	p.line("       helm install hybernate oci://ghcr.io/okedeji/charts/hybernate -n hybernate-system --create-namespace")
-	if example != nil {
-		kind := strings.ToLower(string(example.Kind))
-		p.line("  2. Measure a workload first; nothing is paused in dry-run:")
-		p.line("       kubectl label %s %s -n %s hybernate.io/managed=true", kind, example.Name, example.Namespace)
-		p.line("       kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, example.Name, example.Namespace)
-		p.line("     Remove the annotation, or set it to false, to start pausing it while idle.")
+	step := 0
+	next := func(title string) {
+		step++
+		p.line("  %d. %s", step, title)
 	}
+	if idle != nil {
+		// Managed workloads show Hybernate is installed; without any, it
+		// may or may not be, so the install step is shown.
+		if !installed {
+			next("Install Hybernate in the cluster:")
+			p.line("       helm install hybernate oci://ghcr.io/okedeji/charts/hybernate -n hybernate-system --create-namespace")
+		}
+		kind := strings.ToLower(string(idle.Kind))
+		next("Measure a workload first; nothing is paused in dry-run:")
+		p.line("       kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace)
+		p.line("       kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, idle.Name, idle.Namespace)
+	}
+	if measuring != nil {
+		next("When you're happy with what dry-run measured, start pausing:")
+	} else {
+		next("When you're happy with what it measures, start pausing it while idle:")
+		measuring = idle
+	}
+	p.line("       kubectl hybernate enable %s/%s -n %s",
+		strings.ToLower(string(measuring.Kind)), measuring.Name, measuring.Namespace)
 	p.line("")
+}
+
+// writeMeasured lists what dry-run has measured for workloads in dry-run.
+func writeMeasured(p *printer, workloads []Workload) {
+	var measured []Workload
+	for _, wl := range workloads {
+		if wl.Measured != nil {
+			measured = append(measured, wl)
+		}
+	}
+	if len(measured) == 0 {
+		return
+	}
+	p.line("  Measured in dry-run, had Hybernate been pausing them:")
+	tw := tabwriter.NewWriter(p, 0, 0, 3, ' ', 0)
+	for _, wl := range measured {
+		m := wl.Measured
+		_, _ = fmt.Fprintf(tw, "  %s\t%s/%s\tsince %s: would have paused %s, slept %s, freeing %s\n",
+			wl.Namespace, strings.ToLower(string(wl.Kind)), wl.Name, m.Since.Format("Jan 2"),
+			countOf(m.Pauses, "time"), hours(m.SleptHours), cents(m.Freed))
+	}
+	_ = tw.Flush()
+	p.line("")
+}
+
+// hours is a length of time to the hour, or the minute under one.
+func hours(h float64) string {
+	if h < 1 {
+		return fmt.Sprintf("%dm", int(h*60))
+	}
+	return fmt.Sprintf("%dh", int(h))
 }
 
 // nameClusters gives each scanned cluster a readable name. EKS and GKE

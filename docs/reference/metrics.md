@@ -50,14 +50,6 @@ Served by the doorman pods, on the same port and path as the operator's metrics.
 | `hybernate_doorman_wait_seconds` | Histogram | `result` | How long a connection was held before it was passed through or closed |
 | `hybernate_doorman_held_connections` | Gauge | | Connections being held or proxied right now |
 
-## Discovery
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `hybernate_discovery_scan_duration_seconds` | Histogram | | Scan duration |
-| `hybernate_discovery_workloads` | Gauge | `classification` | Discovered workloads by class |
-| `hybernate_discovery_auto_managed_total` | Counter | | Auto-created ManagedWorkloads |
-
 ## Prediction Phase Values
 
 The `hybernate_prediction_phase` gauge uses numeric values:

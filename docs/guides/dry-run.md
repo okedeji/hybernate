@@ -4,7 +4,40 @@ Dry run mode lets you observe what Hybernate would do without it taking any acti
 
 ## Enabling Dry Run
 
-### Per Workload
+### On a Labelled Workload
+
+```yaml title="deployment.yaml" linenums="1"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-api
+  namespace: staging
+  labels:
+    hybernate.io/managed: "true"
+  annotations:
+    hybernate.io/dry-run: "true"
+```
+
+### On a Namespace
+
+Every opted-in workload in the namespace is measured, unless it sets its own `hybernate.io/dry-run: "false"`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    hybernate.io/managed: "true"
+  annotations:
+    hybernate.io/dry-run: "true"
+```
+
+### Across the Cluster
+
+Set `defaults.dryRun: true` in the Helm values to measure every opted-in workload that doesn't say otherwise, on the workload or its namespace.
+
+### On a ManagedWorkload You Wrote
 
 ```yaml title="managedworkload.yaml" linenums="1"
 apiVersion: hybernate.io/v1alpha1
@@ -18,22 +51,7 @@ spec:
     name: my-api
   idlePolicy:
     idleAfter: 1h
-  prediction:
-    confidence: 85
-  dryRun: true  # Observe only
-```
-
-### Via WorkloadPolicy (for auto-managed workloads)
-
-```yaml title="workloadpolicy.yaml" linenums="1"
-apiVersion: hybernate.io/v1alpha1
-kind: WorkloadPolicy
-metadata:
-  name: staging-policy
-  namespace: staging
-spec:
-  mode: auto-manage
-  dryRun: true  # Auto-created ManagedWorkloads inherit this
+  dryRun: true
 ```
 
 ## What Happens in Dry Run
@@ -46,10 +64,38 @@ The operator runs its full evaluation pipeline:
 | Pause expiry | Expiry is detected, but the workload is **not** resumed or destroyed |
 | Cost tracking | Costs are accumulated normally (resource usage is real regardless of management) |
 | Prediction engine | Data points are observed and confidence builds normally |
-| Events | All events are emitted with a `[DRY RUN]` prefix |
+| Events | All events are emitted with a `[dry-run]` prefix |
 | Status | Phase and conditions update to reflect what *would* happen |
 
 ## Observing Dry Run Results
+
+### What Dry Run Measured
+
+Hybernate keeps a running summary of the pauses it would have made. A would-be pause starts when the activity clock runs out, and ends at the next activity, which is when a paused workload would have been woken:
+
+```bash
+kubectl get managedworkload my-api -n staging -o jsonpath='{.status.dryRun}'
+```
+
+```yaml title="status.dryRun"
+since: "2026-10-01T09:00:00Z"
+pauses: 4
+slept: 96h12m0s
+estimatedSavings: $12.48
+```
+
+`estimatedSavings` prices the replicas the workload ran at each would-be pause at its [cost rates](../concepts/cost-tracking.md). Like all savings, it becomes money only if your cluster autoscaler removes the capacity freed. `slept` counts finished would-be pauses; while the phase is `Idle`, the one under way is added when it ends.
+
+The summary starts when dry-run does, and is removed when dry-run ends: once Hybernate is pausing, `status.cost` records what it actually frees.
+
+`kubectl hybernate scan` shows the same summary for every workload in dry-run, with the command to start pausing it:
+
+```
+  Measured in dry-run, had Hybernate been pausing them:
+  sandbox-7   deployment/api   since Oct 1: would have paused 4 times, slept 96h, freeing $12.48
+```
+
+The scan prices the hours at its own prices, so `--cpu-price` and `--memory-price` apply.
 
 ### Events
 
@@ -57,46 +103,32 @@ The operator runs its full evaluation pipeline:
 kubectl describe managedworkload my-api -n staging
 ```
 
-Look for events like:
+When the clock runs out, and when activity ends the would-be pause:
 
 ```
 [dry-run] my-api: no activity for 1h0m0s, last seen from cpu; pause
+[dry-run] my-api: activity resumed (cpu): would have slept 3h12m, freeing $0.42; since Oct 1: would have paused 4 times, slept 96h12m, freeing $12.48
 ```
 
-### Status
+### Phase
 
-The status reflects the evaluated state:
-
-```bash
-kubectl get managedworkload my-api -n staging -o yaml
-```
-
-```yaml title="status" linenums="1"
-status:
-  phase: Running  # Stays Running because no action was taken
-  prediction:
-    dailyPhase: DailyActive
-    dailyConfidence: 87
-    weeklyPhase: Observing
-    weeklyConfidence: 0
-```
+In dry-run the phase goes `Running` → `Idle` when the clock runs out, and back to `Running` at the next activity. The workload is never scaled down.
 
 ## Recommended Workflow
 
-1. **Deploy with `dryRun: true`**. Observe events and status for a few days.
-2. **Check prediction confidence**. Wait until the forecast engine reaches DailyActive and confidence exceeds your threshold.
-3. **Review events**. Confirm the operator would have made the right decisions.
-4. **Disable dry run**. Flip to `false` to enable automation.
+1. **Opt in with `hybernate.io/dry-run: "true"`**. Let it measure for a few days, across a weekend if the workload is used on weekdays.
+2. **Review what it measured**. `status.dryRun` or `kubectl hybernate scan` says how often it would have paused, for how long, and what that would have freed; the events say when.
+3. **End dry run**:
 
-```bash
-kubectl patch managedworkload my-api -n staging \
-  --type merge -p '{"spec":{"dryRun":false}}'
-```
+    ```bash
+    kubectl hybernate enable my-api -n staging
+    kubectl hybernate enable --all -n staging   # every workload in the namespace
+    ```
+
+    This removes the annotation, or sets the workload's own to `"false"` when the dry-run comes from its namespace. If Argo CD or Flux applies the workload, it prints the change to make in Git instead. For a ManagedWorkload you wrote, set `spec.dryRun: false`.
 
 ## When to Use Dry Run
 
-- First time deploying a ManagedWorkload
-- After changing idle policies
-- When onboarding a new namespace via WorkloadPolicy
-- Before moving from `suggest` to `auto-manage` mode
-- In production environments where you want to validate before acting
+- The first time you opt a workload or namespace in
+- After changing its settings
+- In environments where you want to validate before acting

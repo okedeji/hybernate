@@ -47,6 +47,16 @@ When running multiple replicas, leader election ensures only one instance runs r
 
 Memory usage scales with the number of ManagedWorkloads. Each workload's forecast engine state is ~10KB. For 1000 workloads, expect ~10MB of additional memory.
 
+## Opt-In Defaults
+
+Settings for workloads opted in with the `hybernate.io/managed` label, used when neither the workload nor its namespace sets the annotation. See [Opting In](../guides/opt-in.md#which-setting-wins).
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `defaults.idleAfter` | `1h` | How long without activity before pausing. Passed as `--default-idle-after` |
+| `defaults.cpuThreshold` | `10` | CPU use, as a percentage of requests, above which a workload counts as active. Passed as `--default-cpu-threshold` |
+| `defaults.dryRun` | `false` | Measure without pausing. Set `true` to roll Hybernate out across a cluster measuring first. Passed as `--default-dry-run` |
+
 ## Prometheus Activity
 
 | Value | Default | Description |
@@ -146,7 +156,8 @@ These are not configurable via values. To override, use Helm post-rendering or K
 
 The chart creates a ClusterRole with permissions to:
 
-- Manage `ManagedWorkload` and `WorkloadPolicy` CRs
+- Manage `ManagedWorkload` CRs, including creating them for labelled workloads
+- Read Namespaces, for the `hybernate.io/managed` label and settings annotations on them
 - Read and scale Deployments and StatefulSets
 - Read PersistentVolumeClaims (for retention cleanup)
 - Read pod metrics from metrics-server

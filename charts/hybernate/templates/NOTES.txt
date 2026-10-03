@@ -1,50 +1,30 @@
-Hybernate has been installed in namespace {{ .Release.Namespace }}.
+Hybernate is installed in namespace {{ .Release.Namespace }}.
 
-1. Verify the controller is running:
+1. Check the operator and the doorman are running:
 
-   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "hybernate.name" . }}
+   kubectl get pods -n {{ .Release.Namespace }}
 
-2. Create a ManagedWorkload to start managing a Deployment:
+2. See which workloads are idle and what they cost, with the kubectl plugin:
 
-   cat <<EOF | kubectl apply -f -
-   apiVersion: hybernate.io/v1alpha1
-   kind: ManagedWorkload
-   metadata:
-     name: my-app
-     namespace: default
-   spec:
-     target:
-       kind: Deployment
-       name: my-app
-     idlePolicy:
-       cpuIdleThreshold: 10
-       memoryIdleThreshold: 10
-       action: Pause
-   EOF
+   kubectl hybernate scan
 
-3. Or create a WorkloadPolicy to auto-discover idle workloads in a namespace:
+3. Opt a workload in, measuring it first so nothing is paused yet:
 
-   cat <<EOF | kubectl apply -f -
-   apiVersion: hybernate.io/v1alpha1
-   kind: WorkloadPolicy
-   metadata:
-     name: default-policy
-     namespace: default
-   spec:
-     mode: suggest
-     targetKinds:
-       - Deployment
-       - StatefulSet
-   EOF
+   kubectl label deployment my-app -n my-namespace hybernate.io/managed=true
+   kubectl annotate deployment my-app -n my-namespace hybernate.io/dry-run=true
 
-4. Check status:
+   Label a namespace instead to opt in everything in it. When you're ready,
+   let Hybernate pause it while idle:
+
+   kubectl hybernate enable my-app -n my-namespace
+
+4. Check what it's doing:
 
    kubectl get managedworkloads -A
-   kubectl get workloadpolicies -A
 
 {{- if .Values.metrics.serviceMonitor.enabled }}
 
-5. Metrics are being scraped via ServiceMonitor. Check Prometheus targets for the hybernate endpoint.
+5. Metrics are scraped through a ServiceMonitor; check Prometheus's targets for the hybernate endpoints.
 {{- end }}
 
-For more information, visit: https://github.com/okedeji/hybernate
+Docs: https://okedeji.io/hybernate

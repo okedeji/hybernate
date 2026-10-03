@@ -316,3 +316,47 @@ func TestScanCluster_WakingIsActive(t *testing.T) {
 	assert.Equal(t, StateActive, got["waking"].State)
 	assert.Equal(t, "waking", got["waking"].Reason)
 }
+
+func TestMeasured(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	since := metav1.NewTime(now.Add(-48 * time.Hour))
+	idleSince := metav1.NewTime(now.Add(-2 * time.Hour))
+	summary := func() *v1alpha1.DryRunStatus {
+		return &v1alpha1.DryRunStatus{Since: since, Pauses: 3, Slept: metav1.Duration{Duration: 10 * time.Hour}}
+	}
+	tests := []struct {
+		name      string
+		mw        *v1alpha1.ManagedWorkload
+		wantNil   bool
+		wantHours float64
+	}{
+		{name: "unmanaged", wantNil: true},
+		{name: "not in dry-run", wantNil: true, mw: &v1alpha1.ManagedWorkload{
+			Status: v1alpha1.ManagedWorkloadStatus{DryRun: summary()}}},
+		{name: "awake", wantHours: 10, mw: &v1alpha1.ManagedWorkload{
+			Spec:   v1alpha1.ManagedWorkloadSpec{DryRun: true},
+			Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning, DryRun: summary()}}},
+		{name: "a would-be pause under way", wantHours: 12, mw: func() *v1alpha1.ManagedWorkload {
+			d := summary()
+			d.Resources = &v1alpha1.ResourceSnapshot{Replicas: 1}
+			return &v1alpha1.ManagedWorkload{
+				Spec: v1alpha1.ManagedWorkloadSpec{DryRun: true},
+				Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseIdle, LastTransitionTime: &idleSince,
+					DryRun: d}}
+		}()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := measured(tt.mw, 0.5, now)
+			if tt.wantNil {
+				assert.Nil(t, m)
+				return
+			}
+			require.NotNil(t, m)
+			assert.Equal(t, 3, m.Pauses)
+			assert.True(t, m.Since.Equal(since.Time))
+			assert.InDelta(t, tt.wantHours, m.SleptHours, 0.001)
+			assert.InDelta(t, tt.wantHours*0.5, m.Freed, 0.001, "priced at the scan's hourly cost")
+		})
+	}
+}

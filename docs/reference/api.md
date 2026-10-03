@@ -60,6 +60,12 @@
 | `activity.pauseAt` | time | When the idle action runs if no further activity is seen |
 | `activity.lastEvaluatedTime` | time | When activity was last checked |
 | `activity.templateHash` | string | Fingerprint of the target's pod template, used to detect deploys |
+| `dryRun` | `DryRunStatus` | What dry-run has measured; only while `spec.dryRun` is true |
+| `dryRun.since` | time | When dry-run started measuring |
+| `dryRun.pauses` | int32 | Times the workload would have been paused, one under way included |
+| `dryRun.slept` | duration | How long finished would-be pauses lasted in all |
+| `dryRun.estimatedSavings` | string | What the replicas freed during `slept` would have cost |
+| `dryRun.resources` | `ResourceSnapshot` | What the workload ran when the current would-be pause began |
 | `doorman[]` | `DoormanRoute` | Service ports routed to the doorman while paused |
 | `doorman[].service` | string | Service name |
 | `doorman[].portName` | string | Service port name |
@@ -93,41 +99,3 @@
 ### WorkloadPhase Values
 
 `Creating`, `Running`, `Idle`, `Pausing`, `Paused`, `Resuming`, `Destroying`, `Destroyed`
-
----
-
-## WorkloadPolicy
-
-**Group:** `hybernate.io` | **Version:** `v1alpha1` | **Kind:** `WorkloadPolicy` | **Scope:** Namespaced | **Short name:** `wp`
-
-### Spec (`WorkloadPolicySpec`)
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `targetKinds[]` | `TargetKind` | No | `[Deployment, StatefulSet]` | Kinds to scan |
-| `mode` | `suggest` \| `auto-manage` | No | `suggest` | Operating mode |
-| `scanInterval` | duration | No | `10m` | Re-scan frequency |
-| `cpuIdleThreshold` | int | No | `10` | CPU utilization % of request for Idle classification (0-100) |
-| `memoryIdleThreshold` | int | No | `10` | Memory utilization % of request for Idle classification (0-100) |
-| `dryRun` | bool | No | `true` | Default for auto-created CRs |
-| `rates` | `CostRates` | No | AWS defaults | Cost rates |
-| `idlePolicy` | `IdlePolicySpec` | No | See defaults | Default idle policy |
-| `pause` | `PauseSpec` | No | See defaults | Default pause behavior |
-| `destroy` | `DestroySpec` | No | See defaults | Default destroy behavior |
-| `prediction` | `PredictionSpec` | No | `{confidence: 85}` | Default prediction config |
-| `costTracking` | `CostTrackingSpec` | No | AWS defaults | Custom cost rate overrides |
-| `conflictAction` | `ConflictAction` | No | `warn` | Default conflict handling |
-
-### Status (`WorkloadPolicyStatus`)
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `summary.total` | int | Total workloads discovered |
-| `summary.active` | int | Active workloads |
-| `summary.idle` | int | Idle workloads |
-| `summary.managed` | int | Already-managed workloads |
-| `summary.estimatedMonthlyCost` | string | Total estimated cost |
-| `summary.estimatedPotentialSavings` | string | Total potential savings |
-| `lastScanAt` | time | Last scan timestamp |
-| `conditions[]` | `Condition` | Standard K8s conditions |
-| `discovered[]` | `DiscoveredWorkload` | Per-workload results (max 500) |

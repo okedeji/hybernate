@@ -23,7 +23,7 @@ Hybernate fixes this by:
 
 ![How It Works](docs/assets/how-it-works.png)
 
-1. You point Hybernate at a Deployment or StatefulSet
+1. You label a Deployment, StatefulSet, or namespace `hybernate.io/managed: "true"`
 2. The operator tracks when the workload was last active: CPU, deploys, and activity annotations
 3. A per-workload forecast model learns when the workload is typically busy
 4. When nothing has been active for `idleAfter` (default 1 hour), the workload is paused
@@ -31,7 +31,15 @@ Hybernate fixes this by:
 
 ## Quick Start
 
-**Install:**
+**See what's idle across your cluster, before installing anything:**
+
+```bash
+kubectl krew install --manifest-url \
+  https://github.com/okedeji/hybernate/releases/latest/download/krew-hybernate.yaml
+kubectl hybernate scan
+```
+
+**Install the operator:**
 
 ```bash
 helm install hybernate oci://ghcr.io/okedeji/charts/hybernate \
@@ -40,51 +48,25 @@ helm install hybernate oci://ghcr.io/okedeji/charts/hybernate \
   --create-namespace
 ```
 
-**Discover and manage idle workloads in a namespace:**
+**Opt a workload in, measuring first:**
 
 ```yaml
-apiVersion: hybernate.io/v1alpha1
-kind: WorkloadPolicy
-metadata:
-  name: staging-policy
-  namespace: staging
-spec:
-  mode: auto-manage
-  cpuIdleThreshold: 10
-  memoryIdleThreshold: 10
-  dryRun: true
-```
-
-```bash
-kubectl apply -f workloadpolicy.yaml
-kubectl get workloadpolicy staging-policy -n staging
-```
-
-```
-NAME             MODE          DISCOVERED   ACTIVE   IDLE   PROJECTED COST   PROJECTED SAVINGS
-staging-policy   auto-manage   12           10       2      $340.00          $89.00
-```
-
-Start with `dryRun: true` to observe. When you're confident, set it to `false` to enable automation.
-
-**Or manage a single workload directly:**
-
-```yaml
-apiVersion: hybernate.io/v1alpha1
-kind: ManagedWorkload
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: my-api
   namespace: staging
-spec:
-  target:
-    kind: Deployment
-    name: my-api
-  idlePolicy:
-    idleAfter: 1h
-    autoResume: true
-  prediction:
-    confidence: 85
-  dryRun: true
+  labels:
+    hybernate.io/managed: "true"
+  annotations:
+    hybernate.io/dry-run: "true"
+    hybernate.io/idle-after: "2h"
+```
+
+The label opts it in; the annotations are its settings. Label a namespace instead to cover every workload in it. In dry-run, Hybernate tracks the workload's activity and what pausing would save, without pausing it. When you're confident:
+
+```bash
+kubectl hybernate enable my-api -n staging
 ```
 
 ## Features
@@ -98,10 +80,10 @@ spec:
 
 ### Operations
 
-- **Auto-discovery** lets WorkloadPolicy scan namespaces, classify workloads as Active or Idle, and optionally auto-create ManagedWorkloads
+- **Label opt-in**: `hybernate.io/managed: "true"` on a workload or namespace, with settings as annotations, all in the manifests you already keep in Git
 - **`kubectl hybernate scan`** finds idle workloads across your clusters and what they cost, with nothing installed
 - **`kubectl hybernate wake`** wakes a paused workload from the terminal and waits until it's Running
-- **GitOps export** via `kubectl hybernate export` generates ManagedWorkload manifests for ArgoCD/Flux workflows
+- **`kubectl hybernate enable`** ends dry-run once you trust what you've measured, and says what to change in Git when Argo CD or Flux applies the workload
 - **Cost tracking** with per-workload resource consumption, estimated savings, and resources freed
 - **Dry-run mode** to observe every decision the operator would make without it taking action
 
@@ -117,7 +99,7 @@ spec:
 | Component | Description |
 |-----------|-------------|
 | **ManagedWorkload** | Per-workload CR that defines idle policy, pause/destroy behavior, and cost tracking |
-| **WorkloadPolicy** | Namespace-scoped scanner that discovers, classifies, and optionally auto-manages workloads |
+| **Opt-in controller** | Creates and updates a ManagedWorkload for each labelled workload, from its annotations |
 | **Forecast Engine** | Per-workload Holt-Winters model that learns demand patterns, confirms idle detection, and wakes workloads ahead of demand |
 
 ## Documentation
@@ -126,6 +108,7 @@ Full docs at **[okedeji.io/hybernate](https://okedeji.io/hybernate)**
 
 - [Installation](https://okedeji.io/hybernate/getting-started/installation/): Helm, kubectl, and source
 - [Quickstart](https://okedeji.io/hybernate/getting-started/quickstart/): manage your first workload
+- [Opting In](https://okedeji.io/hybernate/guides/opt-in/): the label, every setting, and GitOps
 - [Idle Detection](https://okedeji.io/hybernate/concepts/idle-detection/): how the activity clock decides when to pause
 - [Forecasting](https://okedeji.io/hybernate/concepts/forecasting/): the Holt-Winters prediction engine
 - [Cost Tracking](https://okedeji.io/hybernate/concepts/cost-tracking/): resource reduction vs. estimated savings

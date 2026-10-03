@@ -29,11 +29,11 @@ Hybernate never pauses a workload it can't measure, and a confident forecast can
 ### Cost Tracking
 Track per-workload resource consumption and savings. See exactly how much you're saving from paused and destroyed workloads.
 
-### Auto-Discovery
-WorkloadPolicy scans your namespaces, classifies workloads as Active or Idle, and can auto-create `ManagedWorkload` resources for the ones that need attention.
+### Label Opt-In
+Label a workload or namespace `hybernate.io/managed: "true"` and Hybernate manages it, with its settings as annotations. Both live in the manifests or Helm values you already keep in Git, so Argo CD and Flux work as they do today.
 
-### GitOps-Native Export
-Use `kubectl hybernate export` to generate ManagedWorkload manifests from discovered workloads, ready to commit to Git and deploy via ArgoCD or Flux.
+### Scan Before You Install
+`kubectl hybernate scan` shows which workloads across your clusters are idle right now and what they cost while running, with nothing installed in the cluster.
 
 ### Full Observability
 Prometheus metrics for operator health, lifecycle transitions, and prediction confidence, with alerting rules included.
@@ -48,26 +48,22 @@ Prometheus metrics for operator health, lifecycle transitions, and prediction co
 
 ## Quick Example
 
-```yaml title="managedworkload.yaml" linenums="1"
-apiVersion: hybernate.io/v1alpha1
-kind: ManagedWorkload
+```yaml title="deployment.yaml" linenums="1"
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: my-api
   namespace: sandbox
-spec:
-  target:
-    kind: Deployment
-    name: my-api
-  idlePolicy:
-    action: pause
-    idleAfter: 1h
-  prediction:
-    confidence: 85
+  labels:
+    hybernate.io/managed: "true"
+  annotations:
+    hybernate.io/dry-run: "true"
+    hybernate.io/idle-after: "1h"
 ```
 
-This watches the `my-api` Deployment and pauses it when both CPU and memory stay below 10% of their respective requests for 10 minutes. The forecast engine learns daily and weekly patterns and must agree before any action is taken.
+Hybernate watches `my-api` and records each time it's active: CPU above 10% of its requests, a deploy, a request through its Service, or an activity annotation. In dry-run it only measures; once you run `kubectl hybernate enable my-api -n sandbox`, it pauses the Deployment after an hour with no activity, and wakes it when a request arrives.
 
-For idle policies, cost rate overrides, and the full spec, see the [ManagedWorkload Guide](guides/managed-workload.md).
+For every setting, see [Opting In](guides/opt-in.md). For settings annotations don't cover, write a [ManagedWorkload](guides/managed-workload.md) yourself.
 
 ---
 

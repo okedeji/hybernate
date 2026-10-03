@@ -1,6 +1,6 @@
 apiVersion: v2
 name: hybernate
-description: Intelligent Kubernetes workload lifecycle operator — idle detection, predictive scaling, cost tracking, and auto-discovery.
+description: Kubernetes operator that pauses idle workloads and wakes them when used — idle detection, wake on request, forecasting, and cost tracking.
 type: application
 version: 0.1.7
 appVersion: "0.1.7"

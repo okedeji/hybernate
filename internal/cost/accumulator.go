@@ -70,8 +70,13 @@ func Accumulate(s Snapshot, cpuCores, memoryGiB, storageGiB float64, elapsed tim
 // For destroyed workloads with cleaned-up PVCs, include storageGiB.
 func AccumulateSavings(s Snapshot, cpuCores, memoryGiB, storageGiB float64, elapsed time.Duration, rates Rates) Snapshot {
 	hours := clampElapsed(elapsed)
-	s.EstimatedSavedCost += (cpuCores*rates.CPUPerHour + memoryGiB*rates.MemoryPerHour + storageGiB*storageHourlyRate(rates)) * hours
+	s.EstimatedSavedCost += (ComputeHourly(cpuCores, memoryGiB, rates) + storageGiB*storageHourlyRate(rates)) * hours
 	return s
+}
+
+// ComputeHourly is what an hour of the given CPU and memory costs.
+func ComputeHourly(cpuCores, memoryGiB float64, rates Rates) float64 {
+	return cpuCores*rates.CPUPerHour + memoryGiB*rates.MemoryPerHour
 }
 
 // TotalCost computes the dollar cost from accumulated resource consumption.

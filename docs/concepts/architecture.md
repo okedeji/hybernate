@@ -1,12 +1,12 @@
 # Architecture
 
-Hybernate is a Kubernetes operator built on [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime). It runs as a single binary inside your cluster and manages workloads through three reconciliation loops.
+Hybernate is a Kubernetes operator built on [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime). It runs as a single binary inside your cluster and manages workloads through two kinds of reconciliation loop.
 
 ## Components
 
 ![Architecture](../assets/architecture.png)
 
-## Three Reconcilers
+## Reconcilers
 
 ### ManagedWorkload Reconciler
 
@@ -21,24 +21,22 @@ The primary reconciler. Watches `ManagedWorkload` CRs and drives each workload t
 
 Each ManagedWorkload gets its own forecast engine instance, serialized into the CR status so it survives operator restarts.
 
-### WorkloadPolicy Reconciler
+### Opt-In Reconcilers
 
-Watches `WorkloadPolicy` CRs. On each reconcile it scans the namespace for Deployments and StatefulSets, fetches their metrics from the Kubernetes Metrics API, and classifies each as Active or Idle.
-
-In `auto-manage` mode, it creates `ManagedWorkload` CRs for idle workloads using the policy's default settings.
+One for Deployments and one for StatefulSets. Each watches its workloads, their namespaces, and the ManagedWorkloads created from them. When a workload or its namespace is labelled `hybernate.io/managed: "true"`, it creates a ManagedWorkload named after the workload and owned by it, with a spec built from the workload's annotations, then its namespace's, then the cluster-wide defaults. It keeps that spec in step with the annotations, and deletes the ManagedWorkload when the label goes. A ManagedWorkload someone wrote for the same workload always wins.
 
 ## Internal Packages
 
 | Package | Responsibility |
 |---------|---------------|
-| `internal/controller` | Reconciliation logic for all three CRDs |
+| `internal/controller` | The ManagedWorkload and opt-in reconcilers |
 | `internal/forecast` | Holt-Winters model, phase lifecycle, confidence scoring, anomaly detection |
 | `internal/signal` | Signal interface, CPU threshold checker, Prometheus PromQL prober |
 | `internal/lifecycle` | Pause, resume, and destroy operations against the K8s API |
-| `internal/discovery` | Namespace scanning and workload classification |
+| `internal/discovery` | The cluster scan behind `kubectl hybernate scan` |
+| `internal/doorman` | Holds requests to a paused workload's Service and wakes it |
 | `internal/cost` | Cost accumulation and estimation |
 | `internal/metrics` | Prometheus metric definitions and K8s Metrics API reader |
-| `internal/export` | ManagedWorkload YAML generation from discovered workloads |
 
 ## External Dependencies
 

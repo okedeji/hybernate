@@ -18,24 +18,18 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - persistentvolumeclaims
+  - namespaces
+  - services
   verbs:
-  - delete
   - get
   - list
   - watch
 - apiGroups:
   - ""
   resources:
-  - pods
+  - persistentvolumeclaims
   verbs:
-  - get
-  - list
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
+  - delete
   - get
   - list
   - watch
@@ -47,6 +41,14 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - ""
+  - metrics.k8s.io
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
 - apiGroups:
   - apps
   resources:
@@ -82,7 +84,6 @@ rules:
   - hybernate.io
   resources:
   - managedworkloads
-  - workloadpolicies
   verbs:
   - create
   - delete
@@ -95,23 +96,13 @@ rules:
   - hybernate.io
   resources:
   - managedworkloads/finalizers
-  - workloadpolicies/finalizers
   verbs:
   - update
 - apiGroups:
   - hybernate.io
   resources:
   - managedworkloads/status
-  - workloadpolicies/status
   verbs:
   - get
   - patch
   - update
-- apiGroups:
-  - metrics.k8s.io
-  resources:
-  - pods
-  verbs:
-  - get
-  - list
-  - watch

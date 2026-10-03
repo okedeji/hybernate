@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -216,6 +217,47 @@ func TestWriteTable_PausedAndUnjudged(t *testing.T) {
 	assert.Contains(t, got, "paused 5h ago")
 	assert.NotContains(t, got, "deployment/agent", "unjudged workloads leave the table")
 	assert.Contains(t, got, "1 workload set no CPU requests, so their use can't be measured: kube-tools/agent")
+}
+
+func TestWriteTable_MeasuredInDryRun(t *testing.T) {
+	cluster := sampleCluster("staging")
+	cluster.Workloads = append(cluster.Workloads, discovery.Workload{
+		Namespace: "sandbox-7", Kind: v1alpha1.TargetKindDeployment, Name: "api", Replicas: 2,
+		State: discovery.StateActive, Managed: true, DryRun: true, HourlyCost: 0.13,
+		Measured: &discovery.Measured{Since: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC),
+			Pauses: 4, SleptHours: 96.5, Freed: 12.48},
+	})
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+		scanOptions{output: "table"}))
+
+	got := out.String()
+	assert.Contains(t, got, "Measured in dry-run")
+	assert.Regexp(t,
+		`sandbox-7\s+deployment/api\s+since Oct 1: would have paused 4 times, slept 96h, freeing \$12.48`, got)
+	assert.Contains(t, got, "start pausing:\n       kubectl hybernate enable deployment/api -n sandbox-7",
+		"enable names the workload dry-run measured")
+	assert.NotContains(t, got, "helm install", "a managed workload shows Hybernate is installed")
+	assert.Contains(t, got, "kubectl label deployment checkout-api", "and an unmanaged idle one can still be measured")
+}
+
+func TestWriteTable_OnlyMeasuring(t *testing.T) {
+	report := &discovery.ClusterReport{Mode: discovery.ModeSnapshot, Workloads: []discovery.Workload{{
+		Namespace: "sandbox-7", Kind: v1alpha1.TargetKindStatefulSet, Name: "db", Replicas: 1,
+		State: discovery.StateActive, Managed: true, DryRun: true,
+		Measured: &discovery.Measured{Since: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC), Pauses: 1, SleptHours: 0.5},
+	}}, Totals: discovery.Totals{Workloads: 1}}
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{{Cluster: "staging", ClusterReport: report}}},
+		scanOptions{output: "table"}))
+
+	got := out.String()
+	assert.Contains(t, got, "would have paused 1 time, slept 30m, freeing $0.00")
+	assert.Contains(t, got, "1. When you're happy with what dry-run measured, start pausing:")
+	assert.Contains(t, got, "kubectl hybernate enable statefulset/db -n sandbox-7")
+	assert.NotContains(t, got, "kubectl label", "nothing unmanaged is idle")
 }
 
 func TestPricesFor(t *testing.T) {
