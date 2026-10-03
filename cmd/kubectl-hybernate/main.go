@@ -42,7 +42,7 @@ func main() {
 		Short: "Hybernate kubectl plugin for workload lifecycle management",
 	}
 
-	root.AddCommand(exportCmd())
+	root.AddCommand(exportCmd(), wakeCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -85,9 +85,12 @@ Examples:
 				return fmt.Errorf("--policy is required")
 			}
 
-			k8s, err := buildClient()
+			k8s, defaultNamespace, err := buildClient()
 			if err != nil {
 				return fmt.Errorf("building kubernetes client: %w", err)
+			}
+			if namespace == "" {
+				namespace = defaultNamespace
 			}
 
 			var policy v1alpha1.WorkloadPolicy
@@ -127,7 +130,8 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "Namespace of the WorkloadPolicy")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "",
+		"Namespace of the WorkloadPolicy (defaults to the kubeconfig context's)")
 	cmd.Flags().StringVar(&policyName, "policy", "", "Name of the WorkloadPolicy to export from")
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "Directory to write individual YAML files (stdout if omitted)")
 	cmd.Flags().StringVar(&name, "name", "", "Export only the workload with this name")
@@ -141,12 +145,22 @@ Examples:
 	return cmd
 }
 
-func buildClient() (client.Client, error) {
+// buildClient returns a client for the kubeconfig's current context and that
+// context's namespace, which is what kubectl uses when -n isn't given.
+func buildClient() (client.Client, string, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
+	loader := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil)
+	config, err := loader.ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+		return nil, "", fmt.Errorf("loading kubeconfig: %w", err)
 	}
-
-	return client.New(config, client.Options{Scheme: scheme})
+	namespace, _, err := loader.Namespace()
+	if err != nil {
+		return nil, "", fmt.Errorf("reading kubeconfig namespace: %w", err)
+	}
+	c, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, "", fmt.Errorf("creating client: %w", err)
+	}
+	return c, namespace, nil
 }

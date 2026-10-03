@@ -99,6 +99,7 @@ spec:
 ### Operations
 
 - **Auto-discovery** lets WorkloadPolicy scan namespaces, classify workloads as Active or Idle, and optionally auto-create ManagedWorkloads
+- **`kubectl hybernate wake`** wakes a paused workload from the terminal and waits until it's Running
 - **GitOps export** via `kubectl hybernate export` generates ManagedWorkload manifests for ArgoCD/Flux workflows
 - **Cost tracking** with per-workload resource consumption, estimated savings, and resources freed
 - **Dry-run mode** to observe every decision the operator would make without it taking action
