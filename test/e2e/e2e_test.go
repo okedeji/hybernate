@@ -704,6 +704,153 @@ spec:
 	})
 
 	// Runs after "Idle clock", which installs metrics-server.
+	Context("Scan with history", func() {
+		const (
+			historyNamespace = "hybernate-e2e-history"
+			promNamespace    = "hybernate-e2e-monitoring"
+			historyName      = "e2e-quiet-history"
+		)
+
+		BeforeAll(func() {
+			for _, ns := range []string{historyNamespace, promNamespace} {
+				_, err := utils.Run(exec.Command("kubectl", "create", "ns", ns))
+				Expect(err).NotTo(HaveOccurred())
+				DeferCleanup(func() {
+					_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", ns, "--wait=false"))
+				})
+			}
+			Expect(kubectlApply(deploymentManifest(historyName, historyNamespace, 1))).To(Succeed())
+			_, err := utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+historyName,
+				"-n", historyNamespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+			pod, err := utils.Run(exec.Command("kubectl", "get", "pods", "-n", historyNamespace,
+				"-l", "app="+historyName, "-o", "jsonpath={.items[0].metadata.name}"))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("standing in for Prometheus with three hours of quiet CPU for the workload's pod")
+			// agnhost porter answers every path with the same body, which
+			// serves both the scan's check and its range query.
+			end := time.Now().Truncate(5 * time.Minute)
+			var values []string
+			for at := end.Add(-3 * time.Hour); !at.After(end); at = at.Add(5 * time.Minute) {
+				values = append(values, fmt.Sprintf(`[%d,"0.0001"]`, at.Unix()))
+			}
+			body := fmt.Sprintf(`{"status":"success","data":{"resultType":"matrix","result":[`+
+				`{"metric":{"pod":%q,"container":"app"},"values":[%s]}]}}`, pod, strings.Join(values, ","))
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata: {name: fake-prometheus, namespace: %[1]s, labels: {app: fake-prometheus}}
+spec:
+  containers:
+    - name: porter
+      image: %[2]s
+      args: [porter]
+      env:
+        - {name: SERVE_PORT_9090, value: %[3]q}
+      readinessProbe: {tcpSocket: {port: 9090}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: prometheus-operated, namespace: %[1]s, labels: {operated-prometheus: "true"}}
+spec:
+  selector: {app: fake-prometheus}
+  ports: [{name: web, port: 9090}]
+`, promNamespace, webImage, body))).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "wait", "pod/fake-prometheus", "-n", promNamespace,
+				"--for=condition=Ready", "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("finds Prometheus, reads it through the API server, and replays the clock", func() {
+			type scanned struct {
+				Clusters []struct {
+					Mode    string `json:"mode"`
+					History struct {
+						Prometheus string `json:"prometheus"`
+					} `json:"history"`
+					Workloads []struct {
+						Name    string `json:"name"`
+						History *struct {
+							SleepHours float64 `json:"sleepHours"`
+							Freed      float64 `json:"freed"`
+						} `json:"history"`
+					} `json:"workloads"`
+				} `json:"clusters"`
+			}
+			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", historyNamespace, "-o", "json"))
+			Expect(err).NotTo(HaveOccurred())
+			var result scanned
+			Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
+			Expect(result.Clusters).To(HaveLen(1))
+			c := result.Clusters[0]
+			Expect(c.Mode).To(Equal("history"))
+			Expect(c.History.Prometheus).To(Equal(promNamespace + "/prometheus-operated"))
+			Expect(c.Workloads).To(HaveLen(1))
+			Expect(c.Workloads[0].History).NotTo(BeNil())
+			Expect(c.Workloads[0].History.SleepHours).To(BeNumerically(">=", 1),
+				"quiet for three hours, it would have slept from an hour in until its deploy")
+			Expect(c.Workloads[0].History.Freed).To(BeNumerically(">", 0))
+		})
+
+		It("tells a user with only view what an admin can run to let them read Prometheus, and that works", func() {
+			By("scanning as a service account with the standard view role")
+			_, err := utils.Run(exec.Command("kubectl", "create", "serviceaccount", "scanner", "-n", historyNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("kubectl", "create", "clusterrolebinding", "hybernate-e2e-scanner-view",
+				"--clusterrole=view", "--serviceaccount="+historyNamespace+":scanner"))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "clusterrolebinding", "hybernate-e2e-scanner-view"))
+			})
+			token, err := utils.Run(exec.Command("kubectl", "create", "token", "scanner", "-n", historyNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			kubeconfig := filepath.Join(GinkgoT().TempDir(), "scanner.kubeconfig")
+			raw, err := utils.Run(exec.Command("kubectl", "config", "view", "--minify", "--flatten", "--raw"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.WriteFile(kubeconfig, []byte(raw), 0o600)).To(Succeed())
+			for _, args := range [][]string{
+				{"config", "set-credentials", "scanner", "--token=" + strings.TrimSpace(token)},
+				{"config", "set-context", "--current", "--user=scanner"},
+			} {
+				_, err = utils.Run(exec.Command("kubectl", append([]string{"--kubeconfig", kubeconfig}, args...)...))
+				Expect(err).NotTo(HaveOccurred())
+			}
+			scanAs := func() (mode string, access []string) {
+				out, err := utils.Run(exec.Command("env", "KUBECONFIG="+kubeconfig,
+					pluginBinary, "scan", "-n", historyNamespace, "-o", "json"))
+				Expect(err).NotTo(HaveOccurred())
+				var result struct {
+					Clusters []struct {
+						Mode          string   `json:"mode"`
+						HistoryAccess []string `json:"historyAccess"`
+					} `json:"clusters"`
+				}
+				Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
+				Expect(result.Clusters).To(HaveLen(1))
+				return result.Clusters[0].Mode, result.Clusters[0].HistoryAccess
+			}
+
+			mode, access := scanAs()
+			Expect(mode).To(Equal("snapshot"), "view doesn't include services/proxy")
+			Expect(access).To(HaveLen(2))
+			Expect(access[1]).To(HaveSuffix("--serviceaccount=" + historyNamespace + ":scanner"))
+
+			By("running the commands it printed, as an admin")
+			for _, command := range access {
+				args := strings.Fields(command)
+				Expect(args[0]).To(Equal("kubectl"))
+				_, err = utils.Run(exec.Command("kubectl", args[1:]...))
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			mode, access = scanAs()
+			Expect(mode).To(Equal("history"), "the Role the scan printed is enough")
+			Expect(access).To(BeEmpty())
+		})
+	})
+
+	// Runs after "Idle clock", which installs metrics-server.
 	Context("Label opt-in", func() {
 		const (
 			optInNamespace = "hybernate-e2e-optin"
