@@ -99,3 +99,13 @@ func workloadFields(obj client.Object) (replicas *int32, spec corev1.PodSpec, ma
 	}
 	return
 }
+
+func podTemplate(obj client.Object) corev1.PodTemplateSpec {
+	switch t := obj.(type) {
+	case *appsv1.Deployment:
+		return t.Spec.Template
+	case *appsv1.StatefulSet:
+		return t.Spec.Template
+	}
+	return corev1.PodTemplateSpec{}
+}

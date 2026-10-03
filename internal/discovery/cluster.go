@@ -106,6 +106,8 @@ type Workload struct {
 	// History is what replaying the activity clock over its recorded CPU
 	// found, in ModeHistory.
 	History *History `json:"history,omitempty"`
+	// Dependencies are the workloads its environment points at.
+	Dependencies []Dependency `json:"dependencies,omitempty"`
 	// Clues are facts beyond CPU that bear on whether it's in use.
 	Clues   []string `json:"clues,omitempty"`
 	Managed bool     `json:"managed"`
@@ -191,6 +193,7 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 
 	var scaledToZero int
 	var noHistory []string
+	sources := map[workloadKey]workloadSource{}
 	for _, namespace := range opts.Namespaces {
 		history, historySince, err := s.readHistory(ctx, namespace, opts)
 		if err != nil {
@@ -199,7 +202,7 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 		if history != nil && (since.IsZero() || historySince.Before(since)) {
 			since = historySince
 		}
-		workloads, zero, err := s.scanNamespace(ctx, namespace, haveMetrics, history, historySince, opts)
+		workloads, zero, err := s.scanNamespace(ctx, namespace, haveMetrics, history, historySince, sources, opts)
 		if err != nil {
 			report.Notes = append(report.Notes, fmt.Sprintf("skipped namespace %s: %v", namespace, err))
 			continue
@@ -230,6 +233,7 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 		report.Notes = append(report.Notes, fmt.Sprintf("%s already scaled to zero, not counted",
 			plural(scaledToZero, "workload is", "workloads are")))
 	}
+	report.Notes = append(report.Notes, s.findDependencies(ctx, report.Workloads, sources, opts.Namespaces)...)
 
 	slices.SortFunc(report.Workloads, func(a, b Workload) int {
 		if c := cmp.Compare(stateOrder[a.State], stateOrder[b.State]); c != 0 {
@@ -259,7 +263,8 @@ func (s *Scanner) metricsAvailable(ctx context.Context, namespaces []string) boo
 }
 
 func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetrics bool,
-	history []containerCPU, historySince time.Time, opts ClusterOptions) ([]Workload, int, error) {
+	history []containerCPU, historySince time.Time, sources map[workloadKey]workloadSource, opts ClusterOptions) (
+	[]Workload, int, error) {
 	managed := s.managedInNamespace(ctx, namespace)
 	rollouts, err := s.rollouts(ctx, namespace)
 	if err != nil {
@@ -280,6 +285,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 			}
 			mw := managed[string(kind)+"/"+obj.GetName()]
 			replicas, spec, matchLabels := workloadFields(obj)
+			sources[workloadKey{namespace, kind, obj.GetName()}] = workloadSource{template: podTemplate(obj), managed: mw}
 			n := int32(1)
 			if replicas != nil {
 				n = *replicas
