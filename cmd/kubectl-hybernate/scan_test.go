@@ -351,6 +351,38 @@ func TestWriteTable_HistoryAccess(t *testing.T) {
 		"  kubectl create role x\n  kubectl create rolebinding x\nOr pass --prometheus-url")
 }
 
+func TestWriteTable_Dependencies(t *testing.T) {
+	cluster := sampleCluster("staging")
+	cluster.Workloads[0].Dependencies = []discovery.Dependency{
+		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Via: "PGHOST",
+			Address: "postgres-0.postgres-hl", Headless: true},
+		{Namespace: "messaging", Kind: v1alpha1.TargetKindStatefulSet, Name: "nats", Via: "NATS_URL",
+			Address: "nats://nats.messaging:4222", Headless: true},
+		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindDeployment, Name: "cache", Via: "CACHE",
+			Address: "cache:6379"},
+	}
+	cluster.Workloads[1].Dependencies = []discovery.Dependency{
+		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "backup", Via: "BACKUP",
+			Address: "backup-0.backup", Headless: true, Declared: true},
+	}
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+		scanOptions{output: "table"}))
+
+	got := out.String()
+	assert.Contains(t, got, "Dependencies found in environment variables (suggestions; never applied):")
+	assert.Regexp(t, `deployment/checkout-api\s+->\s+statefulset/postgres\s+PGHOST=postgres-0.postgres-hl\s+headless`, got)
+	assert.Regexp(t, `->\s+messaging/statefulset/nats\s+NATS_URL=nats://nats.messaging:4222\s+headless`, got,
+		"another namespace's is named with it")
+	assert.Regexp(t, `->\s+deployment/cache\s+CACHE=cache:6379\s*\n`, got)
+	assert.Regexp(t, `statefulset/backup\s+BACKUP=backup-0.backup\s+already declared`, got)
+	assert.Contains(t, got,
+		`sandbox-42/deployment/checkout-api: hybernate.io/depends-on: "statefulset/postgres, messaging/statefulset/nats"`,
+		"one annotation with every headless dependency it needs")
+	assert.NotContains(t, got, `statefulset/postgres: hybernate.io/depends-on`, "a declared one needs nothing")
+}
+
 func TestParseWindow(t *testing.T) {
 	tests := []struct {
 		in      string

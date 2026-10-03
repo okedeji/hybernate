@@ -396,6 +396,7 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 			writeWorkloads(p, judged, limit, c.Mode == discovery.ModeHistory)
 		}
 		writeMeasured(p, c.Workloads)
+		writeDependencies(p, c.Workloads)
 		notes := append(unjudgedNotes(unjudged), c.Notes...)
 		if len(notes) > 0 {
 			p.line("Notes:")
@@ -641,6 +642,64 @@ func writeMeasured(p *printer, workloads []Workload) {
 	}
 	_ = tw.Flush()
 	p.line("")
+}
+
+// writeDependencies lists the dependencies found in workloads' environment,
+// and the annotation to add for each one reached at a headless address,
+// which only dependsOn covers.
+func writeDependencies(p *printer, workloads []Workload) {
+	var found bool
+	for _, wl := range workloads {
+		found = found || len(wl.Dependencies) > 0
+	}
+	if !found {
+		return
+	}
+	p.line("  Dependencies found in environment variables (suggestions; never applied):")
+	tw := tabwriter.NewWriter(p, 0, 0, 3, ' ', 0)
+	type hint struct{ workload, value string }
+	var hints []hint
+	for _, wl := range workloads {
+		var needed []string
+		for _, d := range wl.Dependencies {
+			ref := dependencyRef(wl.Namespace, d)
+			note := ""
+			switch {
+			case d.Declared:
+				note = "already declared"
+			case d.Headless:
+				note = "headless"
+				needed = append(needed, ref)
+			}
+			_, _ = fmt.Fprintf(tw, "  %s\t%s/%s\t->\t%s\t%s=%s\t%s\n", wl.Namespace,
+				strings.ToLower(string(wl.Kind)), wl.Name, ref, d.Via, d.Address, note)
+		}
+		if len(needed) > 0 {
+			hints = append(hints, hint{
+				workload: fmt.Sprintf("%s/%s/%s", wl.Namespace, strings.ToLower(string(wl.Kind)), wl.Name),
+				value:    strings.Join(needed, ", "),
+			})
+		}
+	}
+	_ = tw.Flush()
+	if len(hints) > 0 {
+		p.line("  The doorman can't hold connections to a headless address, so a request won't wake what's behind it.")
+		p.line("  Add the dependency to the workloads that use one:")
+		for _, h := range hints {
+			p.line("    %s: hybernate.io/depends-on: %q", h.workload, h.value)
+		}
+	}
+	p.line("")
+}
+
+// dependencyRef writes a dependency as hybernate.io/depends-on takes it:
+// kind/name, with its namespace first when it's in another one.
+func dependencyRef(namespace string, d discovery.Dependency) string {
+	ref := strings.ToLower(string(d.Kind)) + "/" + d.Name
+	if d.Namespace != namespace {
+		ref = d.Namespace + "/" + ref
+	}
+	return ref
 }
 
 // hours is a length of time to the hour, or the minute under one.
