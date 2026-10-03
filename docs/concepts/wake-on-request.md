@@ -31,6 +31,8 @@ The page is only for a browser loading a page: a `GET` or `HEAD` with `Sec-Fetch
 
 The page is sent as `503 Service Unavailable` with `Cache-Control: no-store` and `Retry-After`, so caches, crawlers, and monitors don't mistake it for the app. Because it answers at once, a proxy's timeout doesn't matter for browsers, however long the workload takes to start.
 
+A browser only reaches the doorman if it asks the server. Pages an app serves without a `Cache-Control` header, as static file servers often do, can be shown from the browser's cache instead, so a reload of a page opened a moment ago may show the cached copy rather than the waking-up page. Apps that send `Cache-Control: no-cache` for their HTML, as most do so that new releases take effect, always reach the doorman.
+
 To hold browsers too, set:
 
 ```yaml
