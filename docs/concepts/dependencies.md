@@ -63,3 +63,13 @@ There's no timeout, because a slow start is exactly why you'd set it. If the wai
 ## Across namespaces
 
 Dependencies can point into other namespaces, so sandboxes can share a database or broker that lives elsewhere. A dependency can only be kept awake or woken by its dependents, never paused, scaled down, or deleted, so the most a dependent in another namespace can do is keep it running. `HeldByDependents` always names the holders by namespace.
+
+## When you need dependsOn
+
+A request through a normal Service wakes a paused workload by itself, through [wake on request](wake-on-request.md): an app's connection to a paused database's Service is held by the doorman and wakes the database, costing that one connection a wait. `dependsOn` is what you need when that can't happen or isn't enough:
+
+- **Headless addresses.** Apps that connect to a pod or a headless Service (`postgres-0.postgres-hl`) go straight to pods, so the doorman never sees the connection. Only `dependsOn` wakes the dependency first.
+- **No slow first request.** Waking dependencies with the workload, and `waitForReady`, means the first request doesn't wait for the database too.
+- **Holding a dependency awake** while its dependents are, so it doesn't pause under them.
+
+[`kubectl hybernate scan`](../getting-started/kubectl-plugin.md#scan-your-clusters) reads workloads' environment variables and lists the dependencies it finds there, flagging the headless ones with the annotation to add.

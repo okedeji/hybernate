@@ -86,6 +86,24 @@ Notes:
 - Requests and activity annotations aren't recorded in Prometheus, so the replay only knows CPU and rollouts, and a workload used with little CPU can look like it would sleep more than it would. Requests and prices are today's.
 - If Prometheus keeps less than the window, the replay covers what it keeps, and the report says so. Without Prometheus, or without permission to reach it, the scan judges from CPU right now, and says why.
 
+**Dependencies:** the scan reads each workload's environment variables, from literal values and ConfigMaps, and lists the workloads they point at:
+
+```
+  Dependencies found in environment variables (suggestions; never applied):
+  sandbox-42   deployment/checkout-api   ->   statefulset/postgres         DATABASE_URL=postgres://shop:***@postgres:5432/shop   already declared
+  sandbox-42   deployment/checkout-api   ->   messaging/statefulset/nats   NATS_URL=nats://nats.messaging:4222
+  sandbox-42   deployment/worker         ->   statefulset/postgres         PGHOST=postgres-0.postgres-hl                          headless
+  The doorman can't hold connections to a headless address, so a request won't wake what's behind it.
+  Add the dependency to the workloads that use one:
+    sandbox-42/deployment/worker: hybernate.io/depends-on: "statefulset/postgres"
+```
+
+- An address counts when it names a Service in a scanned namespace, in any form cluster DNS gives it (`postgres`, `postgres.sandbox-42`, `postgres.sandbox-42.svc.cluster.local`, or a headless Service's pod, `postgres-0.postgres-hl`), inside a URL, a `host:port`, or a list of either. The workload is the one the Service's selector picks. A bare word on its own, such as `MODE=postgres`, isn't taken for an address.
+- Variable names don't matter, and Service names come from the cluster, not a list the scan keeps.
+- Passwords in URLs are shown as `***`, and query strings, which can hold credentials, are dropped.
+- **Headless** dependencies are the ones to act on: connections to a headless address go straight to pods, so the doorman can't hold them, and only [`dependsOn`](../concepts/dependencies.md) wakes the dependency first. A dependency reached through a normal Service is woken by the first request to it anyway.
+- Secrets are never read, so addresses set there, and ones built in code or read from files, aren't found. The notes say which workloads take variables from Secrets.
+
 **What the numbers mean:**
 
 - Costs are what the workloads' requests cost while running, sidecars included. Without `--cpu-price` and `--memory-price`, they use assumed list prices from AWS on-demand in us-east-1, and the report says so.
