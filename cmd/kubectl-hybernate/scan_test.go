@@ -18,20 +18,26 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/discovery"
 )
 
-func sampleCluster(context string) clusterScan {
+func sampleCluster(contextName string) clusterScan {
 	workloads := []discovery.Workload{
 		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindDeployment, Name: "checkout-api", Replicas: 2,
 			State: discovery.StateIdle, CPUPercent: ptr.To(2), Reason: "CPU 2%", MonthlyCost: 1240.4, HourlyCost: 1.6992,
@@ -39,7 +45,7 @@ func sampleCluster(context string) clusterScan {
 		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Replicas: 1,
 			State: discovery.StateActive, CPUPercent: ptr.To(64), MonthlyCost: 96, HourlyCost: 0.1315},
 	}
-	return clusterScan{Context: context, Cluster: context, ClusterReport: &discovery.ClusterReport{
+	return clusterScan{Context: contextName, Cluster: contextName, ClusterReport: &discovery.ClusterReport{
 		Mode: discovery.ModeSnapshot, Workloads: workloads, Notes: []string{"skipped namespace locked: forbidden"},
 		Totals: discovery.Totals{Workloads: 2, Idle: 1, IdleCPUMillis: 1000, IdleMemoryBytes: 2 << 30,
 			MonthlyCost: 1336.4, IdleMonthlyCost: 1240.4, IdleHourlyCost: 1.6992},
@@ -258,6 +264,117 @@ func TestWriteTable_OnlyMeasuring(t *testing.T) {
 	assert.Contains(t, got, "1. When you're happy with what dry-run measured, start pausing:")
 	assert.Contains(t, got, "kubectl hybernate enable statefulset/db -n sandbox-7")
 	assert.NotContains(t, got, "kubectl label", "nothing unmanaged is idle")
+}
+
+func TestWriteTable_History(t *testing.T) {
+	cluster := sampleCluster("staging")
+	cluster.Mode = discovery.ModeHistory
+	cluster.History = &discovery.HistorySource{Prometheus: "monitoring/prometheus-operated", Hours: 168}
+	cluster.Workloads[0].History = &discovery.History{Hours: 168, RunningHours: 168, IdleHours: 141,
+		SleepHours: 120, Wakes: 9, Freed: 204.3, MonthlyFreed: 887.6}
+	cluster.Totals.Replayed = discovery.ReplayTotals{Workloads: 2, Sleepers: 1, SleepHours: 1204, Wakes: 9,
+		Freed: 204.3, MonthlyFreed: 887.6}
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+		scanOptions{output: "table"}))
+
+	got := out.String()
+	assert.Contains(t, got,
+		"Replaying the last 7 days, Hybernate would have paused 1 workload for 1,204 hours in all, waking them 9 times,")
+	assert.Contains(t, got, "and freed $204: about $888/month.")
+	assert.Regexp(t, `IDLE\s+ASLEEP\s+WAKES\s+FREES/MO`, got)
+	assert.Regexp(t, `deployment/checkout-api\s+idle\s+2%\s+2\s+\$1,240\s+141h of 168h\s+120h\s+9\s+\$888`, got)
+	assert.Regexp(t, `statefulset/postgres\s+active\s+64%\s+1\s+\$96\s+-\s+-\s+-\s+-`, got, "no history, no numbers")
+	assert.NotContains(t, got, "COST/HOUR")
+	assert.NotContains(t, got, "which one moment can't show", "history shows it")
+}
+
+func TestWriteTable_HistoryWithNothingToSleep(t *testing.T) {
+	cluster := sampleCluster("staging")
+	cluster.Mode = discovery.ModeHistory
+	cluster.History = &discovery.HistorySource{Hours: 30}
+	cluster.Totals.Replayed = discovery.ReplayTotals{Workloads: 2}
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+		scanOptions{output: "table"}))
+
+	assert.Contains(t, out.String(),
+		"Replaying the last 30 hours, nothing Hybernate doesn't already pause would have slept.")
+}
+
+func TestHistoryAccess(t *testing.T) {
+	forbidden := &discovery.ProxyForbiddenError{Namespace: "monitoring", Service: "prometheus-operated", Port: "web"}
+	tests := []struct {
+		name     string
+		username string
+		reviewOK bool
+		want     string
+	}{
+		{name: "a user", username: "jane@example.com", reviewOK: true, want: "--user=jane@example.com"},
+		{name: "a service account", username: "system:serviceaccount:ci:scanner", reviewOK: true,
+			want: "--serviceaccount=ci:scanner"},
+		{name: "a cluster that can't say who you are", want: "--user=<you>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+					if !tt.reviewOK {
+						return errors.New("selfsubjectreviews not served")
+					}
+					obj.(*authenticationv1.SelfSubjectReview).Status.UserInfo.Username = tt.username
+					return nil
+				},
+			}).Build()
+
+			got := historyAccess(context.Background(), c, forbidden)
+
+			require.Len(t, got, 2)
+			assert.Equal(t, "kubectl create role hybernate-scan -n monitoring --verb=get --resource=services/proxy "+
+				"--resource-name=prometheus-operated:web", got[0])
+			assert.Equal(t, "kubectl create rolebinding hybernate-scan -n monitoring --role=hybernate-scan "+tt.want, got[1])
+		})
+	}
+}
+
+func TestWriteTable_HistoryAccess(t *testing.T) {
+	cluster := sampleCluster("staging")
+	cluster.HistoryAccess = []string{"kubectl create role x", "kubectl create rolebinding x"}
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+		scanOptions{output: "table"}))
+
+	assert.Contains(t, out.String(), "To replay history, an admin can let you read Prometheus, and nothing else, with:\n"+
+		"  kubectl create role x\n  kubectl create rolebinding x\nOr pass --prometheus-url")
+}
+
+func TestParseWindow(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{in: "7d", want: 7 * 24 * time.Hour},
+		{in: "36h", want: 36 * time.Hour},
+		{in: "0", want: 0},
+		{in: "1w", wantErr: true},
+		{in: "-2d", wantErr: true},
+		{in: "soon", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := parseWindow(tt.in)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestPricesFor(t *testing.T) {
