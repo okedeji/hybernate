@@ -299,6 +299,13 @@ spec:
                       OnRequest routes the workload's Services to the doorman while it's
                       paused. When false, requests to a paused workload fail.
                     type: boolean
+                  page:
+                    default: true
+                    description: |-
+                      Page answers a browser loading a page with a "waking up" page that
+                      refreshes until the workload is Running, instead of holding the
+                      request. Other requests are held either way.
+                    type: boolean
                 type: object
             required:
             - prediction

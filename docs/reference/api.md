@@ -26,6 +26,7 @@
 | `wake` | `WakeSpec` | No | | Waking on request while paused |
 | `wake.onRequest` | bool | No | `true` | Route the workload's Services to the doorman while paused |
 | `wake.maxWait` | duration | No | `2m` | How long a request is held while the workload wakes |
+| `wake.page` | bool | No | `true` | Answer a browser loading a page with a waking-up page instead of holding it |
 | `pause` | `PauseSpec` | No | | Pause behavior |
 | `pause.expireAfter` | duration | No | | Max pause duration |
 | `pause.expireAction` | `resume` \| `destroy` | No | `destroy` | Action on expiry |

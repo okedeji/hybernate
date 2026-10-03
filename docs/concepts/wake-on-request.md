@@ -21,6 +21,26 @@ Ingress controllers, Gateway API implementations, and cloud load balancers that 
 WakeOnRequest=True   DoormanRouted   requests are held and wake the workload
 ```
 
+## Browsers
+
+A browser opening a paused workload doesn't sit on a blank tab. The doorman answers straight away with a page that says what's happening and reloads itself every few seconds. It shows the address the person opened, so it reads as part of their environment, how long the workload has been starting, and when it was paused. Once a pod is Ready, the page says so and reloads straight into the app.
+
+![The waking-up page](../assets/waking-page.png)
+
+The page is only for a browser loading a page: a `GET` or `HEAD` with `Sec-Fetch-Mode: navigate`, which browsers send when you open a URL, or, from older browsers, one that asks for HTML. Scripts' requests, API clients, form posts, WebSockets, TLS, and other protocols are held as usual. The doorman tells them apart from the first bytes the caller sends, then passes those bytes on unchanged when it holds the connection.
+
+The page is sent as `503 Service Unavailable` with `Cache-Control: no-store` and `Retry-After`, so caches, crawlers, and monitors don't mistake it for the app. Because it answers at once, a proxy's timeout doesn't matter for browsers, however long the workload takes to start.
+
+A browser only reaches the doorman if it asks the server. Pages an app serves without a `Cache-Control` header, as static file servers often do, can be shown from the browser's cache instead, so a reload of a page opened a moment ago may show the cached copy rather than the waking-up page. Apps that send `Cache-Control: no-cache` for their HTML, as most do so that new releases take effect, always reach the doorman.
+
+To hold browsers too, set:
+
+```yaml
+spec:
+  wake:
+    page: false
+```
+
 ## How long a connection is held
 
 The doorman holds each connection for up to `wake.maxWait`, 2 minutes by default. If no pod is Ready by then, it closes the connection. The wake carries on, so a retry a little later succeeds.
@@ -87,7 +107,8 @@ Callers reach the doorman on ports 20000-29999, so a default-deny policy on the 
 
 ## What the caller sees
 
-- **A pod in the cluster or an Ingress**: one slow response while the workload starts, then a normal one.
+- **A browser**: the waking-up page at once, then the app on the reload after it's Running.
+- **Anything else, from a pod in the cluster or through an Ingress**: one slow response while the workload starts, then a normal one.
 - **The client's source IP**: the woken pod sees the doorman's IP for held connections, not the caller's. Only the connections that arrive while the workload is paused or waking go through the doorman.
 - **Right after the pause**: for a second or two, until kube-proxy and ingress controllers pick up the doorman's EndpointSlice, a request can be refused or get a 502 from an ingress, as after any scale-down. A retry is held.
 - **A connection held past `maxWait`**: it's closed with no response, which most clients report as an empty reply or a connection reset. A `RequestNotServed` warning event on the ManagedWorkload names the Service and how long the request waited; while the wake is slow, it's emitted at most once a minute.
