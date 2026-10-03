@@ -95,6 +95,8 @@ type Workload struct {
 	Unmeasured string `json:"unmeasured,omitempty"`
 	// DryRun means Hybernate measures it but never pauses it.
 	DryRun bool `json:"dryRun,omitempty"`
+	// Measured is what dry-run has measured, for a workload in dry-run.
+	Measured *Measured `json:"measured,omitempty"`
 	// Clues are facts beyond CPU that bear on whether it's in use.
 	Clues   []string `json:"clues,omitempty"`
 	Managed bool     `json:"managed"`
@@ -103,6 +105,18 @@ type Workload struct {
 	// becomes money only if the autoscaler removes that capacity.
 	HourlyCost  float64 `json:"hourlyCost"`
 	MonthlyCost float64 `json:"monthlyCost"`
+}
+
+// Measured is what Hybernate would have done to a workload in dry-run.
+type Measured struct {
+	Since  time.Time `json:"since"`
+	Pauses int       `json:"pauses"`
+	// SleptHours is how long its would-be pauses lasted, one under way
+	// included.
+	SleptHours float64 `json:"sleptHours"`
+	// Freed is what those hours would have freed, at the scan's prices and
+	// the replicas it runs now.
+	Freed float64 `json:"freed"`
 }
 
 // Totals sum a scan's workloads.
@@ -254,6 +268,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 			w.Clues = clues(w, now)
 			w.HourlyCost = hourlyCost(w, opts.Rates)
 			w.MonthlyCost = w.HourlyCost * hoursPerMonth
+			w.Measured = measured(mw, w.HourlyCost, now)
 			out = append(out, w)
 		}
 	}
@@ -262,6 +277,25 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 
 func pausedByHybernate(mw *v1alpha1.ManagedWorkload) bool {
 	return mw != nil && mw.Status.Phase == v1alpha1.PhasePaused && mw.Status.Pause != nil
+}
+
+// measured reads the dry-run summary Hybernate keeps for the workload. The
+// summary adds a would-be pause when it ends, so one under way is added here.
+func measured(mw *v1alpha1.ManagedWorkload, hourlyCost float64, now time.Time) *Measured {
+	if mw == nil || !mw.Spec.DryRun || mw.Status.DryRun == nil {
+		return nil
+	}
+	d := mw.Status.DryRun
+	slept := d.Slept.Duration
+	if mw.Status.Phase == v1alpha1.PhaseIdle && d.Resources != nil && mw.Status.LastTransitionTime != nil {
+		slept += max(now.Sub(mw.Status.LastTransitionTime.Time), 0)
+	}
+	return &Measured{
+		Since:      d.Since.Time,
+		Pauses:     int(d.Pauses),
+		SleptHours: slept.Hours(),
+		Freed:      hourlyCost * slept.Hours(),
+	}
 }
 
 // judgePaused describes a workload Hybernate has paused, priced on what it
@@ -424,7 +458,7 @@ func clues(w Workload, now time.Time) []string {
 func hourlyCost(w Workload, rates cost.Rates) float64 {
 	cores := float64(w.PodCPURequestMillis) / 1000
 	gib := float64(w.PodMemoryRequestBytes) / (1 << 30)
-	return (cores*rates.CPUPerHour + gib*rates.MemoryPerHour) * float64(w.Replicas)
+	return cost.ComputeHourly(cores, gib, rates) * float64(w.Replicas)
 }
 
 func totals(workloads []Workload) Totals {

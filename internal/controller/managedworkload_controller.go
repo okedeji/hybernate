@@ -209,6 +209,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// --- Cost tracking and status ---
 
+	r.trackDryRun(&workload)
 	r.accumulateCost(ctx, &workload)
 	if err := r.persistStatus(ctx, &workload, observed); err != nil {
 		return ctrl.Result{}, err

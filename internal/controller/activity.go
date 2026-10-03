@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/forecast"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
 	"github.com/okedeji/hybernate/internal/signal"
@@ -360,8 +361,7 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 
 	if obs.activeUntil.After(now) || now.Before(pauseAt) {
 		if workload.Status.Phase == v1alpha1.PhaseIdle {
-			r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonActivityResumed, actionEvaluateIdle,
-				"activity resumed (%s), no longer idle", workload.Status.Activity.LastActivitySource)
+			r.reportActivityResumed(workload)
 			if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ActivityResumed"); err != nil {
 				return nil, err
 			}
@@ -389,6 +389,9 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		}
 		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleDetected, actionEvaluateIdle,
 			"no activity for %s, last seen from %s; %s", idleFor, workload.Status.Activity.LastActivitySource, action)
+		if workload.Spec.DryRun {
+			r.beginWouldBePause(ctx, workload)
+		}
 		if _, err := r.transition(ctx, workload, v1alpha1.PhaseIdle, "IdleDetected"); err != nil {
 			return nil, err
 		}
@@ -401,6 +404,19 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		return r.handleDestroy(ctx, workload)
 	}
 	return r.handlePause(ctx, workload)
+}
+
+func (r *Reconciler) reportActivityResumed(workload *v1alpha1.ManagedWorkload) {
+	source := workload.Status.Activity.LastActivitySource
+	slept, freed, measured := r.endWouldBePause(workload)
+	if !measured {
+		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonActivityResumed, actionEvaluateIdle,
+			"activity resumed (%s), no longer idle", source)
+		return
+	}
+	r.emitEvent(workload, true, "Normal", ReasonActivityResumed, actionEvaluateIdle,
+		"activity resumed (%s): would have slept %s, freeing %s; %s",
+		source, roundedDuration(slept), cost.FormatDollars(freed), dryRunSummary(workload.Status.DryRun))
 }
 
 // forecastVeto defers a pause when a confident forecast expects demand in
