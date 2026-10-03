@@ -30,6 +30,7 @@ import (
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -394,15 +395,31 @@ func (s *Server) wake(ctx context.Context, rt route) error {
 	if err := s.client.Get(ctx, rt.workload, &w); err != nil {
 		return fmt.Errorf("getting managed workload: %w", err)
 	}
-	patch := client.MergeFrom(w.DeepCopy())
+	// Every doorman replica can see the same burst of requests. One that
+	// already sees a recent stamp leaves it there.
+	if stamped, err := time.Parse(time.RFC3339, w.Annotations[v1alpha1.AnnotationLastRequest]); err == nil &&
+		now.Sub(stamped) < wakeStampInterval {
+		return nil
+	}
+	original := w.DeepCopy()
 	if w.Annotations == nil {
 		w.Annotations = map[string]string{}
 	}
 	w.Annotations[v1alpha1.AnnotationLastRequest] = now.UTC().Format(time.RFC3339)
-	if err := s.client.Patch(ctx, &w, patch); err != nil {
-		return fmt.Errorf("stamping last activity: %w", err)
+	// The stamp is locked to the version this replica read, so when two
+	// stamp at once, only the first to land reports the wake. A conflict
+	// means the workload changed a moment ago, most likely the other
+	// replica's stamp; the stamp is repeated unlocked so the wake is never
+	// lost, and the event is left to whoever won.
+	err := s.client.Patch(ctx, &w, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{}))
+	won := err == nil
+	if apierrors.IsConflict(err) {
+		err = s.client.Patch(ctx, &w, client.MergeFrom(original))
 	}
-	if s.recorder != nil {
+	if err != nil {
+		return fmt.Errorf("stamping last request: %w", err)
+	}
+	if s.recorder != nil && won {
 		s.recorder.Eventf(&w, nil, "Normal", "WokenByRequest", "Wake",
 			"request on Service %s, waking", rt.service)
 	}

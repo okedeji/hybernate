@@ -39,6 +39,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
@@ -364,4 +365,95 @@ func TestServer_DrainsARemovedRouteThenReleasesIt(t *testing.T) {
 	require.NoError(t, s.syncRoutes(ctx))
 	_, err = net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))), time.Second)
 	assert.Error(t, err, "the port is released once it has drained")
+}
+
+// staleReads makes Get return a copy of the workload as it was when the
+// test began, like a replica whose cache hasn't caught up.
+func staleReads(t *testing.T, c client.Client, key types.NamespacedName) interceptor.Funcs {
+	t.Helper()
+	var snapshot v1alpha1.ManagedWorkload
+	require.NoError(t, c.Get(context.Background(), key, &snapshot))
+	return interceptor.Funcs{Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object,
+		_ ...client.GetOption) error {
+		snapshot.DeepCopyInto(obj.(*v1alpha1.ManagedWorkload))
+		return nil
+	}}
+}
+
+func eventCount(r *events.FakeRecorder, reason string) int {
+	var n int
+	for len(r.Events) > 0 {
+		if strings.Contains(<-r.Events, reason) {
+			n++
+		}
+	}
+	return n
+}
+
+// Two doorman replicas can each get a connection from the same burst, the
+// second reading a copy from before the first stamped. Only the first
+// reports the wake.
+func TestServer_ReplicasReportOneWake(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	key := types.NamespacedName{Namespace: "sandbox", Name: "api"}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pausedWorkload("api", freePort(t), time.Minute)).Build()
+	stale := interceptor.NewClient(c, staleReads(t, c, key))
+	now := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	rt := route{workload: key, service: "api"}
+
+	first, second := events.NewFakeRecorder(10), events.NewFakeRecorder(10)
+	for _, replica := range []struct {
+		c client.Client
+		r *events.FakeRecorder
+	}{{c, first}, {stale, second}} {
+		s := NewServer(replica.c, replica.r, "127.0.0.1")
+		s.now = func() time.Time { return now }
+		require.NoError(t, s.wake(context.Background(), rt))
+	}
+
+	assert.Equal(t, 1, eventCount(first, "WokenByRequest"))
+	assert.Equal(t, 0, eventCount(second, "WokenByRequest"))
+}
+
+// A conflict from some other change must not lose the wake.
+func TestServer_StampsDespiteAConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	key := types.NamespacedName{Namespace: "sandbox", Name: "api"}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pausedWorkload("api", freePort(t), time.Minute)).Build()
+	stale := interceptor.NewClient(c, staleReads(t, c, key))
+
+	var w v1alpha1.ManagedWorkload
+	require.NoError(t, c.Get(context.Background(), key, &w))
+	w.Labels = map[string]string{"team": "payments"}
+	require.NoError(t, c.Update(context.Background(), &w))
+
+	s := NewServer(stale, nil, "127.0.0.1")
+	require.NoError(t, s.wake(context.Background(), route{workload: key, service: "api"}))
+
+	require.NoError(t, c.Get(context.Background(), key, &w))
+	assert.NotEmpty(t, w.Annotations[v1alpha1.AnnotationLastRequest], "the workload is still woken")
+	assert.Equal(t, "payments", w.Labels["team"], "the other change is kept")
+}
+
+// A replica that sees another's stamp from a moment ago doesn't stamp again.
+func TestServer_LeavesARecentStampAlone(t *testing.T) {
+	now := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	recent := now.Add(-2 * time.Second).Format(time.RFC3339)
+	w := pausedWorkload("api", freePort(t), time.Minute)
+	w.Annotations = map[string]string{v1alpha1.AnnotationLastRequest: recent}
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(w).Build()
+	recorder := events.NewFakeRecorder(10)
+	s := NewServer(c, recorder, "127.0.0.1")
+	s.now = func() time.Time { return now }
+	key := types.NamespacedName{Namespace: "sandbox", Name: "api"}
+
+	require.NoError(t, s.wake(context.Background(), route{workload: key, service: "api"}))
+
+	require.NoError(t, c.Get(context.Background(), key, w))
+	assert.Equal(t, recent, w.Annotations[v1alpha1.AnnotationLastRequest])
+	assert.Equal(t, 0, eventCount(recorder, "WokenByRequest"))
 }
