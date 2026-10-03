@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -56,6 +57,9 @@ const (
 	// ModeSnapshot judges from CPU at the moment of the scan, which can't
 	// tell a quiet hour from a quiet week.
 	ModeSnapshot Mode = "snapshot"
+	// ModeHistory also replays the activity clock over CPU history from
+	// Prometheus, which shows how much a workload would have slept.
+	ModeHistory Mode = "history"
 )
 
 // staleAfter is how long without a rollout is worth pointing out.
@@ -67,8 +71,10 @@ const defaultIdleAfter = time.Hour
 
 // ClusterReport is what a scan found in one cluster.
 type ClusterReport struct {
-	Mode      Mode       `json:"mode"`
-	Workloads []Workload `json:"workloads"`
+	Mode Mode `json:"mode"`
+	// History says what the replay read, in ModeHistory.
+	History   *HistorySource `json:"history,omitempty"`
+	Workloads []Workload     `json:"workloads"`
 	// Notes say what the scan couldn't see and how that limits it.
 	Notes  []string `json:"notes,omitempty"`
 	Totals Totals   `json:"totals"`
@@ -97,6 +103,9 @@ type Workload struct {
 	DryRun bool `json:"dryRun,omitempty"`
 	// Measured is what dry-run has measured, for a workload in dry-run.
 	Measured *Measured `json:"measured,omitempty"`
+	// History is what replaying the activity clock over its recorded CPU
+	// found, in ModeHistory.
+	History *History `json:"history,omitempty"`
 	// Clues are facts beyond CPU that bear on whether it's in use.
 	Clues   []string `json:"clues,omitempty"`
 	Managed bool     `json:"managed"`
@@ -134,6 +143,20 @@ type Totals struct {
 	IdleMemoryBytes int64   `json:"idleMemoryBytes"`
 	IdleHourlyCost  float64 `json:"idleHourlyCost"`
 	IdleMonthlyCost float64 `json:"idleMonthlyCost"`
+	// Replayed sums the history of workloads Hybernate doesn't pause yet:
+	// unmanaged ones and those in dry-run.
+	Replayed ReplayTotals `json:"replayed"`
+}
+
+// ReplayTotals sum what replaying the activity clock found.
+type ReplayTotals struct {
+	Workloads int `json:"workloads"`
+	// Sleepers is how many of them would have slept at all.
+	Sleepers     int     `json:"sleepers"`
+	SleepHours   float64 `json:"sleepHours"`
+	Wakes        int     `json:"wakes"`
+	Freed        float64 `json:"freed"`
+	MonthlyFreed float64 `json:"monthlyFreed"`
 }
 
 // ClusterOptions configures ScanCluster.
@@ -142,14 +165,24 @@ type ClusterOptions struct {
 	CPUThreshold int
 	Rates        cost.Rates
 	Now          func() time.Time
+	// History, when set, is replayed over Window with IdleAfter.
+	History   *Prometheus
+	Window    time.Duration
+	IdleAfter time.Duration
 }
 
 // ScanCluster scans every Deployment and StatefulSet in the namespaces and
 // judges each from its CPU right now, plus clues that don't need history.
-// It only reads, and carries on past what it can't read, saying so in the
-// report's notes.
+// With History, it also replays the activity clock over each workload's
+// recorded CPU. It only reads, and carries on past what it can't read,
+// saying so in the report's notes.
 func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*ClusterReport, error) {
 	report := &ClusterReport{Mode: ModeSnapshot}
+	var since time.Time
+	if opts.History != nil {
+		report.Mode = ModeHistory
+		report.History = &HistorySource{Prometheus: opts.History.Source}
+	}
 	haveMetrics := s.metricsAvailable(ctx, opts.Namespaces)
 	if !haveMetrics {
 		report.Notes = append(report.Notes,
@@ -157,14 +190,41 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 	}
 
 	var scaledToZero int
+	var noHistory []string
 	for _, namespace := range opts.Namespaces {
-		workloads, zero, err := s.scanNamespace(ctx, namespace, haveMetrics, opts)
+		history, historySince, err := s.readHistory(ctx, namespace, opts)
+		if err != nil {
+			report.Notes = append(report.Notes, fmt.Sprintf("couldn't read history for namespace %s: %v", namespace, err))
+		}
+		if history != nil && (since.IsZero() || historySince.Before(since)) {
+			since = historySince
+		}
+		workloads, zero, err := s.scanNamespace(ctx, namespace, haveMetrics, history, historySince, opts)
 		if err != nil {
 			report.Notes = append(report.Notes, fmt.Sprintf("skipped namespace %s: %v", namespace, err))
 			continue
 		}
 		scaledToZero += zero
+		for _, w := range workloads {
+			if history != nil && w.History == nil && w.State != StateUnknown {
+				noHistory = append(noHistory, w.Namespace+"/"+w.Name)
+			}
+		}
 		report.Workloads = append(report.Workloads, workloads...)
+	}
+	if report.History != nil && !since.IsZero() {
+		report.History.Since = since
+		report.History.Hours = opts.Now().Sub(since).Hours()
+		report.Notes = append(report.Notes, "the history replay sees CPU and rollouts only; requests and activity "+
+			"annotations aren't in Prometheus, so a workload used with little CPU can look like it would sleep more than it would")
+		if covered := opts.Now().Sub(since); covered < opts.Window-historyStep(opts.Window) {
+			report.Notes = append(report.Notes, fmt.Sprintf("Prometheus keeps %s of history, so the replay covers that, not the %s asked for",
+				duration(covered), duration(opts.Window)))
+		}
+	}
+	if len(noHistory) > 0 {
+		report.Notes = append(report.Notes, fmt.Sprintf("%s no CPU history in Prometheus, so only their CPU right now is known: %s",
+			plural(len(noHistory), "workload has", "workloads have"), listSome(noHistory)))
 	}
 	if scaledToZero > 0 {
 		report.Notes = append(report.Notes, fmt.Sprintf("%s already scaled to zero, not counted",
@@ -173,6 +233,9 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 
 	slices.SortFunc(report.Workloads, func(a, b Workload) int {
 		if c := cmp.Compare(stateOrder[a.State], stateOrder[b.State]); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(monthlyFreed(b), monthlyFreed(a)); c != 0 {
 			return c
 		}
 		if c := cmp.Compare(b.MonthlyCost, a.MonthlyCost); c != 0 {
@@ -195,10 +258,10 @@ func (s *Scanner) metricsAvailable(ctx context.Context, namespaces []string) boo
 	return s.client.List(ctx, &list, client.InNamespace(namespaces[0]), client.Limit(1)) == nil
 }
 
-func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetrics bool, opts ClusterOptions) (
-	[]Workload, int, error) {
+func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetrics bool,
+	history []containerCPU, historySince time.Time, opts ClusterOptions) ([]Workload, int, error) {
 	managed := s.managedInNamespace(ctx, namespace)
-	deployed, err := s.lastRollouts(ctx, namespace)
+	rollouts, err := s.rollouts(ctx, namespace)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -230,8 +293,9 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 				Managed:   mw != nil,
 				DryRun:    mw != nil && mw.Spec.DryRun,
 			}
-			if t, ok := deployed[obj.GetUID()]; ok {
-				w.LastDeployed = &t
+			if times := rollouts[obj.GetUID()]; len(times) > 0 {
+				last := slices.MaxFunc(times, func(a, b time.Time) int { return a.Compare(b) })
+				w.LastDeployed = &last
 			}
 			ownCPU, ownMemory := metrics.Requests(metrics.WorkloadContainers(spec))
 			w.PodCPURequestMillis, w.PodMemoryRequestBytes = ownCPU, ownMemory
@@ -269,6 +333,9 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 			w.HourlyCost = hourlyCost(w, opts.Rates)
 			w.MonthlyCost = w.HourlyCost * hoursPerMonth
 			w.Measured = measured(mw, w.HourlyCost, now)
+			if history != nil && ownCPU > 0 {
+				w.History = replayWorkload(w, spec, history, historySince, rollouts[obj.GetUID()], opts)
+			}
 			out = append(out, w)
 		}
 	}
@@ -407,17 +474,15 @@ func (s *Scanner) managedInNamespace(ctx context.Context, namespace string) map[
 	return out
 }
 
-// lastRollouts returns when each Deployment and StatefulSet in the namespace
-// last rolled out: the creation of its newest ReplicaSet or revision.
-func (s *Scanner) lastRollouts(ctx context.Context, namespace string) (map[types.UID]time.Time, error) {
-	latest := map[types.UID]time.Time{}
+// rollouts returns when each workload rolled out, from the ReplicaSets and
+// ControllerRevisions it keeps: one per pod template it has run, as many as
+// its revision history limit keeps.
+func (s *Scanner) rollouts(ctx context.Context, namespace string) (map[types.UID][]time.Time, error) {
+	times := map[types.UID][]time.Time{}
 	note := func(owner client.Object) {
 		for _, ref := range owner.GetOwnerReferences() {
-			if ref.Controller == nil || !*ref.Controller {
-				continue
-			}
-			if t := owner.GetCreationTimestamp().Time; t.After(latest[ref.UID]) {
-				latest[ref.UID] = t
+			if ref.Controller != nil && *ref.Controller {
+				times[ref.UID] = append(times[ref.UID], owner.GetCreationTimestamp().Time)
 			}
 		}
 	}
@@ -435,7 +500,16 @@ func (s *Scanner) lastRollouts(ctx context.Context, namespace string) (map[types
 	for i := range revisions.Items {
 		note(&revisions.Items[i])
 	}
-	return latest, nil
+	return times, nil
+}
+
+// listSome names the first few of a list, and how many more there are.
+func listSome(names []string) string {
+	const shown = 3
+	if len(names) <= shown {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(names[:shown], ", "), len(names)-shown)
 }
 
 func plural(n int, one, many string) string {
@@ -465,6 +539,16 @@ func totals(workloads []Workload) Totals {
 	var t Totals
 	for _, w := range workloads {
 		t.Workloads++
+		if h := w.History; h != nil && (!w.Managed || w.DryRun) {
+			t.Replayed.Workloads++
+			if h.SleepHours > 0 {
+				t.Replayed.Sleepers++
+			}
+			t.Replayed.SleepHours += h.SleepHours
+			t.Replayed.Wakes += h.Wakes
+			t.Replayed.Freed += h.Freed
+			t.Replayed.MonthlyFreed += h.MonthlyFreed
+		}
 		if w.State == StatePaused {
 			t.Paused++
 			t.PausedHourlyCost += w.HourlyCost
