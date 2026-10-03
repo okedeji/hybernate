@@ -612,6 +612,34 @@ spec:
 
 			expectAwake()
 		})
+
+		It("shows a browser a waking-up page through ingress-nginx, then the app", func() {
+			waitForDoorman()
+			browser := []string{"-s", "--max-time", "30", "-w", "\nstatus=%{http_code}", "-H", "Host: " + webHost,
+				"-H", "Accept: text/html", "-H", "Sec-Fetch-Mode: navigate"}
+
+			By("opening the paused app in a browser")
+			// Until nginx picks up the doorman's endpoints, a request can still
+			// reach the removed pod, so this looks for the page across a few tries.
+			attempt := 0
+			Eventually(func(g Gomega) {
+				attempt++
+				page, _ := runCurl(fmt.Sprintf("curl-page-%d", attempt), wakeNamespace, ingressURL, browser...)
+				g.Expect(page).To(ContainSubstring("Waking up " + webName))
+				g.Expect(page).To(ContainSubstring("status=503"))
+			}, 2*time.Minute, time.Second).Should(Succeed())
+
+			expectAwake()
+
+			By("reloading once the app is Running")
+			reload := 0
+			Eventually(func(g Gomega) {
+				reload++
+				app, _ := runCurl(fmt.Sprintf("curl-page-reload-%d", reload), wakeNamespace, ingressURL, browser...)
+				g.Expect(app).To(ContainSubstring("status=200"))
+				g.Expect(app).To(HavePrefix(webName+"-"), "the reload reaches the app")
+			}, time.Minute, time.Second).Should(Succeed())
+		})
 	})
 })
 
@@ -697,28 +725,37 @@ spec:
 // response, after any retried attempts' errors. curl waits longer than the
 // doorman's default maxWait, so a failure is the doorman's.
 func curlInCluster(name, namespace, url string, args ...string) string {
-	curlArgs := append([]string{"curl", "-sS", "--fail-with-body", "--max-time", "150"}, args...)
+	args = append([]string{"-sS", "--fail-with-body", "--max-time", "150"}, args...)
+	logs, succeeded := runCurl(name, namespace, url, args...)
+	Expect(succeeded).To(BeTrue(), "curl failed: %s", logs)
+	lines := utils.GetNonEmptyLines(logs)
+	Expect(lines).NotTo(BeEmpty())
+	return lines[len(lines)-1]
+}
+
+// runCurl runs curl in a pod with args and returns what it printed and
+// whether it exited cleanly.
+func runCurl(name, namespace, url string, args ...string) (string, bool) {
 	run := append([]string{"run", name, "-n", namespace, "--restart=Never",
-		"--image=curlimages/curl:8.7.1", "--image-pull-policy=IfNotPresent", "--command", "--"},
-		append(curlArgs, url)...)
+		"--image=curlimages/curl:8.7.1", "--image-pull-policy=IfNotPresent", "--command", "--", "curl"},
+		append(args, url)...)
 	_, err := utils.Run(exec.Command("kubectl", run...))
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func() {
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", name, "-n", namespace, "--wait=false"))
 	})
 
+	var phase string
 	Eventually(func(g Gomega) {
-		phase, err := jsonpath("pod", name, namespace, "{.status.phase}")
+		var err error
+		phase, err = jsonpath("pod", name, namespace, "{.status.phase}")
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(phase).To(BeElementOf("Succeeded", "Failed"))
 	}, 3*time.Minute, 2*time.Second).Should(Succeed())
 
 	logs, err := utils.Run(exec.Command("kubectl", "logs", name, "-n", namespace))
 	Expect(err).NotTo(HaveOccurred())
-	Expect(jsonpath("pod", name, namespace, "{.status.phase}")).To(Equal("Succeeded"), "curl failed: %s", logs)
-	lines := utils.GetNonEmptyLines(logs)
-	Expect(lines).NotTo(BeEmpty())
-	return lines[len(lines)-1]
+	return logs, phase == "Succeeded"
 }
 
 // kubectlApply applies a manifest from a string.
