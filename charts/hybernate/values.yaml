@@ -41,6 +41,13 @@ metrics:
 prometheus:
   url: "" # required only for Prometheus activity queries, e.g. http://prometheus.monitoring.svc:9090
 
+# Settings for workloads opted in with the hybernate.io/managed label, where
+# their own annotations and their namespace's don't say otherwise.
+defaults:
+  idleAfter: 1h
+  cpuThreshold: 10
+  dryRun: false
+
 # The doorman wakes paused workloads when a request reaches them.
 doorman:
   enabled: true

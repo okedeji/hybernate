@@ -47,6 +47,9 @@ spec:
             {{- with .Values.prometheus.url }}
             - --prometheus-url={{ . }}
             {{- end }}
+            - --default-idle-after={{ .Values.defaults.idleAfter }}
+            - --default-cpu-threshold={{ .Values.defaults.cpuThreshold }}
+            - --default-dry-run={{ .Values.defaults.dryRun }}
             - --doorman-service={{ if .Values.doorman.enabled }}{{ include "hybernate.doormanName" . }}{{ end }}
           env:
             - name: POD_NAMESPACE
