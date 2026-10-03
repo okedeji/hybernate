@@ -54,6 +54,10 @@ const (
 	// ManagedWorkload once each; one stamp is enough to start the wake.
 	wakeStampInterval = 10 * time.Second
 
+	// unservedEventInterval keeps a burst of timed-out connections, all
+	// waiting on the same slow wake, to one warning event.
+	unservedEventInterval = time.Minute
+
 	dialTimeout = 5 * time.Second
 )
 
@@ -79,6 +83,7 @@ type Server struct {
 	listeners map[int32]net.Listener
 	conns     map[net.Conn]struct{}
 	lastWake  map[types.NamespacedName]time.Time
+	lastWarn  map[types.NamespacedName]time.Time
 
 	wg     sync.WaitGroup
 	synced atomic.Bool
@@ -95,6 +100,7 @@ func NewServer(c client.Client, recorder events.EventRecorder, host string) *Ser
 		listeners: map[int32]net.Listener{},
 		conns:     map[net.Conn]struct{}{},
 		lastWake:  map[types.NamespacedName]time.Time{},
+		lastWarn:  map[types.NamespacedName]time.Time{},
 	}
 }
 
@@ -243,9 +249,11 @@ func (s *Server) handle(ctx context.Context, port int32, conn net.Conn) {
 		if errors.Is(err, context.DeadlineExceeded) {
 			result = "timeout"
 		}
+		waited := s.now().Sub(start)
 		opmetrics.DoormanWakes.WithLabelValues(ns, name, result).Inc()
-		opmetrics.DoormanWaitSeconds.WithLabelValues(result).Observe(s.now().Sub(start).Seconds())
-		logger.Info("closing held connection", "result", result, "waited", s.now().Sub(start).Round(time.Millisecond).String())
+		opmetrics.DoormanWaitSeconds.WithLabelValues(result).Observe(waited.Seconds())
+		logger.Info("closing held connection", "result", result, "waited", waited.Round(time.Millisecond).String())
+		s.warnUnserved(ctx, rt, result, waited)
 		return
 	}
 
@@ -253,6 +261,7 @@ func (s *Server) handle(ctx context.Context, port int32, conn net.Conn) {
 	if err != nil {
 		opmetrics.DoormanWakes.WithLabelValues(ns, name, "error").Inc()
 		logger.Error(err, "connecting to woken workload", "backend", backend)
+		s.warnUnserved(ctx, rt, "error", s.now().Sub(start))
 		return
 	}
 	opmetrics.DoormanWakes.WithLabelValues(ns, name, "success").Inc()
@@ -265,7 +274,7 @@ func (s *Server) handle(ctx context.Context, port int32, conn net.Conn) {
 	proxy(conn, upstream)
 }
 
-// wake stamps the workload's last-activity annotation, at most once per
+// wake stamps the workload's last-request annotation, at most once per
 // wakeStampInterval, which wakes it through the operator's annotation path.
 func (s *Server) wake(ctx context.Context, rt route) error {
 	now := s.now()
@@ -285,7 +294,7 @@ func (s *Server) wake(ctx context.Context, rt route) error {
 	if w.Annotations == nil {
 		w.Annotations = map[string]string{}
 	}
-	w.Annotations[v1alpha1.AnnotationLastActivity] = now.UTC().Format(time.RFC3339)
+	w.Annotations[v1alpha1.AnnotationLastRequest] = now.UTC().Format(time.RFC3339)
 	if err := s.client.Patch(ctx, &w, patch); err != nil {
 		return fmt.Errorf("stamping last activity: %w", err)
 	}
@@ -294,6 +303,39 @@ func (s *Server) wake(ctx context.Context, rt route) error {
 			"request on Service %s, waking", rt.service)
 	}
 	return nil
+}
+
+// warnUnserved emits a warning event on the workload for a held connection
+// that was closed without reaching it, at most once per unservedEventInterval.
+// The metrics count every one; the event is what shows in kubectl describe.
+func (s *Server) warnUnserved(ctx context.Context, rt route, result string, waited time.Duration) {
+	if s.recorder == nil || ctx.Err() != nil {
+		return
+	}
+	now := s.now()
+	s.mu.Lock()
+	if last, ok := s.lastWarn[rt.workload]; ok && now.Sub(last) < unservedEventInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastWarn[rt.workload] = now
+	s.mu.Unlock()
+
+	// The connection's context may be what ran out, so the lookup gets its own.
+	getCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dialTimeout)
+	defer cancel()
+	var w v1alpha1.ManagedWorkload
+	if err := s.client.Get(getCtx, rt.workload, &w); err != nil {
+		log.FromContext(ctx).Error(err, "getting managed workload for event",
+			"workload", rt.workload.Name, "namespace", rt.workload.Namespace)
+		return
+	}
+	reason := "the workload wasn't Ready within maxWait; the wake continues"
+	if result != "timeout" {
+		reason = "the workload couldn't be reached"
+	}
+	s.recorder.Eventf(&w, nil, "Warning", "RequestNotServed", "Wake",
+		"a request on Service %s was closed after %s: %s", rt.service, waited.Round(time.Second), reason)
 }
 
 // waitForBackend polls until the Service has a Ready pod, and returns its

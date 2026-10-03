@@ -317,6 +317,7 @@ spec:
                     enum:
                     - created
                     - woke
+                    - request
                     - cpu
                     - rollout
                     - annotation

@@ -35,6 +35,11 @@ const (
 	// Set on the ManagedWorkload or its target.
 	AnnotationActiveUntil = "hybernate.io/active-until"
 
+	// AnnotationLastRequest records, as an RFC 3339 time, a request the
+	// doorman is holding for a paused workload. It wakes the workload like
+	// AnnotationLastActivity, and the clock records the wake as a request.
+	AnnotationLastRequest = "hybernate.io/last-request"
+
 	// FinalizerCleanup is the finalizer added to ManagedWorkloads for PVC retention cleanup.
 	FinalizerCleanup = "hybernate.io/cleanup"
 )

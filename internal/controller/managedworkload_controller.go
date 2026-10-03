@@ -327,6 +327,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 		return waiting, err
 	}
 
+	source := wakeSource(workload)
 	done, err := r.pauser.Resume(ctx, workload)
 	if err != nil {
 		return nil, fmt.Errorf("resuming workload: %w", err)
@@ -338,7 +339,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 
 	r.stampLastActed(workload)
 	r.observeActionDuration(workload, "resume")
-	r.resetActivity(workload, v1alpha1.ActivitySourceWoke)
+	r.resetActivity(workload, source)
 	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed")
 	if err != nil {
 		return nil, err

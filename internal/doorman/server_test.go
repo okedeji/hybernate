@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -99,11 +101,16 @@ func readySlice(service string, port int32) *discoveryv1.EndpointSlice {
 
 func startServer(t *testing.T, objs ...client.Object) (*Server, client.Client) {
 	t.Helper()
+	return startServerWithRecorder(t, nil, objs...)
+}
+
+func startServerWithRecorder(t *testing.T, recorder events.EventRecorder, objs ...client.Object) (*Server, client.Client) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 	require.NoError(t, discoveryv1.AddToScheme(scheme))
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	s := NewServer(c, nil, "127.0.0.1")
+	s := NewServer(c, recorder, "127.0.0.1")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -141,8 +148,8 @@ func TestServer_HoldsWakesAndPassesThrough(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var w v1alpha1.ManagedWorkload
 		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "sandbox", Name: "api"}, &w))
-		return w.Annotations[v1alpha1.AnnotationLastActivity] != ""
-	}, 5*time.Second, 20*time.Millisecond, "the held connection must stamp the wake annotation")
+		return w.Annotations[v1alpha1.AnnotationLastRequest] != ""
+	}, 5*time.Second, 20*time.Millisecond, "the held connection must stamp the request annotation")
 
 	// The workload comes up: its real endpoints appear.
 	require.NoError(t, c.Create(context.Background(), readySlice("api", echoServer(t))))
@@ -193,6 +200,31 @@ func TestServer_ClosesAfterMaxWait(t *testing.T) {
 
 	assert.ErrorIs(t, err, io.EOF, "a workload that isn't Ready within maxWait gets its connection closed")
 	assert.Equal(t, before+1, testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("sandbox", "slow", "timeout")))
+}
+
+// Every connection waiting on a slow wake times out together, so they share
+// one warning.
+func TestServer_WarnsOnceWhenRequestsAreNotServed(t *testing.T) {
+	port := freePort(t)
+	recorder := events.NewFakeRecorder(10)
+	startServerWithRecorder(t, recorder, pausedWorkload("slow", port, 300*time.Millisecond))
+
+	for range 3 {
+		conn := dial(t, port)
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, err := conn.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+	}
+
+	var warnings []string
+	for len(recorder.Events) > 0 {
+		if e := <-recorder.Events; strings.Contains(e, "RequestNotServed") {
+			warnings = append(warnings, e)
+		}
+	}
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "Service slow")
+	assert.Contains(t, warnings[0], "maxWait")
 }
 
 func TestServer_StopsListeningWhenRouteRemoved(t *testing.T) {

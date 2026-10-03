@@ -9,7 +9,7 @@ It's on by default for every workload Hybernate pauses on its own. There's nothi
 Hybernate runs a small proxy, the **doorman**, as its own Deployment (two replicas) next to the operator.
 
 1. When a workload pauses, the operator finds every Service that selects its pods and adds one extra EndpointSlice to each, pointing at the doorman. The Service, its ClusterIP, and its DNS name don't change, so callers and Ingresses need no changes.
-2. A connection to the Service reaches the doorman. The doorman holds it and sets `hybernate.io/last-activity` on the ManagedWorkload, which wakes it through the usual [activity annotation](idle-detection.md#activity-annotations) path. A `WokenByRequest` event names the Service.
+2. A connection to the Service reaches the doorman. The doorman holds it and sets `hybernate.io/last-request` on the ManagedWorkload, which wakes it the same way as an [activity annotation](idle-detection.md#activity-annotations). A `WokenByRequest` event names the Service, and once the workload is Running, its clock shows `lastActivitySource: request`.
 3. The doorman watches the Service's own EndpointSlices. As soon as a pod is Ready, it connects to that pod and passes the held connection through, including any bytes the caller already sent.
 4. Once the workload is `Running`, the operator removes the doorman's EndpointSlice and traffic goes straight to the pods again.
 
@@ -89,6 +89,7 @@ Callers reach the doorman on ports 20000-29999, so a default-deny policy on the 
 
 - **A pod in the cluster or an Ingress**: one slow response while the workload starts, then a normal one.
 - **The client's source IP**: the woken pod sees the doorman's IP for held connections, not the caller's. Only the connections that arrive while the workload is paused or waking go through the doorman.
-- **A connection held past `maxWait`**: it's closed with no response, which most clients report as an empty reply or a connection reset.
+- **Right after the pause**: for a second or two, until kube-proxy and ingress controllers pick up the doorman's EndpointSlice, a request can be refused or get a 502 from an ingress, as after any scale-down. A retry is held.
+- **A connection held past `maxWait`**: it's closed with no response, which most clients report as an empty reply or a connection reset. A `RequestNotServed` warning event on the ManagedWorkload names the Service and how long the request waited; while the wake is slow, it's emitted at most once a minute.
 
 Track wakes with `hybernate_doorman_wakes_total` and `hybernate_doorman_wait_seconds`; see [Metrics](../reference/metrics.md#doorman). The `HybernateDoormanWakesFailing` alert fires when held connections keep timing out or failing for a workload.

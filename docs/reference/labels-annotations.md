@@ -27,6 +27,9 @@ kubectl get managedworkloads -l hybernate.io/auto-discovered=true --all-namespac
 | Annotation | Value | Applied To | Description |
 |------------|-------|-----------|-------------|
 | `hybernate.io/workload-policy` | Policy name (string) | ManagedWorkloads | Links a ManagedWorkload back to the WorkloadPolicy that created or exported it. Set by auto-manage mode and the export plugin. |
+| `hybernate.io/last-activity` | RFC 3339 time | ManagedWorkloads, Deployments, StatefulSets | Activity seen by another tool, such as a sandbox UI. A time after the pause wakes a paused workload. See [Activity annotations](../concepts/idle-detection.md#activity-annotations). |
+| `hybernate.io/active-until` | RFC 3339 time | ManagedWorkloads, Deployments, StatefulSets | Keeps the workload awake until that time, and wakes it if paused. |
+| `hybernate.io/last-request` | RFC 3339 time | ManagedWorkloads | Set by the doorman when it holds a request for a paused workload. Wakes it like `last-activity`, and the clock records the wake as `request`. See [Wake on Request](../concepts/wake-on-request.md). |
 
 ### Usage
 
