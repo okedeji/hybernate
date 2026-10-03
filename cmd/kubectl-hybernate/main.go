@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -60,6 +61,20 @@ func buildClient() (client.Client, string, error) {
 // buildClientFor returns a client for a kubeconfig context, the current one
 // if contextName is empty, with the context's namespace and name.
 func buildClientFor(contextName string) (c client.Client, namespace, name string, err error) {
+	config, namespace, name, err := kubeConfigFor(contextName)
+	if err != nil {
+		return nil, "", name, err
+	}
+	c, err = client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, "", name, fmt.Errorf("creating client: %w", err)
+	}
+	return c, namespace, name, nil
+}
+
+// kubeConfigFor loads a kubeconfig context, the current one if contextName
+// is empty, with the context's namespace and name.
+func kubeConfigFor(contextName string) (config *rest.Config, namespace, name string, err error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	loader := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules,
 		&clientcmd.ConfigOverrides{CurrentContext: contextName})
@@ -67,7 +82,7 @@ func buildClientFor(contextName string) (c client.Client, namespace, name string
 	if raw, err := loader.RawConfig(); err == nil && name == "" {
 		name = raw.CurrentContext
 	}
-	config, err := loader.ClientConfig()
+	config, err = loader.ClientConfig()
 	if err != nil {
 		return nil, "", name, fmt.Errorf("loading kubeconfig: %w", err)
 	}
@@ -75,9 +90,5 @@ func buildClientFor(contextName string) (c client.Client, namespace, name string
 	if err != nil {
 		return nil, "", name, fmt.Errorf("reading kubeconfig namespace: %w", err)
 	}
-	c, err = client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		return nil, "", name, fmt.Errorf("creating client: %w", err)
-	}
-	return c, namespace, name, nil
+	return config, namespace, name, nil
 }

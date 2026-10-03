@@ -22,13 +22,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	"github.com/okedeji/hybernate/internal/cost"
@@ -51,6 +57,9 @@ type scanOptions struct {
 	cpuThreshold int
 	cpuPrice     float64
 	memoryPrice  float64
+	window       string
+	idleAfter    time.Duration
+	promURL      string
 }
 
 // clusterScan is one context's scan, or why it couldn't be scanned.
@@ -59,7 +68,10 @@ type clusterScan struct {
 	Context string `json:"context"`
 	Cluster string `json:"cluster"`
 	*discovery.ClusterReport
-	Error string `json:"error,omitempty"`
+	// HistoryAccess is what an admin can run to let the user read the
+	// cluster's Prometheus, when the scan found one it wasn't allowed to.
+	HistoryAccess []string `json:"historyAccess,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 // prices are what costs were calculated with, and whether they're the
@@ -81,6 +93,8 @@ func scanCmd() *cobra.Command {
 		cpuThreshold: defaultCPUThreshold,
 		cpuPrice:     cost.DefaultRates.CPUPerHour,
 		memoryPrice:  cost.DefaultRates.MemoryPerHour,
+		window:       "7d",
+		idleAfter:    time.Hour,
 	}
 	cmd := &cobra.Command{
 		Use:   "scan",
@@ -88,6 +102,12 @@ func scanCmd() *cobra.Command {
 		Long: `Scan reads your clusters and shows which Deployments and StatefulSets look
 idle, what they reserve, and what pausing them could save. It only reads,
 with your own kubeconfig, and needs nothing installed in the cluster.
+
+With a Prometheus in the cluster, found automatically and queried through
+the API server, it replays Hybernate's activity clock over the last week of
+CPU and rollouts: how long each workload would have slept, how often it
+would have been woken, and what that would have freed. Without one, it
+judges from CPU right now.
 
 Examples:
   # Scan the current context
@@ -98,11 +118,21 @@ Examples:
   kubectl hybernate scan --all-contexts
 
   # One namespace, as JSON
-  kubectl hybernate scan -n sandbox-42 -o json`,
+  kubectl hybernate scan -n sandbox-42 -o json
+
+  # A month of history from a Prometheus outside the cluster
+  kubectl hybernate scan --window 30d --prometheus-url https://thanos.example.com`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if opts.output != "table" && opts.output != "json" && opts.output != "yaml" {
 				return fmt.Errorf("unknown output %q: use table, json, or yaml", opts.output)
+			}
+			window, err := parseWindow(opts.window)
+			if err != nil {
+				return err
+			}
+			if opts.idleAfter <= 0 {
+				return errors.New("--idle-after must be more than zero")
 			}
 			contexts, err := scanContexts(opts)
 			if err != nil {
@@ -110,7 +140,7 @@ Examples:
 			}
 			result := scanResult{Prices: pricesFor(cmd, opts)}
 			for _, name := range contexts {
-				result.Clusters = append(result.Clusters, scanContext(cmd.Context(), name, opts))
+				result.Clusters = append(result.Clusters, scanContext(cmd.Context(), name, window, opts))
 			}
 			nameClusters(result.Clusters)
 			result.Totals = combinedTotals(result.Clusters)
@@ -131,6 +161,12 @@ Examples:
 	cmd.Flags().Float64Var(&opts.cpuPrice, "cpu-price", opts.cpuPrice, "Your price per vCPU-hour, in dollars")
 	cmd.Flags().Float64Var(&opts.memoryPrice, "memory-price", opts.memoryPrice,
 		"Your price per GiB-hour of memory, in dollars")
+	cmd.Flags().StringVar(&opts.window, "window", opts.window,
+		"How much Prometheus history to replay, such as 7d or 36h; 0 judges from CPU right now only")
+	cmd.Flags().DurationVar(&opts.idleAfter, "idle-after", opts.idleAfter,
+		"How long without activity before the replay pauses a workload, as Hybernate's idleAfter")
+	cmd.Flags().StringVar(&opts.promURL, "prometheus-url", "",
+		"Prometheus API to read history from, such as Thanos or Mimir (defaults to one found in the cluster)")
 	return cmd
 }
 
@@ -163,11 +199,33 @@ func scanContexts(opts scanOptions) ([]string, error) {
 	return names, nil
 }
 
-func scanContext(ctx context.Context, contextName string, opts scanOptions) clusterScan {
-	c, _, current, err := buildClientFor(contextName)
+// parseWindow reads a duration that may be in days, which
+// time.ParseDuration doesn't know.
+func parseWindow(s string) (time.Duration, error) {
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("--window %q isn't a number of days, such as 7d", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("--window %q isn't a duration, such as 7d or 36h", s)
+	}
+	return d, nil
+}
+
+func scanContext(ctx context.Context, contextName string, window time.Duration, opts scanOptions) clusterScan {
+	config, _, current, err := kubeConfigFor(contextName)
 	scan := clusterScan{Context: current}
 	if err != nil {
 		scan.Error = err.Error()
+		return scan
+	}
+	c, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		scan.Error = fmt.Sprintf("creating client: %v", err)
 		return scan
 	}
 	namespaces, err := discovery.Namespaces(ctx, c, opts.namespaces, opts.exclude)
@@ -179,22 +237,100 @@ func scanContext(ctx context.Context, contextName string, opts scanOptions) clus
 		scan.Error = err.Error()
 		return scan
 	}
+	var history *discovery.Prometheus
+	var historyNote string
+	if window > 0 {
+		var err error
+		history, err = historySource(ctx, c, config, namespaces, opts.promURL)
+		var forbidden *discovery.ProxyForbiddenError
+		if errors.As(err, &forbidden) {
+			scan.HistoryAccess = historyAccess(ctx, c, forbidden)
+		}
+		if err != nil {
+			historyNote = err.Error() + "; judging from CPU right now"
+		}
+	}
 	scanner := discovery.NewScanner(c, c)
 	report, err := scanner.ScanCluster(ctx, discovery.ClusterOptions{
 		Namespaces:   namespaces,
 		CPUThreshold: opts.cpuThreshold,
 		Rates:        cost.Rates{CPUPerHour: opts.cpuPrice, MemoryPerHour: opts.memoryPrice},
 		Now:          time.Now,
+		History:      history,
+		Window:       window,
+		IdleAfter:    opts.idleAfter,
 	})
 	if err != nil {
 		scan.Error = err.Error()
 		return scan
+	}
+	if historyNote != "" {
+		report.Notes = append([]string{historyNote}, report.Notes...)
 	}
 	if len(namespaces) > 0 {
 		report.Notes = append(discovery.AccessNotes(ctx, c, namespaces[0]), report.Notes...)
 	}
 	scan.ClusterReport = report
 	return scan
+}
+
+// historySource finds the Prometheus to replay history from, or says why
+// there's none to use.
+func historySource(ctx context.Context, c client.Client, config *rest.Config, namespaces []string, promURL string) (
+	*discovery.Prometheus, error) {
+	var prom *discovery.Prometheus
+	if promURL != "" {
+		p, err := discovery.NewPrometheusURL(promURL, &http.Client{})
+		if err != nil {
+			return nil, err
+		}
+		prom = p
+	} else {
+		clientset, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("can't look for Prometheus: %w", err)
+		}
+		p, err := discovery.FindPrometheus(ctx, c, clientset.CoreV1().RESTClient(), namespaces)
+		if errors.Is(err, discovery.ErrNoPrometheus) {
+			return nil, errors.New("no Prometheus found in the cluster, so there's no history to replay; " +
+				"pass --prometheus-url for one elsewhere")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("can't look for Prometheus: %w", err)
+		}
+		prom = p
+	}
+	if err := prom.Check(ctx); err != nil {
+		return nil, err
+	}
+	return prom, nil
+}
+
+// historyAccess is what an admin can run to let the user read Prometheus
+// through the API server: get on services/proxy for its one Service and
+// port, in its namespace. The proxy's resource name is the Service and
+// port together, so the Role names both.
+func historyAccess(ctx context.Context, c client.Client, f *discovery.ProxyForbiddenError) []string {
+	subject := "--user=<you>"
+	review := &authenticationv1.SelfSubjectReview{}
+	if err := c.Create(ctx, review); err == nil && review.Status.UserInfo.Username != "" {
+		subject = bindingSubject(review.Status.UserInfo.Username)
+	}
+	const role = "hybernate-scan"
+	return []string{
+		fmt.Sprintf("kubectl create role %s -n %s --verb=get --resource=services/proxy --resource-name=%s:%s",
+			role, f.Namespace, f.Service, f.Port),
+		fmt.Sprintf("kubectl create rolebinding %s -n %s --role=%s %s", role, f.Namespace, role, subject),
+	}
+}
+
+// bindingSubject is how kubectl create rolebinding names a user, or a
+// service account by its namespace and name.
+func bindingSubject(username string) string {
+	if sa, ok := strings.CutPrefix(username, "system:serviceaccount:"); ok {
+		return "--serviceaccount=" + sa
+	}
+	return "--user=" + username
 }
 
 func combinedTotals(clusters []clusterScan) discovery.Totals {
@@ -212,6 +348,12 @@ func combinedTotals(clusters []clusterScan) discovery.Totals {
 		t.IdleMemoryBytes += c.Totals.IdleMemoryBytes
 		t.IdleHourlyCost += c.Totals.IdleHourlyCost
 		t.IdleMonthlyCost += c.Totals.IdleMonthlyCost
+		t.Replayed.Workloads += c.Totals.Replayed.Workloads
+		t.Replayed.Sleepers += c.Totals.Replayed.Sleepers
+		t.Replayed.SleepHours += c.Totals.Replayed.SleepHours
+		t.Replayed.Wakes += c.Totals.Replayed.Wakes
+		t.Replayed.Freed += c.Totals.Replayed.Freed
+		t.Replayed.MonthlyFreed += c.Totals.Replayed.MonthlyFreed
 	}
 	return t
 }
@@ -248,10 +390,10 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 		}
 		p.line("%s: %s in %s", c.Cluster, countOf(c.Totals.Workloads, "workload"), countOf(len(namespaces), "namespace"))
 		p.line("")
-		writeHeadline(p, c.Totals)
+		writeHeadline(p, c.Totals, replayedOver(c.History))
 		judged, unjudged := splitJudged(c.Workloads)
 		if len(judged) > 0 {
-			writeWorkloads(p, judged, limit)
+			writeWorkloads(p, judged, limit, c.Mode == discovery.ModeHistory)
 		}
 		writeMeasured(p, c.Workloads)
 		notes := append(unjudgedNotes(unjudged), c.Notes...)
@@ -262,10 +404,18 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 			}
 			p.line("")
 		}
+		if len(c.HistoryAccess) > 0 {
+			p.line("To replay history, an admin can let you read Prometheus, and nothing else, with:")
+			for _, command := range c.HistoryAccess {
+				p.line("  %s", command)
+			}
+			p.line("Or pass --prometheus-url if Prometheus is reachable from your machine.")
+			p.line("")
+		}
 	}
 	if len(result.Clusters) > 1 {
 		p.line("All clusters:")
-		writeHeadline(p, result.Totals)
+		writeHeadline(p, result.Totals, "their history")
 	}
 	if result.Prices.Assumed {
 		p.line("Costs use assumed list prices: $%.3f per vCPU-hour and $%.3f per GiB-hour of memory,",
@@ -273,7 +423,7 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 		p.line("from AWS on-demand in us-east-1. Pass --cpu-price and --memory-price for yours.")
 		p.line("")
 	}
-	if result.Totals.Idle > 0 {
+	if result.Totals.Idle > 0 && result.Totals.Replayed.Workloads == 0 {
 		p.line("What pausing would save depends on how often they'd be woken, which one moment can't show.")
 		p.line("Labelling them dry-run measures it, below; scanning with Prometheus history estimates it.")
 		p.line("")
@@ -284,25 +434,51 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 	return p.err
 }
 
-func writeHeadline(p *printer, t discovery.Totals) {
+func writeHeadline(p *printer, t discovery.Totals, replayed string) {
 	if t.Paused > 0 {
 		p.line("  Hybernate has %s paused right now, freeing %s an hour.",
 			countOf(t.Paused, "workload"), cents(t.PausedHourlyCost))
 	}
-	if t.Idle == 0 {
+	switch t.Idle {
+	case 0:
 		p.line("  No running workloads are idle right now.")
-		p.line("")
-		return
+	default:
+		verb, they, costs := "are", "They", "cost"
+		if t.Idle == 1 {
+			verb, they, costs = "is", "It", "costs"
+		}
+		p.line("  %s %s idle right now, reserving %s and %s of memory.",
+			countOf(t.Idle, "workload"), verb, vcpu(t.IdleCPUMillis), gib(t.IdleMemoryBytes))
+		p.line("  %s %s %s/month while running, %s an hour: each hour asleep frees that.",
+			they, costs, dollars(t.IdleMonthlyCost), cents(t.IdleHourlyCost))
 	}
-	verb, they, costs := "are", "They", "cost"
-	if t.Idle == 1 {
-		verb, they, costs = "is", "It", "costs"
+	if r := t.Replayed; r.Workloads > 0 && replayed != "" {
+		if r.Sleepers == 0 {
+			p.line("  Replaying %s, nothing Hybernate doesn't already pause would have slept.", replayed)
+		} else {
+			p.line("  Replaying %s, Hybernate would have paused %s for %s in all, waking them %s,",
+				replayed, countOf(r.Sleepers, "workload"), hoursTotal(r.SleepHours), countOf(r.Wakes, "time"))
+			p.line("  and freed %s: about %s/month.", dollars(r.Freed), dollars(r.MonthlyFreed))
+		}
 	}
-	p.line("  %s %s idle right now, reserving %s and %s of memory.",
-		countOf(t.Idle, "workload"), verb, vcpu(t.IdleCPUMillis), gib(t.IdleMemoryBytes))
-	p.line("  %s %s %s/month while running, %s an hour: each hour asleep frees that.",
-		they, costs, dollars(t.IdleMonthlyCost), cents(t.IdleHourlyCost))
 	p.line("")
+}
+
+// replayedOver says what a cluster's history replay covered, or "" when
+// it had none.
+func replayedOver(h *discovery.HistorySource) string {
+	if h == nil || h.Hours == 0 {
+		return ""
+	}
+	if h.Hours >= 48 {
+		return fmt.Sprintf("the last %d days", int(h.Hours/24+0.5))
+	}
+	return fmt.Sprintf("the last %d hours", int(h.Hours+0.5))
+}
+
+// hoursTotal writes a number of hours with thousands separated.
+func hoursTotal(h float64) string {
+	return strings.TrimPrefix(dollars(h), "$") + " hours"
 }
 
 // splitJudged separates the workloads the scan could judge from those it
@@ -349,13 +525,17 @@ func unjudgedNotes(unjudged []Workload) []string {
 	return notes
 }
 
-func writeWorkloads(p *printer, workloads []Workload, limit int) {
+func writeWorkloads(p *printer, workloads []Workload, limit int, history bool) {
 	shown := workloads
 	if limit > 0 && len(shown) > limit {
 		shown = shown[:limit]
 	}
 	tw := tabwriter.NewWriter(p, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "  NAMESPACE\tWORKLOAD\tSTATE\tCPU\tREPLICAS\tCOST/MO\tCOST/HOUR\tWHY")
+	if history {
+		_, _ = fmt.Fprintln(tw, "  NAMESPACE\tWORKLOAD\tSTATE\tCPU\tREPLICAS\tCOST/MO\tIDLE\tASLEEP\tWAKES\tFREES/MO\tWHY")
+	} else {
+		_, _ = fmt.Fprintln(tw, "  NAMESPACE\tWORKLOAD\tSTATE\tCPU\tREPLICAS\tCOST/MO\tCOST/HOUR\tWHY")
+	}
 	for _, wl := range shown {
 		cpu := "-"
 		if wl.CPUPercent != nil {
@@ -369,9 +549,19 @@ func writeWorkloads(p *printer, workloads []Workload, limit int) {
 			state += " (managed)"
 		}
 		why := strings.Join(append([]string{wl.Reason}, wl.Clues...), "; ")
-		_, _ = fmt.Fprintf(tw, "  %s\t%s/%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-			wl.Namespace, strings.ToLower(string(wl.Kind)), wl.Name, state, cpu, wl.Replicas,
-			dollars(wl.MonthlyCost), cents(wl.HourlyCost), why)
+		ref := strings.ToLower(string(wl.Kind)) + "/" + wl.Name
+		if !history {
+			_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+				wl.Namespace, ref, state, cpu, wl.Replicas, dollars(wl.MonthlyCost), cents(wl.HourlyCost), why)
+			continue
+		}
+		idle, asleep, wakes, frees := "-", "-", "-", "-"
+		if h := wl.History; h != nil {
+			idle = fmt.Sprintf("%s of %s", hours(h.IdleHours), hours(h.RunningHours))
+			asleep, wakes, frees = hours(h.SleepHours), strconv.Itoa(h.Wakes), dollars(h.MonthlyFreed)
+		}
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			wl.Namespace, ref, state, cpu, wl.Replicas, dollars(wl.MonthlyCost), idle, asleep, wakes, frees, why)
 	}
 	_ = tw.Flush()
 	if len(shown) < len(workloads) {
@@ -490,8 +680,8 @@ func nameClusters(clusters []clusterScan) {
 // GKE's form is unambiguous because project IDs, locations, and cluster names
 // can't contain underscores.
 func shortClusterName(contextName string) string {
-	if rest, ok := strings.CutPrefix(contextName, "arn:aws:eks:"); ok {
-		parts := strings.SplitN(rest, ":", 3)
+	if arn, ok := strings.CutPrefix(contextName, "arn:aws:eks:"); ok {
+		parts := strings.SplitN(arn, ":", 3)
 		if len(parts) == 3 {
 			if name, ok := strings.CutPrefix(parts[2], "cluster/"); ok && name != "" && parts[0] != "" {
 				return fmt.Sprintf("%s (EKS %s)", name, parts[0])
@@ -499,8 +689,8 @@ func shortClusterName(contextName string) string {
 		}
 		return contextName
 	}
-	if rest, ok := strings.CutPrefix(contextName, "gke_"); ok {
-		parts := strings.Split(rest, "_")
+	if gke, ok := strings.CutPrefix(contextName, "gke_"); ok {
+		parts := strings.Split(gke, "_")
 		if len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != "" {
 			return fmt.Sprintf("%s (GKE %s)", parts[2], parts[1])
 		}
