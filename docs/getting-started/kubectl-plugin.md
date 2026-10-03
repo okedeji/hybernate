@@ -1,6 +1,6 @@
 # kubectl Plugin
 
-The `kubectl hybernate` plugin scans your clusters for idle workloads, wakes paused ones, and exports discovered workloads as ManagedWorkload manifests for GitOps workflows. Both use the namespace of your current kubeconfig context unless you pass `-n`, as kubectl does.
+The `kubectl hybernate` plugin scans your clusters for idle workloads, ends dry-run for workloads you've opted in, and wakes paused ones. Its commands use the namespace of your current kubeconfig context unless you pass `-n`, as kubectl does.
 
 ## Installation
 
@@ -76,7 +76,7 @@ Notes:
 **What the numbers mean:**
 
 - Costs are what the workloads' requests cost while running, sidecars included. Without `--cpu-price` and `--memory-price`, they use assumed list prices from AWS on-demand in us-east-1, and the report says so.
-- The scan shows what idle workloads cost and what each hour asleep frees, not a monthly saving: from one moment it can't tell how often a workload would be woken. To measure savings once Hybernate is installed, label workloads `hybernate.io/managed=true` and annotate them `hybernate.io/dry-run=true`: Hybernate tracks real idle time and savings without ever pausing them.
+- The scan shows what idle workloads cost and what each hour asleep frees, not a monthly saving: from one moment it can't tell how often a workload would be woken. To measure savings once Hybernate is installed, label workloads `hybernate.io/managed=true` and annotate them `hybernate.io/dry-run=true`: Hybernate measures how often it would have paused them, for how long, and what that would have freed, without ever pausing them. The scan then lists that for each one under **Measured in dry-run**, with the `kubectl hybernate enable` command to start pausing.
 - An hour asleep frees capacity; it becomes money when your cluster autoscaler removes it.
 - The WHY column gives the evidence, then facts such as a workload not deployed in a week or more.
 
@@ -139,71 +139,36 @@ It refuses, and says why, when activity can't wake the workload: `desiredState: 
 
 Your user needs `get` and `patch` on `managedworkloads` in the namespace.
 
-## Export Workloads
+## Enable a Workload
 
-!!! note
-    Export requires a WorkloadPolicy to exist in the target namespace. It reads from the policy's `status.discovered` field. If the policy doesn't exist, the command exits with a clear error.
-
-### All Unmanaged Workloads
+A workload opted in with `hybernate.io/dry-run: "true"` is measured but never paused. `enable` ends that, so Hybernate starts pausing it while idle:
 
 ```bash
-kubectl hybernate export --policy staging-policy -n staging
+kubectl hybernate enable checkout-api -n sandbox-42
+kubectl hybernate enable statefulset/postgres -n sandbox-42
+kubectl hybernate enable --all -n sandbox-42
 ```
 
-Outputs YAML to stdout. Pipe to `kubectl apply` or redirect to a file:
-
-```bash
-kubectl hybernate export --policy staging-policy -n staging > manifests.yaml
+```
+deployment/checkout-api: dry-run ended, Hybernate will pause it while idle
 ```
 
-### To Individual Files
+It removes the workload's `hybernate.io/dry-run` annotation. When the dry-run comes from the namespace, it sets the workload's own to `"false"` instead, overriding the namespace's. `--all` ends dry-run for every workload in the namespace and for the namespace itself.
 
-```bash
-kubectl hybernate export --policy staging-policy -n staging --output ./manifests/
+When Argo CD or Flux applies the workload, `enable` changes nothing in the cluster, because the tool would put the annotation straight back. It names the tool and prints the change to make in Git, and exits non-zero:
+
+```
+deployment/checkout-api is managed by Argo CD application shop, which would undo a change made here. In its manifest:
+  remove the annotation  hybernate.io/dry-run: "true"
+Or pass --force to change the cluster anyway.
 ```
 
-Creates one file per workload (e.g., `manifests/my-api.yaml`).
-
-### Filter by Classification
-
-```bash
-# Only idle workloads
-kubectl hybernate export --policy staging-policy -n staging --classification Idle
-```
-
-### A Specific Workload
-
-```bash
-kubectl hybernate export --policy staging-policy -n staging --name my-api
-```
-
-### Include Already-Managed Workloads
-
-By default, workloads that already have a ManagedWorkload CR are skipped. To include them (useful when graduating from auto-manage to GitOps):
-
-```bash
-kubectl hybernate export --policy staging-policy -n staging --include-managed
-```
-
-### Export Flags
+A bare name is looked up as a Deployment first, then a StatefulSet; prefix it with `deployment/` or `statefulset/` to be exact.
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--policy` | | _(required)_ | Name of the WorkloadPolicy to export from |
-| `--namespace` | `-n` | kubeconfig context's | Namespace of the WorkloadPolicy |
-| `--output` | `-o` | _(stdout)_ | Directory to write individual YAML files |
-| `--name` | | | Export only the workload with this name |
-| `--classification` | | | Filter by classification (`Active`, `Idle`) |
-| `--include-managed` | | `false` | Include workloads that already have a ManagedWorkload |
+| `--namespace` | `-n` | kubeconfig context's | Namespace of the workload |
+| `--all` | | `false` | Enable every workload in the namespace |
+| `--force` | | `false` | Change the cluster even when Argo CD or Flux manages the workload |
 
-## GitOps Workflow
-
-A typical workflow for introducing Hybernate via GitOps:
-
-1. Deploy a WorkloadPolicy in `suggest` mode to discover workloads
-2. Review discovered workloads: `kubectl get workloadpolicy staging-policy -n staging -o yaml`
-3. Export the ones you want to manage: `kubectl hybernate export --policy staging-policy -n staging --classification Idle --output ./k8s/hybernate/`
-4. Commit the manifests to your Git repository
-5. Let ArgoCD/Flux sync them to the cluster
-
-See the [GitOps Export Guide](../guides/gitops-export.md) for a detailed walkthrough.
+Your user needs `get` and `patch` on the workload and `get` on its namespace. With `--all`, it also needs `list` on Deployments and StatefulSets, and `patch` on the namespace to end its dry-run. See [Opting In](../guides/opt-in.md) for the label and every setting.

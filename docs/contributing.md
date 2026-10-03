@@ -58,10 +58,10 @@ internal/controller/           # Reconcilers
 internal/forecast/             # Holt-Winters engine
 internal/signal/               # Signal interface and implementations
 internal/lifecycle/            # Pause, resume, scale, destroy
-internal/discovery/            # Workload scanning and classification
+internal/discovery/            # Cluster scan for kubectl hybernate scan
+internal/doorman/              # Wake on request
 internal/cost/                 # Cost accumulation
 internal/metrics/              # Prometheus metrics
-internal/export/               # YAML generation
 config/                        # CRD, RBAC, deployment manifests
 ```
 

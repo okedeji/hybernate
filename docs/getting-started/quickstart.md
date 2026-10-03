@@ -1,170 +1,110 @@
 # Quickstart
 
-This guide walks you through managing your first workload with Hybernate in under 5 minutes.
+This guide takes one workload from "idle and costing money" to "paused while idle, woken when used", measuring it first so nothing is paused until you say so.
 
-## 1. Deploy a Sample Workload
+It assumes Hybernate is [installed](installation.md) and you have the [kubectl plugin](kubectl-plugin.md).
 
-If you don't already have a workload to manage, create a simple Deployment:
+## 1. A sample workload
+
+If you don't have one to try, create a Deployment:
 
 ```bash
 kubectl create namespace sandbox
-
-kubectl create deployment my-api \
-  --image=nginx:latest \
-  --replicas=3 \
-  -n sandbox
-```
-
-Wait for the pods to be ready:
-
-```bash
+kubectl create deployment my-api --image=nginx:1.27-alpine --replicas=2 -n sandbox
+kubectl set resources deployment my-api -n sandbox --requests=cpu=100m,memory=64Mi
+kubectl expose deployment my-api -n sandbox --port=80
 kubectl rollout status deployment/my-api -n sandbox
 ```
 
-## 2. Create a WorkloadPolicy
-
-Apply a WorkloadPolicy to auto-discover and manage workloads in the namespace:
-
-```yaml title="workloadpolicy.yaml" linenums="1"
-apiVersion: hybernate.io/v1alpha1
-kind: WorkloadPolicy
-metadata:
-  name: sandbox-policy
-  namespace: sandbox
-spec:
-  mode: auto-manage
-  scanInterval: 10m
-  cpuIdleThreshold: 10
-  memoryIdleThreshold: 10
-  dryRun: true
-```
+## 2. See what's idle
 
 ```bash
-kubectl apply -f workloadpolicy.yaml
+kubectl hybernate scan -n sandbox
 ```
 
-The policy scans the namespace, classifies each workload as Active or Idle, and auto-creates a ManagedWorkload for each one with sensible defaults.
+The scan shows each workload, whether it's idle right now and why, and what it costs while running. A workload deployed in the last hour counts as active, as Hybernate would treat it, so a brand-new one shows as active until then.
 
-??? tip "Three ways to manage workloads"
-
-    - **WorkloadPolicy with `auto-manage`** (this quickstart): scans the namespace and auto-creates ManagedWorkloads for discovered workloads. Best for getting started quickly.
-    - **WorkloadPolicy with `suggest` + `kubectl hybernate export`**: scans and classifies workloads but doesn't create anything. You review the results and export the ones you want as ManagedWorkload manifests for GitOps.
-    - **ManagedWorkload directly**: create a ManagedWorkload CR yourself with full control over every field. Best when you know exactly what you want.
-
-## 3. Check What Was Discovered
+## 3. Opt it in, measuring first
 
 ```bash
-kubectl get workloadpolicy sandbox-policy -n sandbox
+kubectl label deployment my-api -n sandbox hybernate.io/managed=true
+kubectl annotate deployment my-api -n sandbox hybernate.io/dry-run=true hybernate.io/idle-after=5m
 ```
 
-You should see your workload classified:
+The label opts the workload in; the annotations are its settings. Here, dry-run means it's measured and never paused, and `idle-after: 5m` makes the example quick (the default is an hour). In real use, these usually go in the workload's manifest or Helm values, or on its namespace to cover everything in it. See [Opting In](../guides/opt-in.md).
 
-```
-NAME             MODE          DISCOVERED   ACTIVE   IDLE
-sandbox-policy   auto-manage   1            0        1
-```
-
-Check the auto-created ManagedWorkload:
+Hybernate creates a ManagedWorkload for it:
 
 ```bash
 kubectl get managedworkloads -n sandbox
 ```
 
-View its status:
-
-```bash
-kubectl get managedworkload my-api -n sandbox -o yaml
+```
+NAME     PHASE     AGE
+my-api   Running   10s
 ```
 
-Look at the `status` section:
-
-```yaml title="status" linenums="1"
-status:
-  phase: Running
-  conditions:
-    - type: Ready
-      status: "True"
-```
-
-View events on the resource:
-
-```bash
-kubectl describe managedworkload my-api -n sandbox
-```
-
-At this point, Hybernate is already working. It records when the workload was last active, and once there has been no activity for `idleAfter` (default 1 hour), it pauses the workload. There's no learning period.
-
-You can see the activity clock:
+## 4. Watch it measure
 
 ```bash
 kubectl get managedworkload my-api -n sandbox -o jsonpath='{.status.activity}'
 ```
 
-Since `dryRun` is enabled, nothing will be touched: when the clock runs out, the phase becomes `Idle` and a "would pause" event is emitted. You can follow the events to watch it progress:
+`status.activity` is the activity clock: when the workload was last active, from what, and when it would pause. Once there's been no activity for `idle-after`, the phase becomes `Idle` and an event says it would have paused. Nothing is scaled down in dry-run:
 
 ```bash
 kubectl describe managedworkload my-api -n sandbox
 ```
 
-To see what happens when Hybernate actually takes action, you can bypass the automation and manually trigger a pause.
-
-## 4. Manually Pause the Workload
-
-Set the desired state to override automation and force a pause:
+Each would-be pause is added up in `status.dryRun`: how many times it would have paused, how long it would have slept, and what that would have freed. Send it a request, or mark it active, to end one:
 
 ```bash
-kubectl patch managedworkload my-api -n sandbox \
-  --type merge -p '{"spec":{"desiredState":"Paused"}}'
+kubectl annotate deployment my-api -n sandbox --overwrite hybernate.io/last-activity=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+kubectl get managedworkload my-api -n sandbox -o jsonpath='{.status.dryRun}'
 ```
 
-Hybernate will:
+`kubectl hybernate scan -n sandbox` shows the same summary.
 
-1. Capture the current replica count (3)
-2. Scale the Deployment to 0
-3. Set the phase to `Paused`
+## 5. Let it pause
 
-Verify:
+When you're happy with what you see:
+
+```bash
+kubectl hybernate enable my-api -n sandbox
+```
+
+This removes the dry-run annotation. Once the workload has had no activity for `idle-after`, Hybernate scales it to zero, remembering it had 2 replicas:
 
 ```bash
 kubectl get deployment my-api -n sandbox
 # READY: 0/0
-
-kubectl get managedworkload my-api -n sandbox -o jsonpath='{.status.phase}'
-# Paused
 ```
 
-## 5. Resume the Workload
+## 6. Use it again
+
+Send it a request. The [doorman](../concepts/wake-on-request.md) holds the request, wakes the workload, and answers once it's Ready:
 
 ```bash
-kubectl patch managedworkload my-api -n sandbox \
-  --type merge -p '{"spec":{"desiredState":"Running"}}'
+kubectl run curl --rm -it --image=curlimages/curl:8.7.1 -n sandbox --restart=Never -- curl -s http://my-api
 ```
 
-Hybernate restores the Deployment to 3 replicas and waits for readiness.
-
-## 6. Enable Automation
-
-Once you're comfortable with what you see in dry run, disable it to let Hybernate act:
+A browser opening it gets a waking-up page instead, which loads the app once it's up. You can also wake it from the terminal:
 
 ```bash
-kubectl patch managedworkload my-api -n sandbox \
-  --type json -p '[
-    {"op": "remove", "path": "/spec/desiredState"},
-    {"op": "replace", "path": "/spec/dryRun", "value": false}
-  ]'
+kubectl hybernate wake my-api -n sandbox
 ```
 
-Hybernate will now:
+## 7. Stop managing it
 
-- Record activity: CPU above the threshold, deploys, and activity annotations
-- Pause the workload once there has been no activity for `idleAfter`
-- Hold off if a confident forecast expects demand within the hour
-- Wake it when a request reaches its Service, holding the request until it's Ready
-- Wake it when an activity annotation is set, or ahead of forecast demand with `autoResume`
+```bash
+kubectl label deployment my-api -n sandbox hybernate.io/managed-
+```
 
-## What's Next?
+Removing the label removes the ManagedWorkload. If the workload is paused, it's scaled back to its replicas first, so it's never left switched off.
 
-- [ManagedWorkload Guide](../guides/managed-workload.md): full spec reference with examples
-- [Idle Detection](../concepts/idle-detection.md): how the activity clock works
-- [WorkloadPolicy](../guides/workload-policy.md): discovery, classification, and auto-manage
-- [GitOps Export](../guides/gitops-export.md): export discovered workloads for ArgoCD/Flux
+## What's next?
+
+- [Opting In](../guides/opt-in.md): every setting, namespaces, and GitOps
+- [Idle Detection](../concepts/idle-detection.md): how the activity clock decides
+- [Wake on Request](../concepts/wake-on-request.md): how requests wake a paused workload
+- [ManagedWorkload Guide](../guides/managed-workload.md): writing a ManagedWorkload yourself, for settings annotations don't cover

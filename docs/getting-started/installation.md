@@ -29,6 +29,9 @@
         | `image.tag` | `latest` | Image tag |
         | `leaderElection.enabled` | `true` | Enable HA leader election |
         | `metrics.secure` | `true` | Serve metrics over HTTPS |
+        | `defaults.idleAfter` | `1h` | Idle time before pausing, for opted-in workloads that don't set their own |
+        | `defaults.cpuThreshold` | `10` | CPU percentage of requests that counts as active |
+        | `defaults.dryRun` | `false` | Measure every opted-in workload without pausing, unless it sets its own |
         | `resources.limits.cpu` | `500m` | CPU limit |
         | `resources.limits.memory` | `128Mi` | Memory limit |
 
@@ -66,25 +69,29 @@ kubectl get pods -n hybernate-system
 
 # Verify CRDs are installed
 kubectl get crd managedworkloads.hybernate.io
-kubectl get crd workloadpolicies.hybernate.io
 ```
 
 ## Uninstall
 
-```bash
-# Remove all CRs first
-kubectl delete managedworkloads --all --all-namespaces
-kubectl delete workloadpolicies --all --all-namespaces
+Stop managing workloads while the operator is still running, so it can scale any paused ones back up:
 
-# Remove the operator
-make undeploy
+1. Remove the `hybernate.io/managed` label from your workloads and namespaces, in Git if that's where they live. Hybernate deletes the ManagedWorkloads it created from them.
+2. Delete the ManagedWorkloads you wrote yourself:
 
-# Remove CRDs
-make uninstall
-```
+    ```bash
+    kubectl delete managedworkloads --all --all-namespaces
+    ```
+
+    Deleting a ManagedWorkload scales its workload back to the replicas it had before it was paused.
+
+3. Remove the operator and its CRDs:
+
+    ```bash
+    helm uninstall hybernate -n hybernate-system   # or: make undeploy && make uninstall
+    ```
 
 !!! warning
-    Deleting CRDs removes all ManagedWorkload and WorkloadPolicy resources from the cluster. Workloads that were paused (scaled to zero) will remain at zero replicas. You must manually restore them.
+    Removing the operator or its CRDs first skips step 2's restore: workloads that were paused stay at zero replicas, and you must scale them back up yourself.
 
 ## Next Steps
 

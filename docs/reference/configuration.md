@@ -21,6 +21,9 @@ These flags are passed to the operator binary (`manager`).
 | `--doorman` | `false` | Run as the doorman instead of the operator. The doorman Deployment sets it |
 | `--doorman-service` | `hybernate-doorman` | Name of the doorman's Service, which the operator routes paused workloads to. Empty disables waking on request |
 | `--doorman-namespace` | the pod's namespace | Namespace of the doorman's Service |
+| `--default-idle-after` | `1h` | Idle time before pausing, for opted-in workloads whose annotations and namespace don't set it |
+| `--default-cpu-threshold` | `10` | CPU percentage of requests that counts as active, for opted-in workloads that don't set it (1 to 100) |
+| `--default-dry-run` | `false` | Measure opted-in workloads without pausing, unless they or their namespace set `hybernate.io/dry-run` |
 | `--zap-devel` | `true` | Development mode logging (human-readable) |
 | `--zap-log-level` | `info` | Log level (`debug`, `info`, `error`) |
 | `--zap-encoder` | `console` | Log format (`console` or `json`) |

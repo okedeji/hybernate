@@ -71,10 +71,9 @@ nav:
       - Wake on Request: concepts/wake-on-request.md
       - Cost Tracking: concepts/cost-tracking.md
   - Guides:
+      - Opting In: guides/opt-in.md
       - ManagedWorkload: guides/managed-workload.md
-      - WorkloadPolicy: guides/workload-policy.md
       - Pause & Destroy: guides/pause-destroy.md
-      - GitOps Export: guides/gitops-export.md
       - Cluster Autoscaler: guides/cluster-autoscaler.md
       - Dry Run: guides/dry-run.md
       - Prometheus Activity: guides/prometheus-signals.md
