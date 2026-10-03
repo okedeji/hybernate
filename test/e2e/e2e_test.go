@@ -850,6 +850,85 @@ spec:
 		})
 	})
 
+	Context("Scan dependencies", func() {
+		const depsScanNamespace = "hybernate-e2e-deps-scan"
+
+		BeforeAll(func() {
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", depsScanNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", depsScanNamespace, "--wait=false"))
+			})
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: e2e-db, namespace: %[1]s}
+spec:
+  serviceName: e2e-db-hl
+  replicas: 1
+  selector: {matchLabels: {app: e2e-db}}
+  template:
+    metadata: {labels: {app: e2e-db}}
+    spec:
+      containers:
+        - {name: db, image: %[2]s, resources: {requests: {cpu: 10m, memory: 16Mi}}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: e2e-db-hl, namespace: %[1]s}
+spec:
+  clusterIP: None
+  selector: {app: e2e-db}
+  ports: [{port: 5432}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: e2e-app-config, namespace: %[1]s}
+data:
+  PGHOST: e2e-db-0.e2e-db-hl
+`, depsScanNamespace, pauseImage))).To(Succeed())
+			Expect(kubectlApply(deploymentManifest("e2e-app", depsScanNamespace, 1))).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "set", "env", "deployment/e2e-app", "-n", depsScanNamespace,
+				"--from=configmap/e2e-app-config"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("finds a dependency on a headless address in a ConfigMap and says to declare it", func() {
+			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0", "-o", "json"))
+			Expect(err).NotTo(HaveOccurred())
+			var result struct {
+				Clusters []struct {
+					Workloads []struct {
+						Name         string `json:"name"`
+						Dependencies []struct {
+							Kind     string `json:"kind"`
+							Name     string `json:"name"`
+							Via      string `json:"via"`
+							Headless bool   `json:"headless"`
+						} `json:"dependencies"`
+					} `json:"workloads"`
+				} `json:"clusters"`
+			}
+			Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
+			Expect(result.Clusters).To(HaveLen(1))
+			var app []string
+			for _, w := range result.Clusters[0].Workloads {
+				if w.Name != "e2e-app" {
+					continue
+				}
+				for _, d := range w.Dependencies {
+					app = append(app, fmt.Sprintf("%s/%s via %s headless=%t", d.Kind, d.Name, d.Via, d.Headless))
+				}
+			}
+			Expect(app).To(ConsistOf("StatefulSet/e2e-db via PGHOST headless=true"))
+
+			table, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(table).To(ContainSubstring(
+				depsScanNamespace + `/deployment/e2e-app: hybernate.io/depends-on: "statefulset/e2e-db"`))
+		})
+	})
+
 	// Runs after "Idle clock", which installs metrics-server.
 	Context("Label opt-in", func() {
 		const (
