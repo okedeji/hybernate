@@ -186,15 +186,6 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		if err := (&controller.WorkloadPolicyReconciler{
-			Client:    mgr.GetClient(),
-			Scheme:    mgr.GetScheme(),
-			Recorder:  mgr.GetEventRecorder("workloadpolicy"),
-			PodReader: mgr.GetAPIReader(),
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "Failed to create controller", "controller", "WorkloadPolicy")
-			os.Exit(1)
-		}
 		// +kubebuilder:scaffold:builder
 	}
 

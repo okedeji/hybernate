@@ -108,12 +108,12 @@ jobs:
           spec:
             version: ${TAG}
             homepage: https://github.com/${{ github.repository }}
-            shortDescription: Export and manage workload lifecycle policies
+            shortDescription: Find idle workloads, and wake paused ones
             description: |
-              Hybernate kubectl plugin for exporting discovered workloads from a
-              WorkloadPolicy as ManagedWorkload YAML manifests. Supports filtering
-              by classification (Active or Idle), specific workload name,
-              and outputting to stdout or individual files for GitOps workflows.
+              Hybernate pauses idle Kubernetes workloads and wakes them when
+              they're used. The plugin scans your clusters for idle Deployments
+              and StatefulSets and what they cost, wakes paused workloads, and
+              ends dry-run for workloads Hybernate is measuring.
             platforms:
           EOF
 

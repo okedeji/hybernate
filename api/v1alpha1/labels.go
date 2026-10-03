@@ -29,12 +29,6 @@ const (
 	// namespace.
 	LabelIgnore = "hybernate.io/ignore"
 
-	// LabelAutoDiscovered marks a ManagedWorkload created by auto-manage mode.
-	LabelAutoDiscovered = "hybernate.io/auto-discovered"
-
-	// AnnotationWorkloadPolicy links a ManagedWorkload back to the WorkloadPolicy that created it.
-	AnnotationWorkloadPolicy = "hybernate.io/workload-policy"
-
 	// LabelFromLabel marks a ManagedWorkload created because its workload
 	// or namespace carries LabelManaged. Its spec follows the annotations
 	// and is rewritten from them.
