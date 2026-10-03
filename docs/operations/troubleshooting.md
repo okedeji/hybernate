@@ -56,6 +56,14 @@ kubectl get managedworkload postgres -n staging \
 
 `WaitingForDependencies=True` means a `waitForReady` dependency isn't Ready yet; the condition names it and how many replicas are ready. Check that dependency's pods. Otherwise, the workload's own pods aren't becoming Ready: resume completes only when every replica is Ready.
 
+### Waking a workload by hand
+
+```bash
+kubectl hybernate wake my-api -n staging
+```
+
+It waits until the workload is Running, or tells you why it can't wake it. See the [kubectl plugin](../getting-started/kubectl-plugin.md#wake-a-workload).
+
 ### Requests to a paused workload fail instead of waking it
 
 ```bash
