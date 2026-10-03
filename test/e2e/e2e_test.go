@@ -641,6 +641,67 @@ spec:
 			}, time.Minute, time.Second).Should(Succeed())
 		})
 	})
+
+	// Runs after "Idle clock", which installs metrics-server.
+	Context("Scan", func() {
+		const scanNamespace = "hybernate-e2e-scan"
+
+		BeforeAll(func() {
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", scanNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", scanNamespace, "--wait=false"))
+			})
+			Expect(kubectlApply(deploymentManifest("e2e-quiet", scanNamespace, 2))).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/e2e-quiet",
+				"-n", scanNamespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: e2e-quiet, namespace: %s}
+spec:
+  target: {kind: Deployment, name: e2e-quiet}
+  idlePolicy: {idleAfter: 1m}
+  prediction: {confidence: 85}
+`, scanNamespace))).To(Succeed())
+		})
+
+		It("reports what Hybernate has paused and what that frees", func() {
+			type scanned struct {
+				Clusters []struct {
+					Workloads []struct {
+						Name       string  `json:"name"`
+						State      string  `json:"state"`
+						Reason     string  `json:"reason"`
+						Replicas   int     `json:"replicas"`
+						Managed    bool    `json:"managed"`
+						HourlyCost float64 `json:"hourlyCost"`
+					} `json:"workloads"`
+					Totals struct {
+						Paused int `json:"paused"`
+					} `json:"totals"`
+				} `json:"clusters"`
+			}
+			By("scanning once Hybernate has paused the quiet workload")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", scanNamespace, "-o", "json"))
+				g.Expect(err).NotTo(HaveOccurred())
+				var result scanned
+				g.Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
+				g.Expect(result.Clusters).To(HaveLen(1))
+				g.Expect(result.Clusters[0].Workloads).To(HaveLen(1))
+				w := result.Clusters[0].Workloads[0]
+				g.Expect(w.Name).To(Equal("e2e-quiet"))
+				g.Expect(w.State).To(Equal("paused"))
+				g.Expect(w.Reason).To(HavePrefix("paused "))
+				g.Expect(w.Replicas).To(Equal(2), "priced on the replicas it ran before the pause")
+				g.Expect(w.Managed).To(BeTrue())
+				g.Expect(w.HourlyCost).To(BeNumerically(">", 0))
+				g.Expect(result.Clusters[0].Totals.Paused).To(Equal(1))
+			}, 4*time.Minute, 10*time.Second).Should(Succeed())
+		})
+	})
 })
 
 // deploymentManifest is a Deployment of the pause container, which uses no
