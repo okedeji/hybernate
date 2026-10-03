@@ -198,12 +198,13 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 		return r.handleResume(ctx, workload)
 	}
 
+	key := workload.Namespace + "/" + workload.Name
+	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, r.predictionState(ctx, workload))
+	r.observePausedHour(ctx, workload, key, engine)
+
 	if workload.Spec.IdlePolicy == nil || !workload.Spec.IdlePolicy.AutoResume {
 		return nil, nil
 	}
-
-	key := workload.Namespace + "/" + workload.Name
-	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, r.predictionState(ctx, workload))
 	if engine.GetPhase() < forecast.DailyActive {
 		return nil, nil
 	}
@@ -218,18 +219,50 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 	if totalRequest <= 0 {
 		return nil, nil
 	}
-	predictedPercent := engine.Predict(0, r.now()) / totalRequest * 100
+	now := r.now()
+	predicted, when := engine.Predict(0, now), "this hour"
+	if untilNextHour(now) <= autoResumeLead {
+		if next := engine.Predict(1, now); next > predicted {
+			predicted, when = next, "next hour"
+		}
+	}
+	predictedPercent := predicted / totalRequest * 100
 	threshold := cpuThresholdFor(workload)
 	if predictedPercent < float64(threshold) {
 		return nil, nil
 	}
 
 	r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonAutoResume, actionResume,
-		"forecast expects %.0f%% utilization (threshold %d%%), waking ahead of demand", predictedPercent, threshold)
+		"forecast expects %.0f%% utilization %s (threshold %d%%), waking ahead of demand", predictedPercent, when, threshold)
 	if workload.Spec.DryRun {
 		return nil, nil
 	}
 	return r.handleResume(ctx, workload)
+}
+
+// autoResumeLead is how far ahead of a predicted busy hour a paused workload
+// wakes, so it's Ready when people arrive rather than starting as they do.
+const autoResumeLead = 15 * time.Minute
+
+func untilNextHour(now time.Time) time.Duration {
+	return now.Truncate(time.Hour).Add(time.Hour).Sub(now)
+}
+
+// observePausedHour feeds the forecast an hour of no demand while the
+// workload is paused behind the doorman: any request would have woken it,
+// so an hour paused is an hour nobody asked for it. Without the doorman,
+// demand while paused can't be seen, and nothing is recorded.
+func (r *Reconciler) observePausedHour(ctx context.Context, workload *v1alpha1.ManagedWorkload, key string, engine forecaster) {
+	if !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionWakeOnRequest) {
+		return
+	}
+	now := r.now()
+	if !r.engines.shouldFeed(key, now) {
+		return
+	}
+	engine.Observe(0, now)
+	r.engines.markFed(key, now)
+	r.updatePredictionStatus(ctx, workload, engine)
 }
 
 // observedCPU reads total CPU usage to feed the forecast. A target scaled to
