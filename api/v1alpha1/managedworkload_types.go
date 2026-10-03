@@ -150,6 +150,13 @@ type WakeSpec struct {
 	// +kubebuilder:validation:Format=duration
 	// +optional
 	MaxWait *metav1.Duration `json:"maxWait,omitempty"`
+
+	// Page answers a browser loading a page with a "waking up" page that
+	// refreshes until the workload is Running, instead of holding the
+	// request. Other requests are held either way.
+	// +kubebuilder:default=true
+	// +optional
+	Page *bool `json:"page,omitempty"`
 }
 
 // DependencyRef names a workload this one needs. It refers to the

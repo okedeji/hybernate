@@ -46,7 +46,7 @@ Served by the doorman pods, on the same port and path as the operator's metrics.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `hybernate_doorman_wakes_total` | Counter | `namespace`, `workload`, `result` | Connections held for a paused workload, by `result`: `success` (passed to a woken pod), `timeout` (no pod Ready within `wake.maxWait`), `error` |
+| `hybernate_doorman_wakes_total` | Counter | `namespace`, `workload`, `result` | Connections held for a paused workload, by `result`: `success` (passed to a woken pod), `page` (a browser was shown the waking-up page), `timeout` (no pod Ready within `wake.maxWait`), `error` |
 | `hybernate_doorman_wait_seconds` | Histogram | `result` | How long a connection was held before it was passed through or closed |
 | `hybernate_doorman_held_connections` | Gauge | | Connections being held or proxied right now |
 

@@ -21,8 +21,10 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,7 +89,9 @@ func pausedWorkload(name string, doormanPort int32, maxWait time.Duration) *v1al
 	}
 }
 
-func readySlice(service string, port int32) *discoveryv1.EndpointSlice {
+// readySlice is the "api" Service's own slice, with one Ready pod on port.
+func readySlice(port int32) *discoveryv1.EndpointSlice {
+	const service = "api"
 	return &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: service + "-real", Namespace: "sandbox",
@@ -106,11 +110,18 @@ func startServer(t *testing.T, objs ...client.Object) (*Server, client.Client) {
 
 func startServerWithRecorder(t *testing.T, recorder events.EventRecorder, objs ...client.Object) (*Server, client.Client) {
 	t.Helper()
+	return startServerWith(t, func(s *Server) { s.recorder = recorder }, objs...)
+}
+
+// startServerWith starts a doorman after configure has set it up.
+func startServerWith(t *testing.T, configure func(*Server), objs ...client.Object) (*Server, client.Client) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 	require.NoError(t, discoveryv1.AddToScheme(scheme))
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	s := NewServer(c, recorder, "127.0.0.1")
+	s := NewServer(c, nil, "127.0.0.1")
+	configure(s)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -152,7 +163,7 @@ func TestServer_HoldsWakesAndPassesThrough(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond, "the held connection must stamp the request annotation")
 
 	// The workload comes up: its real endpoints appear.
-	require.NoError(t, c.Create(context.Background(), readySlice("api", echoServer(t))))
+	require.NoError(t, c.Create(context.Background(), readySlice(echoServer(t))))
 
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
 	line, err := bufio.NewReader(conn).ReadString('\n')
@@ -162,7 +173,7 @@ func TestServer_HoldsWakesAndPassesThrough(t *testing.T) {
 
 func TestServer_IgnoresItsOwnSlice(t *testing.T) {
 	port := freePort(t)
-	own := readySlice("api", port)
+	own := readySlice(port)
 	own.Name = SliceName("api")
 	own.Labels[discoveryv1.LabelManagedBy] = ManagedBy
 	s, _ := startServer(t, pausedWorkload("api", port, time.Minute), own)
@@ -177,7 +188,7 @@ func TestServer_IgnoresItsOwnSlice(t *testing.T) {
 
 func TestServer_WaitsForAReadyPod(t *testing.T) {
 	port := freePort(t)
-	starting := readySlice("api", echoServer(t))
+	starting := readySlice(echoServer(t))
 	starting.Endpoints[0].Conditions.Ready = ptr.To(false)
 	s, _ := startServer(t, pausedWorkload("api", port, time.Minute), starting)
 
@@ -227,16 +238,130 @@ func TestServer_WarnsOnceWhenRequestsAreNotServed(t *testing.T) {
 	assert.Contains(t, warnings[0], "maxWait")
 }
 
-func TestServer_StopsListeningWhenRouteRemoved(t *testing.T) {
+const browserGET = "GET /orders HTTP/1.1\r\nHost: api\r\nAccept: text/html\r\nSec-Fetch-Mode: navigate\r\n\r\n"
+
+func TestServer_ServesThePageToABrowser(t *testing.T) {
 	port := freePort(t)
 	w := pausedWorkload("api", port, time.Minute)
-	s, c := startServer(t, w)
-	dial(t, port)
+	w.Status.Pause = &v1alpha1.PauseStatus{PausedAt: ptr.To(metav1.NewTime(time.Now().Add(-3 * time.Hour)))}
+	_, c := startServer(t, w)
+	before := testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("sandbox", "api", "page"))
 
+	conn := dial(t, port)
+	_, err := conn.Write([]byte(browserGET))
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "answered at once, with no pod Ready yet")
+	assert.Contains(t, string(body), "<title>Waking up api</title>")
+	assert.Contains(t, string(body), "<header>api</header>", "the address the browser asked for")
+	assert.Contains(t, string(body), "<dd>3 hours ago</dd>", "how long it was paused")
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "sandbox", Name: "api"}, w))
+	assert.NotEmpty(t, w.Annotations[v1alpha1.AnnotationLastRequest], "the page still wakes the workload")
+	assert.Equal(t, before+1, testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("sandbox", "api", "page")))
+}
+
+// In the moment between a pod being Ready and the operator routing traffic
+// back to it, the page says the workload is ready and reloads into it.
+func TestServer_PageSaysReadyOnceAPodIsReady(t *testing.T) {
+	port := freePort(t)
+	_, c := startServer(t, pausedWorkload("api", port, time.Minute))
+	require.NoError(t, c.Create(context.Background(), readySlice(echoServer(t))))
+
+	conn := dial(t, port)
+	_, err := conn.Write([]byte(browserGET))
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(body), "<title>api is ready</title>")
+	assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+}
+
+// A request that isn't a page load is held, and the bytes read to tell it
+// apart reach the woken workload untouched.
+func TestServer_HoldsOtherRequestsWithTheirBytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		page    *bool
+		request string
+	}{
+		{name: "an API call", request: "GET /api HTTP/1.1\r\nHost: api\r\nAccept: */*\r\n\r\n"},
+		{name: "a browser, with the page turned off", page: ptr.To(false), request: browserGET},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			port := freePort(t)
+			w := pausedWorkload("api", port, time.Minute)
+			w.Spec.Wake.Page = tt.page
+			_, c := startServer(t, w)
+
+			conn := dial(t, port)
+			_, err := conn.Write([]byte(tt.request))
+			require.NoError(t, err)
+			require.NoError(t, c.Create(context.Background(), readySlice(echoServer(t))))
+
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+			got := make([]byte, len(tt.request))
+			_, err = io.ReadFull(conn, got)
+			require.NoError(t, err)
+			assert.Equal(t, tt.request, string(got))
+		})
+	}
+}
+
+// testClock is a clock tests move by hand, safe to read from the doorman's
+// connection goroutines.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// Proxies keep sending to the doorman for a moment after the workload is
+// awake, so its port drains, passing connections straight to the workload,
+// before it's released.
+func TestServer_DrainsARemovedRouteThenReleasesIt(t *testing.T) {
+	port := freePort(t)
+	clock := &testClock{now: time.Now()}
+	w := pausedWorkload("api", port, time.Minute)
+	s, c := startServerWith(t, func(s *Server) { s.now = clock.Now }, w)
+	ctx := context.Background()
+
+	require.NoError(t, c.Create(ctx, readySlice(echoServer(t))))
 	w.Status.Doorman = nil
-	require.NoError(t, c.Update(context.Background(), w))
-	require.NoError(t, s.syncRoutes(context.Background()))
+	require.NoError(t, c.Update(ctx, w))
+	require.NoError(t, s.syncRoutes(ctx))
 
-	_, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))), time.Second)
-	assert.Error(t, err, "an awake workload's port is released")
+	conn := dial(t, port)
+	_, err := conn.Write([]byte(browserGET))
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	got := make([]byte, len(browserGET))
+	_, err = io.ReadFull(conn, got)
+	require.NoError(t, err)
+	assert.Equal(t, browserGET, string(got), "a browser reaches the awake workload, not the page")
+
+	clock.Advance(routeDrain)
+	require.NoError(t, s.syncRoutes(ctx))
+	_, err = net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))), time.Second)
+	assert.Error(t, err, "the port is released once it has drained")
 }

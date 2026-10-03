@@ -17,6 +17,7 @@ limitations under the License.
 package doorman
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -59,6 +60,22 @@ const (
 	unservedEventInterval = time.Minute
 
 	dialTimeout = 5 * time.Second
+
+	// peekTimeout bounds how long the doorman waits for a caller's first
+	// bytes to tell a browser from other clients. Some protocols wait for
+	// the server to speak first and send nothing; they're held as usual.
+	// The wake is already underway, so the wait doesn't delay it.
+	peekTimeout = 500 * time.Millisecond
+
+	// maxPeek is enough for any browser's request line and headers.
+	maxPeek = 16 << 10
+
+	// routeDrain keeps a port open after its workload is Running and its
+	// route is gone. Proxies and kube-proxy take a moment to stop sending
+	// there; without it, a browser's last refresh of the waking-up page
+	// would land on a closed port and show the proxy's error page, which
+	// doesn't refresh.
+	routeDrain = 30 * time.Second
 )
 
 // route is what the doorman knows about one listening port.
@@ -67,6 +84,11 @@ type route struct {
 	service  string
 	portName string
 	maxWait  time.Duration
+	page     bool
+
+	// drainUntil is set once the route has left status: the workload is
+	// awake, so connections are passed straight to it until then.
+	drainUntil time.Time
 }
 
 // Server listens on every allocated doorman port. It reads routes and the
@@ -161,18 +183,32 @@ func (s *Server) syncRoutes(ctx context.Context) error {
 		if w.Spec.Wake != nil && w.Spec.Wake.MaxWait != nil && w.Spec.Wake.MaxWait.Duration > 0 {
 			maxWait = w.Spec.Wake.MaxWait.Duration
 		}
+		page := w.Spec.Wake == nil || w.Spec.Wake.Page == nil || *w.Spec.Wake.Page
 		for _, r := range w.Status.Doorman {
 			routes[r.DoormanPort] = route{
 				workload: types.NamespacedName{Namespace: w.Namespace, Name: w.Name},
 				service:  r.Service,
 				portName: r.PortName,
 				maxWait:  maxWait,
+				page:     page,
 			}
 		}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
+	for port, old := range s.routes {
+		if _, ok := routes[port]; ok {
+			continue
+		}
+		if old.drainUntil.IsZero() {
+			old.drainUntil = now.Add(routeDrain)
+		}
+		if now.Before(old.drainUntil) {
+			routes[port] = old
+		}
+	}
 	s.routes = routes
 	for port, l := range s.listeners {
 		if _, ok := routes[port]; !ok {
@@ -231,6 +267,7 @@ func (s *Server) handle(ctx context.Context, port int32, conn net.Conn) {
 	logger := log.FromContext(ctx).WithName("doorman").WithValues(
 		"workload", rt.workload.Name, "namespace", rt.workload.Namespace, "service", rt.service)
 	ns, name := rt.workload.Namespace, rt.workload.Name
+	draining := !rt.drainUntil.IsZero()
 
 	opmetrics.DoormanHeldConnections.Inc()
 	defer opmetrics.DoormanHeldConnections.Dec()
@@ -239,8 +276,21 @@ func (s *Server) handle(ctx context.Context, port int32, conn net.Conn) {
 	waitCtx, cancel := context.WithTimeout(ctx, rt.maxWait)
 	defer cancel()
 
-	if err := s.wake(waitCtx, rt); err != nil {
-		logger.Error(err, "waking workload")
+	if !draining {
+		if err := s.wake(waitCtx, rt); err != nil {
+			logger.Error(err, "waking workload")
+		}
+	}
+
+	var head []byte
+	if rt.page && !draining {
+		head = peek(conn)
+		if req, ok := isPageLoad(head); ok {
+			s.servePage(ctx, conn, rt, req)
+			opmetrics.DoormanWakes.WithLabelValues(ns, name, "page").Inc()
+			opmetrics.DoormanWaitSeconds.WithLabelValues("page").Observe(s.now().Sub(start).Seconds())
+			return
+		}
 	}
 
 	backend, err := s.waitForBackend(waitCtx, rt)
@@ -271,7 +321,61 @@ func (s *Server) handle(ctx context.Context, port int32, conn net.Conn) {
 	s.conns[upstream] = struct{}{}
 	s.mu.Unlock()
 	defer s.forget(upstream)
+	if len(head) > 0 {
+		if _, err := upstream.Write(head); err != nil {
+			logger.Error(err, "passing held bytes to woken workload", "backend", backend)
+			return
+		}
+	}
 	proxy(conn, upstream)
+}
+
+// peek reads what the caller has sent so far, up to the end of an HTTP
+// request's headers, for at most peekTimeout. The bytes are passed on to the
+// workload if the connection is held.
+func peek(conn net.Conn) []byte {
+	_ = conn.SetReadDeadline(time.Now().Add(peekTimeout)) // a failure just means no deadline
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	buf := make([]byte, 0, 4<<10)
+	chunk := make([]byte, 4<<10)
+	for len(buf) < maxPeek && !bytes.Contains(buf, []byte("\r\n\r\n")) {
+		n, err := conn.Read(chunk)
+		buf = append(buf, chunk[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	return buf
+}
+
+// servePage answers a browser with the waking-up page, showing how far the
+// wake has got.
+func (s *Server) servePage(ctx context.Context, conn net.Conn, rt route, req *http.Request) {
+	data := pageData{
+		Address:   pageAddress(req, rt.workload.Namespace, rt.service),
+		Service:   rt.service,
+		Workload:  rt.workload.Name,
+		Namespace: rt.workload.Namespace,
+	}
+	now := s.now()
+	var w v1alpha1.ManagedWorkload
+	if err := s.client.Get(ctx, rt.workload, &w); err == nil {
+		data.Workload = w.Spec.Target.Name
+		if w.Status.Phase == v1alpha1.PhaseResuming && w.Status.LastTransitionTime != nil {
+			data.Elapsed = sinceLabel(now.Sub(w.Status.LastTransitionTime.Time))
+		}
+		if p := w.Status.Pause; p != nil && p.PausedAt != nil {
+			data.PausedAgo = agoLabel(now.Sub(p.PausedAt.Time))
+		}
+	}
+	if addr, err := s.readyBackend(ctx, rt); err == nil && addr != "" {
+		data.Ready = true
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(dialTimeout)) // a failure just means no deadline
+	if err := writePage(conn, req, data); err != nil {
+		log.FromContext(ctx).V(1).Info("writing waking-up page", "error", err.Error(),
+			"workload", rt.workload.Name, "namespace", rt.workload.Namespace)
+	}
 }
 
 // wake stamps the workload's last-request annotation, at most once per
