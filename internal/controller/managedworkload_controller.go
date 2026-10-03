@@ -629,7 +629,7 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 		return nil, fmt.Errorf("checking target %s %s: %w", ref.Kind, ref.Name, err)
 	}
 
-	if obj.GetLabels()[v1alpha1.LabelIgnore] == "true" {
+	if obj.GetLabels()[v1alpha1.LabelIgnore] == v1alpha1.True {
 		r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetIgnored",
 			fmt.Sprintf("%s %s has %s label", ref.Kind, ref.Name, v1alpha1.LabelIgnore))
 		if err := r.Status().Update(ctx, workload); err != nil {

@@ -88,6 +88,13 @@ func main() {
 		"Namespace of the doorman's Service.")
 	flag.StringVar(&prometheusURL, "prometheus-url", "",
 		"Base URL of the Prometheus API used for activity queries, e.g. http://prometheus.monitoring.svc:9090.")
+	optIn := controller.DefaultOptInDefaults
+	flag.DurationVar(&optIn.IdleAfter, "default-idle-after", optIn.IdleAfter,
+		"idleAfter for workloads opted in with the hybernate.io/managed label, unless annotated otherwise.")
+	flag.IntVar(&optIn.CPUThreshold, "default-cpu-threshold", optIn.CPUThreshold,
+		"CPU threshold, as a percentage of requests, for workloads opted in with the label, unless annotated otherwise.")
+	flag.BoolVar(&optIn.DryRun, "default-dry-run", optIn.DryRun,
+		"Measure workloads opted in with the label without pausing them, unless annotated otherwise.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -166,6 +173,18 @@ func main() {
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ManagedWorkload")
 			os.Exit(1)
+		}
+		for _, kind := range []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment, v1alpha1.TargetKindStatefulSet} {
+			if err := (&controller.OptInReconciler{
+				Client:   mgr.GetClient(),
+				Scheme:   mgr.GetScheme(),
+				Recorder: mgr.GetEventRecorder("hybernate"),
+				Kind:     kind,
+				Defaults: optIn,
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "OptIn", "kind", kind)
+				os.Exit(1)
+			}
 		}
 		if err := (&controller.WorkloadPolicyReconciler{
 			Client:    mgr.GetClient(),

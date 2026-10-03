@@ -15,7 +15,7 @@ rules:
     resources: [events]
     verbs: [create, patch]
   - apiGroups: [""]
-    resources: [services]
+    resources: [namespaces, services]
     verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [pods]
