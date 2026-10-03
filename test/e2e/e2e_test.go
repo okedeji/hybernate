@@ -475,10 +475,10 @@ spec:
 				g.Expect(jsonpath("managedworkload", "e2e-db", depsNamespace, "{.status.phase}")).To(Equal("Paused"))
 			}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
-			By("waking the app, which must wake the database too")
-			_, err := utils.Run(exec.Command("kubectl", "annotate", "managedworkload", "e2e-app", "-n", depsNamespace,
-				"--overwrite", "hybernate.io/last-activity="+time.Now().UTC().Format(time.RFC3339)))
+			By("waking the app with kubectl hybernate wake, which must wake the database too")
+			out, err := utils.Run(exec.Command(pluginBinary, "wake", "e2e-app", "-n", depsNamespace, "--timeout", "3m"))
 			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("is Running after"), "wake waits until the workload is Running")
 			Eventually(func(g Gomega) {
 				g.Expect(jsonpath("managedworkload", "e2e-app", depsNamespace, "{.status.phase}")).To(Equal("Running"))
 				g.Expect(jsonpath("managedworkload", "e2e-db", depsNamespace, "{.status.phase}")).To(Equal("Running"))

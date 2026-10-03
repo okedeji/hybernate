@@ -37,6 +37,8 @@ var (
 	// pauseImage runs the Deployment the lifecycle test manages. The Makefile
 	// preloads it into kind so the test doesn't depend on a registry pull.
 	pauseImage = "registry.k8s.io/pause:3.10"
+	// pluginBinary is the kubectl plugin, built by the suite.
+	pluginBinary = "bin/kubectl-hybernate"
 	// webImage serves HTTP for the wake-on-request spec; also preloaded.
 	webImage = "registry.k8s.io/e2e-test-images/agnhost:2.52"
 	// ingressNginxManifest is the project's final release; it's archived, but
@@ -67,6 +69,10 @@ var _ = BeforeSuite(func() {
 
 	// TODO(user): If you want to change the e2e test vendor from Kind,
 	// ensure the image is built and available, then remove the following block.
+	By("building the kubectl plugin")
+	_, err = utils.Run(exec.Command("go", "build", "-o", pluginBinary, "./cmd/kubectl-hybernate"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the kubectl plugin")
+
 	By("loading the manager image on Kind")
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
