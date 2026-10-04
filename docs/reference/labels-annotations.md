@@ -59,7 +59,7 @@ A value that can't be read is reported in an `InvalidSetting` warning event on t
 
 | Finalizer | Applied To | Description |
 |-----------|-----------|-------------|
-| `hybernate.io/cleanup` | ManagedWorkloads | Added automatically by the operator. Ensures a paused workload is scaled back up, and PVC retention cleanup completes, before the ManagedWorkload CR can be deleted. The operator removes it after cleanup is done. |
+| `hybernate.io/cleanup` | ManagedWorkloads | Added automatically by the operator. Ensures a paused workload is scaled back up before the ManagedWorkload CR can be deleted. The operator removes it after cleanup is done. |
 
 !!! note
     Do not manually remove the `hybernate.io/cleanup` finalizer. If you do, PVCs scheduled for retention cleanup may be orphaned.

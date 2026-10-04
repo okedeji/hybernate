@@ -1,6 +1,6 @@
 # Cost Tracking
 
-Hybernate tracks per-workload resource consumption and estimates the potential cost savings from its actions (pause, destroy). Cost data is available per-workload in the ManagedWorkload status.
+Hybernate tracks per-workload resource consumption and estimates the potential cost savings from pausing them. Cost data is available per-workload in the ManagedWorkload status.
 
 !!! warning "Estimated savings vs. actual savings"
     Hybernate operates at the **workload layer** — it removes pods, freeing CPU and memory on nodes. But your cloud bill is based on **nodes**, not pods. Estimated savings are only realized when freed resources lead to node removal by a cluster autoscaler. If freed capacity isn't enough to drain a node, the node stays and no money is saved. Hybernate reports two things separately: **resource reduction** (always accurate — the concrete CPU/memory freed) and **estimated cost savings** (projected — assumes freed resources lead to node removal).
@@ -63,8 +63,7 @@ spec:
 
 Estimated savings are accumulated when Hybernate takes action. These projections assume that freed resources eventually lead to node removal by a cluster autoscaler:
 
-- **Paused workloads**: CPU and memory savings accrue every reconcile while paused. Storage savings are zero (PVCs persist while paused).
-- **Destroyed workloads**: CPU and memory savings accrue. Storage savings accrue only after PVC retention expires and PVCs are cleaned up.
+- CPU and memory savings accrue every reconcile while a workload is paused. Storage isn't saved: its PVCs stay while it's paused.
 
 Savings are priced on the CPU and memory a running pod requests, read just before the pause. That includes sidecars injected when the pod was created, such as a service mesh proxy, which the Deployment's own template doesn't list but which pausing frees too.
 

@@ -1,6 +1,6 @@
 # Idle Detection
 
-Hybernate keeps an **activity clock** for every ManagedWorkload: the last time anything showed the workload was in use. When the clock is older than `idlePolicy.idleAfter`, the workload is paused (or destroyed). Any single sign of activity resets it.
+Hybernate keeps an **activity clock** for every ManagedWorkload: the last time anything showed the workload was in use. When the clock is older than `idlePolicy.idleAfter`, the workload is paused: scaled to zero, keeping its replica count and a resource snapshot. Any single sign of activity resets it.
 
 There's no learning period. A new workload can be paused as soon as it has gone `idleAfter` without activity.
 
@@ -8,7 +8,6 @@ There's no learning period. A new workload can be paused as soon as it has gone 
 spec:
   idlePolicy:
     idleAfter: 1h        # default
-    action: pause        # or destroy
     activity:
       cpuThreshold: 10   # percent of CPU requests; default
 ```
@@ -102,13 +101,6 @@ A paused workload wakes when:
 - A request reaches one of its Services. The request is held while the workload starts, then answered; see [Wake on Request](wake-on-request.md).
 - A `hybernate.io/last-activity` annotation is set to a time after the pause, or an `active-until` hold is in the future. This is how a "start environment" button in a developer portal works.
 - `autoResume: true` is set and a confident forecast predicts demand above `cpuThreshold` for the current hour, or for the next hour once it's 15 minutes away, so the workload is ready before people arrive.
-- `pause.expireAfter` elapses with `expireAction: resume`, or `desiredState` is set to `Running`.
+- Something other than Hybernate scales it up, such as `kubectl scale`, or `desiredState` is set to `Running`.
 
-Each wake restarts the clock, so a woken workload gets a full `idleAfter` before it can pause again. The clock records `lastActivitySource: request` when a held request woke it, and `woke` for any other wake.
-
-## Idle actions
-
-| Action | Behavior |
-|--------|----------|
-| `pause` | Scales to zero and records the replica count and a resource snapshot. The default. |
-| `destroy` | Deletes the workload, with optional PVC retention. |
+Each wake restarts the clock, so a woken workload gets a full `idleAfter` before it can pause again. The clock records `lastActivitySource: request` when a held request woke it, `scaled-up` when something else scaled it up, and `woke` for any other wake.

@@ -204,7 +204,7 @@ kubectl hybernate wake my-api -n staging --for 2h
 kubectl hybernate wake my-api -n staging --wait=false
 ```
 
-It refuses, and says why, when activity can't wake the workload: `desiredState: Paused` (remove it or set it to `Running`), or a destroyed workload, whose Deployment or StatefulSet is gone.
+It refuses, and says why, when activity can't wake the workload: `desiredState: Paused` (remove it or set it to `Running`).
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|

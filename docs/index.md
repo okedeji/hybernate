@@ -2,7 +2,7 @@
 
 **Intelligent Kubernetes workload lifecycle management.**
 
-Hybernate is a Kubernetes operator that predicts your workload demand using Holt-Winters forecasting and pauses, resumes, or destroys workloads to cut infrastructure costs. It pauses a workload once nothing has used it for a configurable time, and supports dry run mode so you can observe its recommendations and build confidence before letting it drive actions.
+Hybernate is a Kubernetes operator that predicts your workload demand using Holt-Winters forecasting and pauses and resumes workloads to cut infrastructure costs. It never deletes a workload or its data: the most it does is scale one to zero, and a request wakes it. It pauses a workload once nothing has used it for a configurable time, and supports dry run mode so you can observe its recommendations and build confidence before letting it drive actions.
 
 ---
 
@@ -13,7 +13,6 @@ Most Kubernetes clusters run workloads 24/7, even when no one is using them. Dev
 Hybernate fixes this by learning your workload patterns and acting on them:
 
 - **Idle workloads get paused.** They are scaled to zero when no one is using them and resumed automatically when demand returns.
-- **Abandoned workloads get cleaned up.** They are destroyed after extended idle periods, with PVC retention for safety.
 
 ## Key Features
 
@@ -27,7 +26,7 @@ Hybernate records the last time each workload was in use: CPU above a threshold,
 Hybernate never pauses a workload it can't measure, and a confident forecast can hold off a pause. Enable `dryRun` mode to see what Hybernate would do without it actually doing anything. Conflict detection catches external changes to your workloads.
 
 ### Cost Tracking
-Track per-workload resource consumption and savings. See exactly how much you're saving from paused and destroyed workloads.
+Track per-workload resource consumption and savings. See exactly how much you're saving from paused workloads.
 
 ### Label Opt-In
 Label a workload or namespace `hybernate.io/managed: "true"` and Hybernate manages it, with its settings as annotations. Both live in the manifests or Helm values you already keep in Git, so Argo CD and Flux work as they do today.

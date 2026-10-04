@@ -13,11 +13,10 @@ Hybernate is a Kubernetes operator built on [controller-runtime](https://github.
 The primary reconciler. Watches `ManagedWorkload` CRs and drives each workload through its lifecycle. On every reconcile it:
 
 1. Validates the target Deployment/StatefulSet exists
-2. Detects a paused workload scaled up externally
+2. Wakes a paused workload scaled up outside Hybernate
 3. Processes manual overrides (`desiredState`)
-4. Checks pause expiry and PVC retention cleanup
-5. Runs the activity clock: records activity, and pauses once there has been none for `idleAfter`
-6. Accumulates cost data
+4. Runs the activity clock: records activity, and pauses once there has been none for `idleAfter`
+5. Accumulates cost data
 
 Each ManagedWorkload gets its own forecast engine instance, serialized into the CR status so it survives operator restarts.
 
@@ -32,7 +31,7 @@ One for Deployments and one for StatefulSets. Each watches its workloads, their 
 | `internal/controller` | The ManagedWorkload and opt-in reconcilers |
 | `internal/forecast` | Holt-Winters model, phase lifecycle, confidence scoring, anomaly detection |
 | `internal/signal` | Signal interface, CPU threshold checker, Prometheus PromQL prober |
-| `internal/lifecycle` | Pause, resume, and destroy operations against the K8s API |
+| `internal/lifecycle` | Pause and resume, through the scale subresource |
 | `internal/discovery` | The cluster scan behind `kubectl hybernate scan` |
 | `internal/doorman` | Holds requests to a paused workload's Service and wakes it |
 | `internal/cost` | Cost accumulation and estimation |

@@ -44,9 +44,8 @@ The Helm chart creates these rules when `metrics.prometheusRule.enabled` is `tru
 |-------|-----------|----------|
 | `HybernateReconcileErrorsHigh` | Reconcile errors exceed 0.1/sec for 10 minutes | critical |
 | `HybernateDown` | No healthy operator target is scraped for 5 minutes | critical |
-| `HybernateWorkloadStuck` | A workload stays in `Pausing`, `Resuming`, or `Destroying` for 15 minutes | warning |
+| `HybernateWorkloadStuck` | A workload stays in `Pausing` or `Resuming` for 15 minutes | warning |
 | `HybernateTargetUnavailable` | A ManagedWorkload's target is missing more than 3 times in an hour | warning |
-| `HybernatePVCRetentionExpiring` | A destroyed workload's PVCs will be deleted within 24 hours | warning |
 | `HybernateDoormanWakesFailing` | More than 3 requests to a paused workload timed out or failed in 15 minutes | warning |
 
 ## Health Checks

@@ -88,7 +88,7 @@ When `metrics.secure` is `true`, the chart creates a `ClusterRoleBinding` to `sy
 | `metrics.prometheusRule.enabled` | `false` | Create a PrometheusRule CR with predefined alerts |
 | `metrics.prometheusRule.additionalLabels` | `{}` | Extra labels on the PrometheusRule |
 
-The PrometheusRule includes alerts for reconciliation errors, operator downtime, workloads stuck in a transition, missing targets, and PVC retention expiry.
+The PrometheusRule includes alerts for reconciliation errors, operator downtime, workloads stuck in a transition, and missing targets.
 
 ## Doorman
 
@@ -158,8 +158,8 @@ The chart creates a ClusterRole with permissions to:
 
 - Manage `ManagedWorkload` CRs, including creating them for labelled workloads
 - Read Namespaces, for the `hybernate.io/managed` label and settings annotations on them
-- Read and scale Deployments and StatefulSets
-- Read PersistentVolumeClaims (for retention cleanup)
+- Read Deployments and StatefulSets, and scale them through the scale subresource. Hybernate can't delete or otherwise change them
+- Read PersistentVolumeClaims, to price the storage a paused workload keeps
 - Read pod metrics from metrics-server
 - Read pods, to price what pausing a workload frees, sidecars included. Pods are read when needed rather than watched, so they aren't cached
 - Read Nodes' metadata, to price workloads at the list price of the instance types they run on. Only names and labels are cached

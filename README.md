@@ -6,7 +6,7 @@
 
 **Your Kubernetes workloads are running 24/7. Your users aren't.**
 
-Hybernate is a Kubernetes operator that detects idle workloads, learns their demand patterns, and automatically pauses or destroys them. It brings them back before traffic returns, turning your non-production clusters from always-on cost centers into pay-for-what-you-use environments.
+Hybernate is a Kubernetes operator that detects idle workloads, learns their demand patterns, and automatically pauses them, scaling to zero without deleting anything. It brings them back on the first request or before traffic returns, turning your non-production clusters from always-on cost centers into pay-for-what-you-use environments.
 
 ## Why Hybernate?
 
@@ -76,7 +76,7 @@ kubectl hybernate enable my-api -n staging
 - **Activity-based idle detection**: any sign of use (CPU, a deploy, a Prometheus query such as request rate, an activity annotation) keeps a workload awake; it pauses after `idleAfter` with none
 - **Demand forecasting** via a Holt-Winters double seasonal model that learns daily and weekly patterns per workload, with confidence scoring and anomaly detection
 - **Wake on request**: a request to a paused workload's Service wakes it and is held until the workload is Ready, so callers see a slow response instead of an error. Browsers get a waking-up page that reloads until the app is up
-- **Pause, resume, and destroy** with scale to zero, automatic expiry, forecast-driven resume, and PVC retention
+- **Pause and resume** with scale to zero and forecast-driven resume. Hybernate never deletes a workload or its storage
 
 ### Operations
 
@@ -98,7 +98,7 @@ kubectl hybernate enable my-api -n staging
 
 | Component | Description |
 |-----------|-------------|
-| **ManagedWorkload** | Per-workload CR that defines idle policy, pause/destroy behavior, and cost tracking |
+| **ManagedWorkload** | Per-workload CR that defines idle policy, wake behaviour, and cost tracking |
 | **Opt-in controller** | Creates and updates a ManagedWorkload for each labelled workload, from its annotations |
 | **Forecast Engine** | Per-workload Holt-Winters model that learns demand patterns, confirms idle detection, and wakes workloads ahead of demand |
 
