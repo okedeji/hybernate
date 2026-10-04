@@ -411,7 +411,7 @@ spec:
 				g.Expect(jsonpath("deployment", idleName, idleNamespace, "{.spec.replicas}")).To(Equal("0"))
 			}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
-			By("annotating the Deployment as active, as a sandbox UI would")
+			By("annotating the Deployment as active, as a developer portal would")
 			_, err := utils.Run(exec.Command("kubectl", "annotate", "deployment", idleName, "-n", idleNamespace,
 				"--overwrite", "hybernate.io/last-activity="+time.Now().UTC().Format(time.RFC3339)))
 			Expect(err).NotTo(HaveOccurred())
@@ -674,19 +674,17 @@ spec:
 
 		It("reports what Hybernate has paused and what that frees", func() {
 			type scanned struct {
-				Clusters []struct {
-					Workloads []struct {
-						Name       string  `json:"name"`
-						State      string  `json:"state"`
-						Reason     string  `json:"reason"`
-						Replicas   int     `json:"replicas"`
-						Managed    bool    `json:"managed"`
-						HourlyCost float64 `json:"hourlyCost"`
-					} `json:"workloads"`
-					Totals struct {
-						Paused int `json:"paused"`
-					} `json:"totals"`
-				} `json:"clusters"`
+				Workloads []struct {
+					Name       string  `json:"name"`
+					State      string  `json:"state"`
+					Reason     string  `json:"reason"`
+					Replicas   int     `json:"replicas"`
+					Managed    bool    `json:"managed"`
+					HourlyCost float64 `json:"hourlyCost"`
+				} `json:"workloads"`
+				Totals struct {
+					Paused int `json:"paused"`
+				} `json:"totals"`
 			}
 			By("scanning once Hybernate has paused the quiet workload")
 			Eventually(func(g Gomega) {
@@ -694,16 +692,15 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				var result scanned
 				g.Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
-				g.Expect(result.Clusters).To(HaveLen(1))
-				g.Expect(result.Clusters[0].Workloads).To(HaveLen(1))
-				w := result.Clusters[0].Workloads[0]
+				g.Expect(result.Workloads).To(HaveLen(1))
+				w := result.Workloads[0]
 				g.Expect(w.Name).To(Equal("e2e-quiet"))
 				g.Expect(w.State).To(Equal("paused"))
 				g.Expect(w.Reason).To(HavePrefix("paused "))
 				g.Expect(w.Replicas).To(Equal(2), "priced on the replicas it ran before the pause")
 				g.Expect(w.Managed).To(BeTrue())
 				g.Expect(w.HourlyCost).To(BeNumerically(">", 0))
-				g.Expect(result.Clusters[0].Totals.Paused).To(Equal(1))
+				g.Expect(result.Totals.Paused).To(Equal(1))
 			}, 4*time.Minute, 10*time.Second).Should(Succeed())
 		})
 	})
@@ -769,26 +766,22 @@ spec:
 
 		It("finds Prometheus, reads it through the API server, and replays the clock", func() {
 			type scanned struct {
-				Clusters []struct {
-					Mode    string `json:"mode"`
-					History struct {
-						Prometheus string `json:"prometheus"`
+				Mode    string `json:"mode"`
+				History struct {
+					Prometheus string `json:"prometheus"`
+				} `json:"history"`
+				Workloads []struct {
+					Name    string `json:"name"`
+					History *struct {
+						SleepHours float64 `json:"sleepHours"`
+						Freed      float64 `json:"freed"`
 					} `json:"history"`
-					Workloads []struct {
-						Name    string `json:"name"`
-						History *struct {
-							SleepHours float64 `json:"sleepHours"`
-							Freed      float64 `json:"freed"`
-						} `json:"history"`
-					} `json:"workloads"`
-				} `json:"clusters"`
+				} `json:"workloads"`
 			}
 			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", historyNamespace, "-o", "json"))
 			Expect(err).NotTo(HaveOccurred())
-			var result scanned
-			Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
-			Expect(result.Clusters).To(HaveLen(1))
-			c := result.Clusters[0]
+			var c scanned
+			Expect(json.Unmarshal([]byte(out), &c)).To(Succeed())
 			Expect(c.Mode).To(Equal("history"))
 			Expect(c.History.Prometheus).To(Equal(promNamespace + "/prometheus-operated"))
 			Expect(c.Workloads).To(HaveLen(1))
@@ -826,14 +819,11 @@ spec:
 					pluginBinary, "scan", "-n", historyNamespace, "-o", "json"))
 				Expect(err).NotTo(HaveOccurred())
 				var result struct {
-					Clusters []struct {
-						Mode          string   `json:"mode"`
-						HistoryAccess []string `json:"historyAccess"`
-					} `json:"clusters"`
+					Mode          string   `json:"mode"`
+					HistoryAccess []string `json:"historyAccess"`
 				}
 				Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
-				Expect(result.Clusters).To(HaveLen(1))
-				return result.Clusters[0].Mode, result.Clusters[0].HistoryAccess
+				return result.Mode, result.HistoryAccess
 			}
 
 			mode, access := scanAs()
@@ -902,22 +892,19 @@ data:
 			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0", "-o", "json"))
 			Expect(err).NotTo(HaveOccurred())
 			var result struct {
-				Clusters []struct {
-					Workloads []struct {
-						Name         string `json:"name"`
-						Dependencies []struct {
-							Kind     string `json:"kind"`
-							Name     string `json:"name"`
-							Via      string `json:"via"`
-							Headless bool   `json:"headless"`
-						} `json:"dependencies"`
-					} `json:"workloads"`
-				} `json:"clusters"`
+				Workloads []struct {
+					Name         string `json:"name"`
+					Dependencies []struct {
+						Kind     string `json:"kind"`
+						Name     string `json:"name"`
+						Via      string `json:"via"`
+						Headless bool   `json:"headless"`
+					} `json:"dependencies"`
+				} `json:"workloads"`
 			}
 			Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
-			Expect(result.Clusters).To(HaveLen(1))
 			var app []string
-			for _, w := range result.Clusters[0].Workloads {
+			for _, w := range result.Workloads {
 				if w.Name != "e2e-app" {
 					continue
 				}
@@ -929,8 +916,21 @@ data:
 
 			table, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(table).To(ContainSubstring(
-				depsScanNamespace + `/deployment/e2e-app: hybernate.io/depends-on: "statefulset/e2e-db"`))
+			Expect(table).To(MatchRegexp(`deployment/e2e-app\s+->\s+statefulset/e2e-db\s+PGHOST\s+connected once Hybernate manages it`))
+		})
+
+		It("writes the HTML report, without dependency addresses", func() {
+			report := filepath.Join(GinkgoT().TempDir(), "workload-scan.html")
+			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0",
+				"--html", report))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("Report: " + report))
+			page, err := os.ReadFile(report)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(page)).To(ContainSubstring("<h1>Workload scan</h1>"))
+			Expect(string(page)).To(ContainSubstring("deployment/e2e-app"))
+			Expect(string(page)).To(ContainSubstring("PGHOST"), "the variable is named")
+			Expect(string(page)).NotTo(ContainSubstring("e2e-db-0.e2e-db-hl"), "its address isn't")
 		})
 	})
 

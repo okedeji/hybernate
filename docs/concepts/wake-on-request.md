@@ -91,7 +91,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-hybernate-doorman
-  namespace: sandbox-42
+  namespace: preview-42
 spec:
   podSelector: {}
   policyTypes: [Ingress]

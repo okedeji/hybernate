@@ -21,7 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
@@ -37,15 +37,16 @@ import (
 	"github.com/okedeji/hybernate/internal/discovery"
 )
 
-func sampleCluster(contextName string) clusterScan {
+func sampleCluster() scanResult {
 	workloads := []discovery.Workload{
-		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindDeployment, Name: "checkout-api", Replicas: 2,
-			State: discovery.StateIdle, CPUPercent: ptr.To(2), Reason: "CPU 2%", MonthlyCost: 1240.4, HourlyCost: 1.6992,
-			PodCPURequestMillis: 500, PodMemoryRequestBytes: 1 << 30, Clues: []string{"not deployed in 23 days"}},
-		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Replicas: 1,
+		{Namespace: "preview-42", Kind: v1alpha1.TargetKindDeployment, Name: "checkout-api", Replicas: 2,
+			State: discovery.StateIdle, CPUPercent: ptr.To(2), Reason: "CPU 2% of its request",
+			MonthlyCost: 1240.4, HourlyCost: 1.6992,
+			PodCPURequestMillis: 500, PodMemoryRequestBytes: 1 << 30, Clues: []string{"last deployed 23 days ago"}},
+		{Namespace: "preview-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Replicas: 1,
 			State: discovery.StateActive, CPUPercent: ptr.To(64), MonthlyCost: 96, HourlyCost: 0.1315},
 	}
-	return clusterScan{Context: contextName, Cluster: contextName, ClusterReport: &discovery.ClusterReport{
+	return scanResult{Context: "staging", Cluster: "staging", ClusterReport: &discovery.ClusterReport{
 		Mode: discovery.ModeSnapshot, Workloads: workloads, Notes: []string{"skipped namespace locked: forbidden"},
 		Totals: discovery.Totals{Workloads: 2, Idle: 1, IdleCPUMillis: 1000, IdleMemoryBytes: 2 << 30,
 			MonthlyCost: 1336.4, IdleMonthlyCost: 1240.4, IdleHourlyCost: 1.6992},
@@ -53,33 +54,32 @@ func sampleCluster(contextName string) clusterScan {
 }
 
 func TestWriteTable(t *testing.T) {
-	cluster := sampleCluster("staging")
-	result := scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals}
+	cluster := sampleCluster()
+	result := cluster
 	var out bytes.Buffer
 
 	require.NoError(t, writeScan(&out, result, scanOptions{output: "table", limit: 25}))
 
 	got := out.String()
 	assert.Contains(t, got, "staging: 2 workloads in 1 namespace")
-	assert.Contains(t, got, "CPU 2%; not deployed in 23 days", "why it's idle, then the facts")
+	assert.Contains(t, got, "CPU 2% of its request; last deployed 23 days ago", "why it's idle, then the facts")
 	assert.Contains(t, got, "1 workload is idle right now, reserving 1.0 vCPU and 2.0 GiB of memory.")
 	assert.Contains(t, got, "It costs $1,240/month while running, $1.70 an hour: each hour asleep frees that.")
 	assert.Contains(t, got, "$1.70", "cost per hour in the table")
 	assert.NotContains(t, got, "save up to", "a moment can't show savings")
 	assert.Contains(t, got, "depends on how often they'd be woken")
 	assert.Contains(t, got, "deployment/checkout-api")
-	assert.Contains(t, got, "not deployed in 23 days")
+	assert.Contains(t, got, "last deployed 23 days ago")
 	assert.Contains(t, got, "statefulset/postgres")
 	assert.Contains(t, got, "  - skipped namespace locked: forbidden")
-	assert.Contains(t, got, "kubectl label deployment checkout-api -n sandbox-42 hybernate.io/managed=true",
+	assert.Contains(t, got, "kubectl label deployment checkout-api -n preview-42 hybernate.io/managed=true",
 		"next steps name a real idle workload")
-	assert.Contains(t, got, "kubectl annotate deployment checkout-api -n sandbox-42 hybernate.io/dry-run=true")
-	assert.NotContains(t, got, "All clusters:", "one cluster needs no combined total")
-	assert.Contains(t, got, "Hybernate Hub verifies savings against your cloud bill")
+	assert.Contains(t, got, "kubectl annotate deployment checkout-api -n preview-42 hybernate.io/dry-run=true")
+	assert.Contains(t, got, "See every cluster together, with savings checked against your cloud bill")
 }
 
 func TestWriteTable_Limit(t *testing.T) {
-	result := scanResult{Clusters: []clusterScan{sampleCluster("staging")}}
+	result := sampleCluster()
 	var out bytes.Buffer
 
 	require.NoError(t, writeScan(&out, result, scanOptions{output: "table", limit: 1}))
@@ -88,59 +88,40 @@ func TestWriteTable_Limit(t *testing.T) {
 	assert.Contains(t, out.String(), "...and 1 more; --limit 0 lists them all")
 }
 
-func TestWriteTable_SeveralClusters(t *testing.T) {
-	a, b := sampleCluster("staging"), sampleCluster("sandboxes")
-	failed := clusterScan{Context: "prod", Cluster: "prod",
-		Error: "you can't list namespaces in this cluster; name the ones to scan with -n"}
-	result := scanResult{Clusters: []clusterScan{a, b, failed}}
-	result.Totals = combinedTotals(result.Clusters)
-	var out bytes.Buffer
-
-	require.NoError(t, writeScan(&out, result, scanOptions{output: "table", limit: 25}))
-
-	assert.Contains(t, out.String(), "prod: not scanned: you can't list namespaces")
-	assert.Contains(t, out.String(), "All clusters:")
-	assert.Contains(t, out.String(), "2 workloads are idle right now, reserving 2.0 vCPU and 4.0 GiB of memory.")
-	assert.Contains(t, out.String(), "They cost $2,481/month")
-	assert.Equal(t, 1, strings.Count(out.String(), "Next steps:"))
-}
-
 func TestWriteTable_NothingIdle(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	cluster.Totals = discovery.Totals{Workloads: 2}
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}}, scanOptions{output: "table"}))
+	require.NoError(t, writeScan(&out, cluster, scanOptions{output: "table"}))
 
 	assert.Contains(t, out.String(), "No running workloads are idle right now.")
 	assert.NotContains(t, out.String(), "Next steps:")
 }
 
 func TestWriteScan_JSON(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+	require.NoError(t, writeScan(&out, cluster,
 		scanOptions{output: "json"}))
 
 	var decoded struct {
-		Clusters []struct {
-			Context   string `json:"context"`
-			Mode      string `json:"mode"`
-			Workloads []struct {
-				Name  string `json:"name"`
-				State string `json:"state"`
-			} `json:"workloads"`
-		} `json:"clusters"`
+		Context   string `json:"context"`
+		Mode      string `json:"mode"`
+		Workloads []struct {
+			Name  string `json:"name"`
+			State string `json:"state"`
+		} `json:"workloads"`
 		Totals struct {
 			IdleMonthlyCost float64 `json:"idleMonthlyCost"`
 		} `json:"totals"`
 	}
 	require.NoError(t, json.Unmarshal(out.Bytes(), &decoded))
-	assert.Equal(t, "staging", decoded.Clusters[0].Context)
-	assert.Equal(t, "snapshot", decoded.Clusters[0].Mode)
-	assert.Equal(t, "checkout-api", decoded.Clusters[0].Workloads[0].Name)
-	assert.Equal(t, "idle", decoded.Clusters[0].Workloads[0].State)
+	assert.Equal(t, "staging", decoded.Context)
+	assert.Equal(t, "snapshot", decoded.Mode)
+	assert.Equal(t, "checkout-api", decoded.Workloads[0].Name)
+	assert.Equal(t, "idle", decoded.Workloads[0].State)
 	assert.InDelta(t, 1240.4, decoded.Totals.IdleMonthlyCost, 0.001)
 	assert.NotContains(t, out.String(), "potentialSavings")
 	assert.NotContains(t, out.String(), "Hybernate Hub", "machine-readable output carries no promotion")
@@ -162,87 +143,104 @@ func TestDollars(t *testing.T) {
 
 func TestShortClusterName(t *testing.T) {
 	tests := map[string]string{
-		"arn:aws:eks:us-east-1:123456789012:cluster/staging":    "staging (EKS us-east-1)",
-		"arn:aws:eks:eu-west-2:123456789012:cluster/my-sandbox": "my-sandbox (EKS eu-west-2)",
-		"gke_myproject_europe-west1_sandboxes":                  "sandboxes (GKE europe-west1)",
-		"gke_my-project-123_us-central1-a_dev":                  "dev (GKE us-central1-a)",
-		"kind-hybernate-scan":                                   "kind-hybernate-scan",
-		"staging-admin":                                         "staging-admin",
-		"arn:aws:eks:us-east-1:123:nodegroup/x":                 "arn:aws:eks:us-east-1:123:nodegroup/x",
-		"gke_only_two":                                          "gke_only_two",
-		"gke_a_b_c_d":                                           "gke_a_b_c_d",
+		"arn:aws:eks:us-east-1:123456789012:cluster/staging": "staging (EKS us-east-1)",
+		"arn:aws:eks:eu-west-2:123456789012:cluster/my-dev":  "my-dev (EKS eu-west-2)",
+		"gke_myproject_europe-west1_dev":                     "dev (GKE europe-west1)",
+		"gke_my-project-123_us-central1-a_dev":               "dev (GKE us-central1-a)",
+		"kind-hybernate-scan":                                "kind-hybernate-scan",
+		"staging-admin":                                      "staging-admin",
+		"arn:aws:eks:us-east-1:123:nodegroup/x":              "arn:aws:eks:us-east-1:123:nodegroup/x",
+		"gke_only_two":                                       "gke_only_two",
+		"gke_a_b_c_d":                                        "gke_a_b_c_d",
 	}
 	for in, want := range tests {
 		assert.Equal(t, want, shortClusterName(in), in)
 	}
 }
 
-func TestNameClusters_KeepsClashingNamesInFull(t *testing.T) {
-	clusters := []clusterScan{
-		{Context: "arn:aws:eks:us-east-1:111111111111:cluster/staging"},
-		{Context: "arn:aws:eks:us-east-1:222222222222:cluster/staging"},
-		{Context: "gke_proj_europe-west1_sandboxes"},
-	}
-
-	nameClusters(clusters)
-
-	assert.Equal(t, "arn:aws:eks:us-east-1:111111111111:cluster/staging", clusters[0].Cluster,
-		"two accounts' staging clusters mustn't look like one")
-	assert.Equal(t, "arn:aws:eks:us-east-1:222222222222:cluster/staging", clusters[1].Cluster)
-	assert.Equal(t, "sandboxes (GKE europe-west1)", clusters[2].Cluster)
+func TestClusterName(t *testing.T) {
+	assert.Equal(t, "staging (EKS us-east-1)", clusterName("arn:aws:eks:us-east-1:111111111111:cluster/staging"))
+	assert.Equal(t, "current context", clusterName(""))
 }
 
 func TestWriteTable_Prices(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	var assumed, own bytes.Buffer
 
-	require.NoError(t, writeScan(&assumed, scanResult{Clusters: []clusterScan{cluster},
-		Prices: prices{CPUPerHour: 0.031, MemoryPerHour: 0.004, Assumed: true}}, scanOptions{output: "table"}))
-	require.NoError(t, writeScan(&own, scanResult{Clusters: []clusterScan{cluster},
-		Prices: prices{CPUPerHour: 0.05, MemoryPerHour: 0.006}}, scanOptions{output: "table"}))
+	withAssumed, withOwn := cluster, cluster
+	withAssumed.Prices = prices{CPUPerHour: 0.031, MemoryPerHour: 0.004, CPUAssumed: true, MemoryAssumed: true}
+	withOwn.Prices = prices{CPUPerHour: 0.05, MemoryPerHour: 0.006}
+	require.NoError(t, writeScan(&assumed, withAssumed, scanOptions{output: "table"}))
+	require.NoError(t, writeScan(&own, withOwn, scanOptions{output: "table"}))
 
 	assert.Contains(t, assumed.String(), "Costs use assumed list prices: $0.031 per vCPU-hour and $0.004 per GiB-hour")
-	assert.NotContains(t, own.String(), "assumed list prices", "the user's own prices need no caveat")
+	assert.NotContains(t, own.String(), "assumed", "the user's own prices need no caveat")
+}
+
+func TestPricesSentence(t *testing.T) {
+	tests := []struct {
+		prices prices
+		want   string
+	}{
+		{prices{CPUPerHour: 0.031, MemoryPerHour: 0.004, CPUAssumed: true, MemoryAssumed: true},
+			"Assumed list prices: $0.031 per vCPU-hour and $0.004 per GiB-hour of memory, from AWS on-demand in us-east-1."},
+		{prices{CPUPerHour: 0.045, MemoryPerHour: 0.006},
+			"Your prices: $0.045 per vCPU-hour and $0.006 per GiB-hour of memory."},
+		{prices{CPUPerHour: 0.045, MemoryPerHour: 0.004, MemoryAssumed: true},
+			"Your CPU price, $0.045 per vCPU-hour, and the assumed memory price, $0.004 per GiB-hour of memory " +
+				"(AWS on-demand, us-east-1)."},
+		{prices{CPUPerHour: 0.031, MemoryPerHour: 0.006, CPUAssumed: true},
+			"Your memory price, $0.006 per GiB-hour of memory, and the assumed CPU price, $0.031 per vCPU-hour " +
+				"(AWS on-demand, us-east-1)."},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, tt.prices.sentence())
+	}
 }
 
 func TestWriteTable_PausedAndUnjudged(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	cluster.Workloads = append(cluster.Workloads,
-		discovery.Workload{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindDeployment, Name: "asleep",
+		discovery.Workload{Namespace: "preview-42", Kind: v1alpha1.TargetKindDeployment, Name: "asleep",
 			State: discovery.StatePaused, Reason: "paused 5h ago", Managed: true, Replicas: 3, HourlyCost: 0.3},
 		discovery.Workload{Namespace: "kube-tools", Kind: v1alpha1.TargetKindDeployment, Name: "agent",
 			State: discovery.StateUnknown, Unmeasured: "no CPU requests"})
 	cluster.Totals.Paused, cluster.Totals.PausedHourlyCost = 1, 0.3
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}}, scanOptions{output: "table"}))
+	require.NoError(t, writeScan(&out, cluster, scanOptions{output: "table"}))
 
 	got := out.String()
 	assert.Contains(t, got, "Hybernate has 1 workload paused right now, freeing $0.30 an hour.")
-	assert.Contains(t, got, "paused (managed)")
+	assert.Contains(t, got, "paused (live)")
 	assert.Contains(t, got, "paused 5h ago")
 	assert.NotContains(t, got, "deployment/agent", "unjudged workloads leave the table")
 	assert.Contains(t, got, "1 workload set no CPU requests, so their use can't be measured: kube-tools/agent")
 }
 
 func TestWriteTable_MeasuredInDryRun(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	cluster.Workloads = append(cluster.Workloads, discovery.Workload{
-		Namespace: "sandbox-7", Kind: v1alpha1.TargetKindDeployment, Name: "api", Replicas: 2,
+		Namespace: "preview-7", Kind: v1alpha1.TargetKindDeployment, Name: "api", Replicas: 2,
 		State: discovery.StateActive, Managed: true, DryRun: true, HourlyCost: 0.13,
 		Measured: &discovery.Measured{Since: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC),
-			Pauses: 4, SleptHours: 96.5, Freed: 12.48},
+			Pauses: 4, Wakes: 4, SleptHours: 96.5, Freed: 12.48, MonthlyFreed: 81},
 	})
+	cluster.Totals.DryRun = 1
+	cluster.Totals.Measured = *cluster.Workloads[2].Measured
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+	require.NoError(t, writeScan(&out, cluster,
 		scanOptions{output: "table"}))
 
 	got := out.String()
-	assert.Contains(t, got, "Measured in dry-run")
-	assert.Regexp(t,
-		`sandbox-7\s+deployment/api\s+since Oct 1: would have paused 4 times, slept 96h, freeing \$12.48`, got)
-	assert.Contains(t, got, "start pausing:\n       kubectl hybernate enable deployment/api -n sandbox-7",
+	assert.Regexp(t, `preview-7\s+deployment/api\s+active \(dry-run\)\s+measuring since Oct 1\s+\$0\s+\$0.13\s+`+
+		`97h\s+4\s+.*\$81`, got, "what Hybernate measured is in its columns, with the period")
+	assert.Contains(t, got, "1 workload is in dry-run: measured by Hybernate since starting, it would have slept "+
+		"97 hours, freeing $12.48,\n  about $81 a month.")
+	assert.Contains(t, got, "COULD SAVE/MO")
+	assert.NotContains(t, got, "Measured in dry-run:", "no separate section")
+	assert.Contains(t, got, "start pausing:\n       kubectl hybernate enable deployment/api -n preview-7",
 		"enable names the workload dry-run measured")
 	assert.NotContains(t, got, "helm install", "a managed workload shows Hybernate is installed")
 	assert.Contains(t, got, "kubectl label deployment checkout-api", "and an unmanaged idle one can still be measured")
@@ -250,58 +248,65 @@ func TestWriteTable_MeasuredInDryRun(t *testing.T) {
 
 func TestWriteTable_OnlyMeasuring(t *testing.T) {
 	report := &discovery.ClusterReport{Mode: discovery.ModeSnapshot, Workloads: []discovery.Workload{{
-		Namespace: "sandbox-7", Kind: v1alpha1.TargetKindStatefulSet, Name: "db", Replicas: 1,
+		Namespace: "preview-7", Kind: v1alpha1.TargetKindStatefulSet, Name: "db", Replicas: 1,
 		State: discovery.StateActive, Managed: true, DryRun: true,
 		Measured: &discovery.Measured{Since: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC), Pauses: 1, SleptHours: 0.5},
 	}}, Totals: discovery.Totals{Workloads: 1}}
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{{Cluster: "staging", ClusterReport: report}}},
+	require.NoError(t, writeScan(&out, scanResult{Cluster: "staging", ClusterReport: report},
 		scanOptions{output: "table"}))
 
 	got := out.String()
-	assert.Contains(t, got, "would have paused 1 time, slept 30m, freeing $0.00")
+	assert.Regexp(t, `statefulset/db\s+active \(dry-run\)\s+measuring since Oct 1\s+\$0\s+\$0.00\s+30m\s+0`, got,
+		"dry-run's measurement shows even without history")
 	assert.Contains(t, got, "1. When you're happy with what dry-run measured, start pausing:")
-	assert.Contains(t, got, "kubectl hybernate enable statefulset/db -n sandbox-7")
+	assert.Contains(t, got, "kubectl hybernate enable statefulset/db -n preview-7")
 	assert.NotContains(t, got, "kubectl label", "nothing unmanaged is idle")
 }
 
 func TestWriteTable_History(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	cluster.Mode = discovery.ModeHistory
 	cluster.History = &discovery.HistorySource{Prometheus: "monitoring/prometheus-operated", Hours: 168}
-	cluster.Workloads[0].History = &discovery.History{Hours: 168, RunningHours: 168, IdleHours: 141,
+	cluster.Workloads[0].History = &discovery.History{Hours: 168, RunningHours: 168, QuietHours: 141,
 		SleepHours: 120, Wakes: 9, Freed: 204.3, MonthlyFreed: 887.6}
 	cluster.Totals.Replayed = discovery.ReplayTotals{Workloads: 2, Sleepers: 1, SleepHours: 1204, Wakes: 9,
 		Freed: 204.3, MonthlyFreed: 887.6}
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+	require.NoError(t, writeScan(&out, cluster,
 		scanOptions{output: "table"}))
 
 	got := out.String()
 	assert.Contains(t, got,
-		"Replaying the last 7 days, Hybernate would have paused 1 workload for 1,204 hours in all, waking them 9 times,")
+		"Replaying the last 7 days, Hybernate would have paused 1 of 2 unmanaged workloads for 1,204 hours in all,")
 	assert.Contains(t, got, "and freed $204: about $888/month.")
-	assert.Regexp(t, `IDLE\s+ASLEEP\s+WAKES\s+FREES/MO`, got)
-	assert.Regexp(t, `deployment/checkout-api\s+idle\s+2%\s+2\s+\$1,240\s+141h of 168h\s+120h\s+9\s+\$888`, got)
-	assert.Regexp(t, `statefulset/postgres\s+active\s+64%\s+1\s+\$96\s+-\s+-\s+-\s+-`, got, "no history, no numbers")
+	assert.Regexp(t, `STATE\s+BECAUSE\s+COST/MO\s+COULD SLEEP\s+WAKES\s+COULD SAVE/MO`, got)
+	assert.NotContains(t, got, "REPLICAS", "what the state's reason and the cost already say")
+	assert.Regexp(t,
+		`deployment/checkout-api\s+idle \(unmanaged\)\s+CPU 2% of its request; last deployed 23 days ago\s+`+
+			`\$1,240\s+120h\s+9\s+\$888`,
+		got, "the evidence comes right after the state it explains")
+	assert.Regexp(t, `statefulset/postgres\s+active \(unmanaged\)\s+\$96\s+-\s+-\s+-`, got,
+		"no history, no numbers")
 	assert.NotContains(t, got, "COST/HOUR")
+	assert.NotContains(t, got, "QUIET")
 	assert.NotContains(t, got, "which one moment can't show", "history shows it")
 }
 
 func TestWriteTable_HistoryWithNothingToSleep(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	cluster.Mode = discovery.ModeHistory
 	cluster.History = &discovery.HistorySource{Hours: 30}
 	cluster.Totals.Replayed = discovery.ReplayTotals{Workloads: 2}
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+	require.NoError(t, writeScan(&out, cluster,
 		scanOptions{output: "table"}))
 
 	assert.Contains(t, out.String(),
-		"Replaying the last 30 hours, nothing Hybernate doesn't already pause would have slept.")
+		"Replaying the last 30 hours, no unmanaged workload would have slept.")
 }
 
 func TestHistoryAccess(t *testing.T) {
@@ -340,11 +345,11 @@ func TestHistoryAccess(t *testing.T) {
 }
 
 func TestWriteTable_HistoryAccess(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	cluster.HistoryAccess = []string{"kubectl create role x", "kubectl create rolebinding x"}
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+	require.NoError(t, writeScan(&out, cluster,
 		scanOptions{output: "table"}))
 
 	assert.Contains(t, out.String(), "To replay history, an admin can let you read Prometheus, and nothing else, with:\n"+
@@ -352,35 +357,77 @@ func TestWriteTable_HistoryAccess(t *testing.T) {
 }
 
 func TestWriteTable_Dependencies(t *testing.T) {
-	cluster := sampleCluster("staging")
+	cluster := sampleCluster()
 	cluster.Workloads[0].Dependencies = []discovery.Dependency{
-		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Via: "PGHOST",
+		{Namespace: "preview-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Via: "PGHOST",
 			Address: "postgres-0.postgres-hl", Headless: true},
 		{Namespace: "messaging", Kind: v1alpha1.TargetKindStatefulSet, Name: "nats", Via: "NATS_URL",
 			Address: "nats://nats.messaging:4222", Headless: true},
-		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindDeployment, Name: "cache", Via: "CACHE",
+		{Namespace: "preview-42", Kind: v1alpha1.TargetKindDeployment, Name: "cache", Via: "CACHE",
 			Address: "cache:6379"},
 	}
 	cluster.Workloads[1].Dependencies = []discovery.Dependency{
-		{Namespace: "sandbox-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "backup", Via: "BACKUP",
+		{Namespace: "preview-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "backup", Via: "BACKUP",
 			Address: "backup-0.backup", Headless: true, Declared: true},
 	}
 	var out bytes.Buffer
 
-	require.NoError(t, writeScan(&out, scanResult{Clusters: []clusterScan{cluster}, Totals: cluster.Totals},
+	require.NoError(t, writeScan(&out, cluster,
 		scanOptions{output: "table"}))
 
 	got := out.String()
-	assert.Contains(t, got, "Dependencies found in environment variables (suggestions; never applied):")
-	assert.Regexp(t, `deployment/checkout-api\s+->\s+statefulset/postgres\s+PGHOST=postgres-0.postgres-hl\s+headless`, got)
-	assert.Regexp(t, `->\s+messaging/statefulset/nats\s+NATS_URL=nats://nats.messaging:4222\s+headless`, got,
+	assert.Contains(t, got, "Dependencies Hybernate wakes and holds with the workloads that need them: 4 dependencies")
+	assert.Regexp(t, `deployment/checkout-api\s+->\s+statefulset/postgres\s+PGHOST\s+connected once Hybernate manages it`,
+		got, "an unmanaged workload's")
+	assert.Regexp(t, `->\s+messaging/statefulset/nats\s+NATS_URL\s+connected once`, got,
 		"another namespace's is named with it")
-	assert.Regexp(t, `->\s+deployment/cache\s+CACHE=cache:6379\s*\n`, got)
-	assert.Regexp(t, `statefulset/backup\s+BACKUP=backup-0.backup\s+already declared`, got)
-	assert.Contains(t, got,
-		`sandbox-42/deployment/checkout-api: hybernate.io/depends-on: "statefulset/postgres, messaging/statefulset/nats"`,
-		"one annotation with every headless dependency it needs")
-	assert.NotContains(t, got, `statefulset/postgres: hybernate.io/depends-on`, "a declared one needs nothing")
+	assert.Regexp(t, `statefulset/backup\s+BACKUP\s+declared`, got)
+	assert.NotContains(t, got, "hybernate.io/depends-on=", "Hybernate connects dependencies itself")
+}
+
+// Many dependencies are summed up, listed most useful first, and cut at
+// --limit like the workloads table.
+func TestWriteTable_ManyDependencies(t *testing.T) {
+	cluster := sampleCluster()
+	since := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	for i := range 6 {
+		wl := discovery.Workload{Namespace: "preview-42", Kind: v1alpha1.TargetKindDeployment,
+			Name: fmt.Sprintf("svc-%d", i), State: discovery.StateActive, Managed: true, DryRun: true,
+			Measured: &discovery.Measured{Since: since, Pauses: 1, SleptHours: 10, Freed: float64(i)}}
+		wl.Dependencies = []discovery.Dependency{{Namespace: "preview-42", Kind: v1alpha1.TargetKindStatefulSet,
+			Name: "db", Via: "DB", Address: "db:5432", Headless: i == 4}}
+		cluster.Workloads = append(cluster.Workloads, wl)
+	}
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, cluster,
+		scanOptions{output: "table", limit: 2}))
+
+	got := out.String()
+	assert.Contains(t, got, "  ...and 4 more; --limit 0 lists them all")
+	assert.Contains(t, got, "6 dependencies")
+}
+
+func TestWriteTable_ScaledToZeroByHand(t *testing.T) {
+	cluster := sampleCluster()
+	cluster.Workloads = append(cluster.Workloads, discovery.Workload{Namespace: "preview-1",
+		Kind: v1alpha1.TargetKindDeployment, Name: "demo", State: discovery.StatePaused, ScaledByHand: true,
+		Reason: "scaled to zero, not by Hybernate"})
+	cluster.Totals.ScaledToZero = 1
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, cluster, scanOptions{output: "table"}))
+
+	got := out.String()
+	assert.Regexp(t, `deployment/demo\s+paused \(unmanaged\)\s+scaled to zero, not by Hybernate`, got)
+	assert.Contains(t, got, "1 workload is scaled to zero by hand; Hybernate can pause it while idle and wake it")
+	assert.NotContains(t, got, "Hybernate has 1 workload paused")
+}
+
+func TestManagement(t *testing.T) {
+	assert.Equal(t, "unmanaged", management(discovery.Workload{}))
+	assert.Equal(t, "dry-run", management(discovery.Workload{Managed: true, DryRun: true}))
+	assert.Equal(t, "live", management(discovery.Workload{Managed: true}))
 }
 
 func TestParseWindow(t *testing.T) {
@@ -411,14 +458,15 @@ func TestParseWindow(t *testing.T) {
 
 func TestPricesFor(t *testing.T) {
 	tests := []struct {
-		name        string
-		args        []string
-		wantCPU     float64
-		wantAssumed bool
+		name              string
+		args              []string
+		wantCPU           float64
+		wantCPUAssumed    bool
+		wantMemoryAssumed bool
 	}{
-		{name: "no prices given", wantCPU: 0.031, wantAssumed: true},
-		{name: "a CPU price", args: []string{"--cpu-price", "0.05"}, wantCPU: 0.05},
-		{name: "a memory price", args: []string{"--memory-price", "0.006"}, wantCPU: 0.031},
+		{name: "no prices given", wantCPU: 0.031, wantCPUAssumed: true, wantMemoryAssumed: true},
+		{name: "a CPU price", args: []string{"--cpu-price", "0.05"}, wantCPU: 0.05, wantMemoryAssumed: true},
+		{name: "a memory price", args: []string{"--memory-price", "0.006"}, wantCPU: 0.031, wantCPUAssumed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -432,7 +480,40 @@ func TestPricesFor(t *testing.T) {
 			got := pricesFor(cmd, scanOptions{cpuPrice: cpu, memoryPrice: memory})
 
 			assert.InDelta(t, tt.wantCPU, got.CPUPerHour, 1e-9)
-			assert.Equal(t, tt.wantAssumed, got.Assumed)
+			assert.Equal(t, tt.wantCPUAssumed, got.CPUAssumed)
+			assert.Equal(t, tt.wantMemoryAssumed, got.MemoryAssumed)
 		})
 	}
+}
+
+func TestDependencyStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		managed bool
+		d       discovery.Dependency
+		want    string
+	}{
+		{name: "declared wins", managed: true, d: discovery.Dependency{Declared: true, Connected: true}, want: "declared"},
+		{name: "connected by Hybernate", managed: true, d: discovery.Dependency{Connected: true},
+			want: "connected by Hybernate"},
+		{name: "unmanaged", want: "connected once Hybernate manages it"},
+		{name: "managed, not yet applied", managed: true, want: "not connected yet"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := dependencyLine{wl: Workload{Managed: tt.managed}, d: tt.d}
+			assert.Equal(t, tt.want, dependencyStatus(l))
+		})
+	}
+}
+
+func TestWriteScan_SavedThisMonth(t *testing.T) {
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, historyResult(), scanOptions{output: "table"}))
+
+	got := out.String()
+	assert.Contains(t, got, "Hybernate has saved $4 this month pausing 1 live workload.")
+	assert.Regexp(t, `preview-3\s+deployment/web\s+paused \(live\)\s+paused 3h ago\s+\$48\s+\$4\s+-\s+-\s+-`, got,
+		"a live workload's saving is in SAVED THIS MONTH, with nothing estimated")
 }

@@ -125,14 +125,14 @@ func TestDependencies_HoldWhileDependentsAwake(t *testing.T) {
 		},
 		{
 			name: "dependent in another namespace",
-			dependents: []*v1alpha1.ManagedWorkload{depWorkload("sandbox-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning,
+			dependents: []*v1alpha1.ManagedWorkload{depWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning,
 				v1alpha1.DependencyRef{Namespace: "default", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres"})},
-			wantHeldBy: "kept awake for sandbox-42/api",
+			wantHeldBy: "kept awake for preview-42/api",
 		},
 		{
 			name: "same name in another namespace is a different dependency",
 			dependents: []*v1alpha1.ManagedWorkload{
-				depWorkload("sandbox-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, postgresRef()),
+				depWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, postgresRef()),
 			},
 			wantPause: true,
 		},
@@ -309,7 +309,7 @@ func TestDependencies_ManualPauseWarnsWhenDependentsAwake(t *testing.T) {
 }
 
 func TestFindRelatedWorkloads_Dependencies(t *testing.T) {
-	api := depWorkload("sandbox-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning,
+	api := depWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning,
 		v1alpha1.DependencyRef{Namespace: "default", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres"})
 	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhaseRunning)
 	unrelated := depWorkload("default", "redis", v1alpha1.TargetKindStatefulSet, v1alpha1.PhaseRunning)
@@ -317,12 +317,12 @@ func TestFindRelatedWorkloads_Dependencies(t *testing.T) {
 
 	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "default", Name: "postgres"}}},
 		r.findRelatedWorkloads(context.Background(), api), "a change to a dependent re-checks its dependencies")
-	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "sandbox-42", Name: "api"}}},
+	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "preview-42", Name: "api"}}},
 		r.findRelatedWorkloads(context.Background(), postgres), "a change to a dependency re-checks its dependents")
 
 	assert.ElementsMatch(t, []reconcile.Request{
 		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "postgres"}},
-		{NamespacedName: types.NamespacedName{Namespace: "sandbox-42", Name: "api"}},
+		{NamespacedName: types.NamespacedName{Namespace: "preview-42", Name: "api"}},
 	}, r.findWorkloadsForTarget(context.Background(), postgresTarget(1, 1)),
 		"a dependency's readiness changing re-checks dependents waiting for it")
 }

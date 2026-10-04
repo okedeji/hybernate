@@ -77,8 +77,8 @@ func TestWritePage(t *testing.T) {
 	var out bytes.Buffer
 
 	require.NoError(t, writePage(&out, req, pageData{
-		Address: "admin.sandbox-42.example.dev", Service: "checkout", Workload: "checkout-api",
-		Namespace: "sandbox-42", Elapsed: "14s", PausedAgo: "3 hours ago",
+		Address: "admin.preview-42.example.dev", Service: "checkout", Workload: "checkout-api",
+		Namespace: "preview-42", Elapsed: "14s", PausedAgo: "3 hours ago",
 	}))
 
 	resp, body := readPage(t, out.Bytes(), http.MethodGet)
@@ -88,7 +88,7 @@ func TestWritePage(t *testing.T) {
 	assert.True(t, resp.Close, "the connection closes after the page")
 	assert.Contains(t, body, "<title>Waking up checkout</title>")
 	assert.Contains(t, body, `<meta http-equiv="refresh" content="3">`)
-	assert.Contains(t, body, "<header>admin.sandbox-42.example.dev</header>")
+	assert.Contains(t, body, "<header>admin.preview-42.example.dev</header>")
 	assert.Contains(t, body, `<li class="now">`)
 	assert.Contains(t, body, "Starting checkout-api")
 	assert.Contains(t, body, ">14s<")
@@ -116,13 +116,13 @@ func TestPageAddress(t *testing.T) {
 		host string
 		want string
 	}{
-		{host: "admin.sandbox-42.example.dev", want: "admin.sandbox-42.example.dev"},
-		{host: "admin.sandbox-42.example.dev:8443", want: "admin.sandbox-42.example.dev"},
+		{host: "admin.preview-42.example.dev", want: "admin.preview-42.example.dev"},
+		{host: "admin.preview-42.example.dev:8443", want: "admin.preview-42.example.dev"},
 		{host: "[fd00::1]:80", want: "fd00::1"},
-		{host: "", want: "sandbox-42/checkout"},
+		{host: "", want: "preview-42/checkout"},
 	}
 	for _, tt := range tests {
-		got := pageAddress(&http.Request{Host: tt.host}, "sandbox-42", "checkout")
+		got := pageAddress(&http.Request{Host: tt.host}, "preview-42", "checkout")
 		assert.Equal(t, tt.want, got, tt.host)
 	}
 }

@@ -37,12 +37,12 @@ func TestAddresses(t *testing.T) {
 		value string
 		want  []string
 	}{
-		{"postgres://app:secret@postgres.sandbox:5432/shop?sslmode=disable", []string{"postgres.sandbox"}},
+		{"postgres://app:secret@postgres.dev:5432/shop?sslmode=disable", []string{"postgres.dev"}},
 		{"jdbc:postgresql://db:5432/orders", []string{"db"}},
 		{"mongodb://mongo-0.mongo:27017,mongo-1.mongo:27017/app", []string{"mongo-0.mongo", "mongo-1.mongo"}},
 		{"redis:6379", []string{"redis"}},
 		{"kafka-0.kafka-headless.messaging.svc.cluster.local:9092", []string{"kafka-0.kafka-headless.messaging.svc.cluster.local"}},
-		{"postgres.sandbox", []string{"postgres.sandbox"}},
+		{"postgres.dev", []string{"postgres.dev"}},
 		{"https://api.stripe.com/v1", []string{"api.stripe.com"}},
 		{"api", nil},
 		{"8080", nil},
@@ -84,23 +84,23 @@ func depService(namespace, name string, headless bool, selector map[string]strin
 
 func TestResolve(t *testing.T) {
 	services := map[string]map[string]corev1.Service{
-		"sandbox": {
-			"postgres":    *depService("sandbox", "postgres", false, map[string]string{"app": "postgres"}),
-			"postgres-hl": *depService("sandbox", "postgres-hl", true, map[string]string{"app": "postgres"}),
-			"external":    *depService("sandbox", "external", false, nil),
+		"dev": {
+			"postgres":    *depService("dev", "postgres", false, map[string]string{"app": "postgres"}),
+			"postgres-hl": *depService("dev", "postgres-hl", true, map[string]string{"app": "postgres"}),
+			"external":    *depService("dev", "external", false, nil),
 		},
 		"messaging": {"nats": *depService("messaging", "nats", false, map[string]string{"app": "nats"})},
 	}
 	sources := map[workloadKey]workloadSource{
-		{"sandbox", v1alpha1.TargetKindStatefulSet, "postgres"}: {template: corev1.PodTemplateSpec{
+		{"dev", v1alpha1.TargetKindStatefulSet, "postgres"}: {template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "postgres", "tier": "db"}}}},
 		{"messaging", v1alpha1.TargetKindStatefulSet, "nats"}: {template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "nats"}}}},
-		// The same labels in another namespace aren't behind sandbox's Service.
+		// The same labels in another namespace aren't behind dev's Service.
 		{"messaging", v1alpha1.TargetKindStatefulSet, "postgres"}: {template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "postgres"}}}},
 	}
-	postgres := workloadKey{"sandbox", v1alpha1.TargetKindStatefulSet, "postgres"}
+	postgres := workloadKey{"dev", v1alpha1.TargetKindStatefulSet, "postgres"}
 	nats := workloadKey{"messaging", v1alpha1.TargetKindStatefulSet, "nats"}
 
 	tests := []struct {
@@ -109,12 +109,12 @@ func TestResolve(t *testing.T) {
 		headless bool
 	}{
 		{host: "postgres", want: &postgres},
-		{host: "postgres.sandbox", want: &postgres},
-		{host: "postgres.sandbox.svc", want: &postgres},
-		{host: "postgres.sandbox.svc.cluster.local", want: &postgres},
+		{host: "postgres.dev", want: &postgres},
+		{host: "postgres.dev.svc", want: &postgres},
+		{host: "postgres.dev.svc.cluster.local", want: &postgres},
 		{host: "postgres-hl", want: &postgres, headless: true},
 		{host: "postgres-0.postgres-hl", want: &postgres, headless: true},
-		{host: "postgres-0.postgres-hl.sandbox.svc.cluster.local", want: &postgres, headless: true},
+		{host: "postgres-0.postgres-hl.dev.svc.cluster.local", want: &postgres, headless: true},
 		{host: "nats.messaging", want: &nats},
 		{host: "postgres-0.postgres"},
 		{host: "nats"},
@@ -123,7 +123,7 @@ func TestResolve(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
-			got := resolve(address{host: tt.host}, "sandbox", services, sources)
+			got := resolve(address{host: tt.host}, "dev", services, sources)
 			if tt.want == nil {
 				assert.Empty(t, got)
 				return
@@ -195,14 +195,14 @@ func TestScanCluster_FindsDependencies(t *testing.T) {
 	got := byName(report)
 	assert.Equal(t, []Dependency{
 		{Namespace: testNamespace, Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Via: "DATABASE_URL",
-			Address: "postgres://shop:***@postgres:5432/shop", Declared: true},
+			Address: "postgres://shop:***@postgres:5432/shop", Declared: true, Source: SourceEnvironment},
 		{Namespace: messaging, Kind: v1alpha1.TargetKindStatefulSet, Name: "nats", Via: "NATS_URL",
-			Address: "nats://nats.messaging:4222"},
+			Address: "nats://nats.messaging:4222", Source: SourceEnvironment},
 	}, got["checkout-api"].Dependencies,
 		"a password is never shown; another namespace is followed; its own Service isn't a dependency")
 	assert.Equal(t, []Dependency{
 		{Namespace: testNamespace, Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Via: "PGHOST",
-			Address: "postgres-0.postgres-hl", Headless: true},
+			Address: "postgres-0.postgres-hl", Headless: true, Source: SourceEnvironment},
 	}, got["worker"].Dependencies, "from a ConfigMap, through a headless Service's pod")
 	assert.Empty(t, got["plain"].Dependencies, "a bare word isn't an address")
 	require.Len(t, got["reporter"].Dependencies, 1, "two addresses for postgres are one dependency")

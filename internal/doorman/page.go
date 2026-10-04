@@ -34,8 +34,9 @@ var pageHTML string
 
 var pageTemplate = template.Must(template.New("page").Parse(pageHTML))
 
-// hybernateMark is the Hybernate snowflake, drawn on the page and its footer.
-const hybernateMark = "M20.79,13.95L18.46,14.57L16.46,12.57L18.46,10.57L20.79,11.19C21.15,11.28 21.52,11.06 21.6,10.7C21.69," +
+// Mark is the Hybernate snowflake as an SVG path, drawn on the waking-up page
+// and the scan report.
+const Mark = "M20.79,13.95L18.46,14.57L16.46,12.57L18.46,10.57L20.79,11.19C21.15,11.28 21.52,11.06 21.6,10.7C21.69," +
 	"10.34 21.47,9.97 21.11,9.89L18.79,9.27L19.41,6.95C19.5,6.59 19.27,6.22 18.91,6.14C18.56,6.05 18.19,6.27 18.1," +
 	"6.63L17.5,8.95L15.5,10.95L13,8.45V5.86L14.79,4.07C15.08,3.78 15.08,3.29 14.79,3C14.5,2.71 14,2.71 13.71,3L12," +
 	"4.71L10.29,3C10,2.71 9.5,2.71 9.21,3C8.92,3.29 8.92,3.78 9.21,4.07L11,5.86V8.45L8.5,10.95L6.5,8.95L5.9,6.63C5.81," +
@@ -109,7 +110,7 @@ func isPageLoad(head []byte) (*http.Request, bool) {
 // nothing caches it or mistakes it for the app, and the connection closes
 // after it.
 func writePage(w io.Writer, req *http.Request, data pageData) error {
-	data.Mark = hybernateMark
+	data.Mark = Mark
 	refresh := pageRefresh
 	if data.Ready {
 		refresh = pageReadyRefresh

@@ -1,6 +1,6 @@
 # kubectl Plugin
 
-The `kubectl hybernate` plugin scans your clusters for idle workloads, ends dry-run for workloads you've opted in, and wakes paused ones. Its commands use the namespace of your current kubeconfig context unless you pass `-n`, as kubectl does.
+The `kubectl hybernate` plugin scans a cluster for idle workloads, ends dry-run for workloads you've opted in, and wakes paused ones. Its commands use the namespace of your current kubeconfig context unless you pass `-n`, as kubectl does.
 
 ## Installation
 
@@ -41,7 +41,7 @@ The `kubectl hybernate` plugin scans your clusters for idle workloads, ends dry-
     # Binary is at bin/kubectl-hybernate
     ```
 
-## Scan Your Clusters
+## Scan a Cluster
 
 ```bash
 kubectl hybernate scan
@@ -51,16 +51,22 @@ kubectl hybernate scan
 staging (EKS us-east-1): 214 workloads in 38 namespaces
 
   Hybernate has 12 workloads paused right now, freeing $1.84 an hour.
+  Hybernate has saved $96 this month pausing 14 live workloads.
+  3 workloads are in dry-run: measured by Hybernate since starting, they would have slept 312 hours, freeing $41,
+  about $140 a month.
+  4 workloads are scaled to zero by hand; Hybernate can pause them while idle and wake them on the
+  next request instead.
   61 workloads are idle right now, reserving 48.0 vCPU and 190.0 GiB of memory.
   They cost $3,180/month while running, $4.36 an hour: each hour asleep frees that.
-  Replaying the last 7 days, Hybernate would have paused 58 workloads for 6,120 hours in all, waking them 214 times,
+  Replaying the last 7 days, Hybernate would have paused 58 of 190 unmanaged workloads for 6,120 hours in all,
   and freed $1,240: about $5,380/month.
 
-  NAMESPACE    WORKLOAD               STATE              CPU   REPLICAS   COST/MO   IDLE           ASLEEP   WAKES   FREES/MO   WHY
-  sandbox-42   statefulset/postgres   idle               0%    1          $140      168h of 168h   167h     0       $139       CPU 0%; not deployed in 23 days
-  sandbox-7    deployment/api         idle (dry-run)     1%    2          $96       131h of 168h   112h     9       $64        no activity for 5h
-  sandbox-3    deployment/web         paused (managed)   -     2          $48       -              -        -       -          paused 3h ago
-  payments     deployment/ledger      active             64%   3          $210      12h of 168h    0h       0       $0         CPU 64%
+  NAMESPACE    WORKLOAD               STATE                BECAUSE                                                  COST/MO   SAVED THIS MONTH   COULD SLEEP   WAKES   COULD SAVE/MO
+  preview-42   statefulset/postgres   idle (unmanaged)     CPU under 1% of its request; last deployed 23 days ago   $140      -                  167h          0       $139
+  preview-7    deployment/api         idle (dry-run)       no activity for 5h; measuring since Oct 1                $96       -                  41h           4       $40
+  preview-3    deployment/web         paused (live)        paused 3h ago                                            $48       $12                -             -       -
+  preview-9    deployment/demo        paused (unmanaged)   scaled to zero, not by Hybernate                         $0        -                  -             -       -
+  payments     deployment/ledger      active (unmanaged)   CPU 64% of its request                                   $210      -                  0h            0       $0
   ...
 
 Notes:
@@ -73,77 +79,91 @@ Notes:
 **How it decides a workload is idle**, using the same signals Hybernate uses to pause:
 
 - **Workloads Hybernate manages:** the activity clock it keeps for them, which already combines every source configured, including Prometheus queries. Idle means no activity for `idleAfter`; the scan says when Hybernate is holding one awake, for example for its dependents.
-- **Other workloads:** what the scan can see without Hybernate. Any of these makes a workload active: CPU at or above 10% of what it requests, a rollout in the last hour, a `hybernate.io/last-activity` annotation in the last hour, or a `hybernate.io/active-until` in the future. Otherwise, with CPU measured, it's idle.
+- **Other workloads:** what the scan can see without Hybernate. Any of these makes a workload active: CPU at or above `--cpu-threshold` (10% by default) of what it requests, a rollout within `--idle-after` (1h by default), a `hybernate.io/last-activity` annotation within it, or a `hybernate.io/active-until` in the future. Otherwise, with CPU measured, it's idle.
 - **Workloads it can't judge**, because they set no CPU requests or have no metrics yet, are listed in the notes rather than the table.
 
-**History from Prometheus:** when the cluster has a Prometheus, the scan replays Hybernate's activity clock over the last week of each workload's CPU and rollouts, as if Hybernate had managed it with `idleAfter: 1h`:
+**History from Prometheus:** when the cluster has a Prometheus, the scan replays Hybernate's activity clock over the last week of each workload's CPU and rollouts, as if Hybernate had managed it with `--idle-after` and `--cpu-threshold`:
 
 - It finds Prometheus by the Services the Prometheus Operator (and so kube-prometheus-stack) and the community Helm chart create, and queries it through the API server's service proxy, so there's no port-forward or URL to give. Pass `--prometheus-url` for one outside the cluster, such as Thanos, Mimir, or a managed Prometheus.
 - It reads CPU per container from cAdvisor's `container_cpu_usage_seconds_total`, which every common setup scrapes, at five-minute steps, and matches pods to their workload by name. Sidecars added at pod creation are left out of activity, as for the activity clock.
 - A step counts as active when the workload's own CPU is at or above the threshold of what its running pods request, or it rolled out. After `--idle-after` with none, it would be asleep until the next, which is one wake.
-- **IDLE** is the running hours below the threshold; **ASLEEP** is the running hours it would have been paused; **WAKES** is how many times it would have been woken; **FREES/MO** is what its pods cost during ASLEEP, over an average month at the same rate.
-- The headline sums workloads Hybernate doesn't pause yet: unmanaged ones and those in dry-run. Managed workloads are replayed too, for comparison, but not counted again.
+- **STATE** is right now: idle means no activity for `--idle-after`, so Hybernate would pause it now. Each money and history cell has one source:
+    - **COULD SLEEP** and **WAKES** are what Hybernate measured for a workload in dry-run, since dry-run started (BECAUSE says when), and for an unmanaged workload come from the replay: had Hybernate been managing it, the running hours it would have been paused, after waiting `--idle-after` from each activity, and how many times activity would have arrived while it was asleep, each starting it again and making whoever caused it wait.
+    - **SAVED THIS MONTH**, for live workloads, is what Hybernate has freed pausing it since the 1st, from the ManagedWorkload's `status.cost`, priced at the rates Hybernate uses for the workload.
+    - **COULD SAVE/MO**, for workloads Hybernate doesn't pause yet, is what pausing would free a month: what Hybernate measured for one in dry-run, the same figure its BECAUSE line gives, or what the replay estimates for an unmanaged one.
+- A live workload isn't replayed: while it's paused, there are no pods for Prometheus to record. Its pauses are what SAVED THIS MONTH counts.
 - Requests and activity annotations aren't recorded in Prometheus, so the replay only knows CPU and rollouts, and a workload used with little CPU can look like it would sleep more than it would. Requests and prices are today's.
 - If Prometheus keeps less than the window, the replay covers what it keeps, and the report says so. Without Prometheus, or without permission to reach it, the scan judges from CPU right now, and says why.
 
 **Dependencies:** the scan reads each workload's environment variables, from literal values and ConfigMaps, and lists the workloads they point at:
 
 ```
-  Dependencies found in environment variables (suggestions; never applied):
-  sandbox-42   deployment/checkout-api   ->   statefulset/postgres         DATABASE_URL=postgres://shop:***@postgres:5432/shop   already declared
-  sandbox-42   deployment/checkout-api   ->   messaging/statefulset/nats   NATS_URL=nats://nats.messaging:4222
-  sandbox-42   deployment/worker         ->   statefulset/postgres         PGHOST=postgres-0.postgres-hl                          headless
-  The doorman can't hold connections to a headless address, so a request won't wake what's behind it.
-  Add the dependency to the workloads that use one:
-    sandbox-42/deployment/worker: hybernate.io/depends-on: "statefulset/postgres"
+  Dependencies Hybernate wakes and holds with the workloads that need them: 3 dependencies
+  preview-42   deployment/checkout-api   ->   statefulset/postgres         DATABASE_URL   declared
+  preview-42   deployment/checkout-api   ->   messaging/statefulset/nats   NATS_URL       connected once Hybernate manages it
+  preview-42   deployment/worker         ->   statefulset/postgres         PGHOST         connected once Hybernate manages it
 ```
 
-- An address counts when it names a Service in a scanned namespace, in any form cluster DNS gives it (`postgres`, `postgres.sandbox-42`, `postgres.sandbox-42.svc.cluster.local`, or a headless Service's pod, `postgres-0.postgres-hl`), inside a URL, a `host:port`, or a list of either. The workload is the one the Service's selector picks. A bare word on its own, such as `MODE=postgres`, isn't taken for an address.
+- An address counts when it names a Service in a scanned namespace, in any form cluster DNS gives it (`postgres`, `postgres.preview-42`, `postgres.preview-42.svc.cluster.local`, or a headless Service's pod, `postgres-0.postgres-hl`), inside a URL, a `host:port`, or a list of either. The workload is the one the Service's selector picks. A bare word on its own, such as `MODE=postgres`, isn't taken for an address.
 - Variable names don't matter, and Service names come from the cluster, not a list the scan keeps.
 - Passwords in URLs are shown as `***`, and query strings, which can hold credentials, are dropped.
-- **Headless** dependencies are the ones to act on: connections to a headless address go straight to pods, so the doorman can't hold them, and only [`dependsOn`](../concepts/dependencies.md) wakes the dependency first. A dependency reached through a normal Service is woken by the first request to it anyway.
+- Hybernate wakes a dependency with the workload that needs it, so the first request doesn't wait for it too, and keeps it up while that workload is; see [Dependencies](../concepts/dependencies.md). The status says whether that's in place: **declared** with `hybernate.io/depends-on`, **connected** by Hybernate, **connected once Hybernate manages** the workload, or **not connected yet**, for one Hybernate manages but hasn't applied it to.
 - Secrets are never read, so addresses set there, and ones built in code or read from files, aren't found. The notes say which workloads take variables from Secrets.
 
 **What the numbers mean:**
 
 - Costs are what the workloads' requests cost while running, sidecars included. Without `--cpu-price` and `--memory-price`, they use assumed list prices from AWS on-demand in us-east-1, and the report says so.
-- Without history, the scan shows what idle workloads cost and what each hour asleep frees, not a monthly saving: from one moment it can't tell how often a workload would be woken. To measure savings once Hybernate is installed, label workloads `hybernate.io/managed=true` and annotate them `hybernate.io/dry-run=true`: Hybernate measures how often it would have paused them, for how long, and what that would have freed, without ever pausing them. The scan then lists that for each one under **Measured in dry-run**, with the `kubectl hybernate enable` command to start pausing.
+- Without history, the scan shows what idle workloads cost and what each hour asleep frees, not a monthly saving: from one moment it can't tell how often a workload would be woken. To measure savings once Hybernate is installed, label workloads `hybernate.io/managed=true` and annotate them `hybernate.io/dry-run=true`: Hybernate measures how often it would have paused them, for how long, and what that would have freed, without ever pausing them. The scan then shows it in each one's COULD SLEEP, WAKES, and COULD SAVE/MO, with BECAUSE saying since when, a total in the headline, and the `kubectl hybernate enable` command to start pausing. It's from Hybernate's own activity clock, which sees more than the history replay, so it's what to judge going live by.
 - An hour asleep frees capacity; it becomes money when your cluster autoscaler removes it.
-- The WHY column gives the evidence, then facts such as a workload not deployed in a week or more.
+- BECAUSE gives the evidence for the state, then facts such as when a workload was last deployed, if a week or more ago.
 
-**Cluster names:** EKS and GKE contexts are shortened to the cluster with its provider and region, such as `staging (EKS us-east-1)` for `arn:aws:eks:us-east-1:123456789012:cluster/staging`. Any other context is shown as named, and two that would shorten to the same name are shown in full. JSON and YAML keep the full context name.
+**The HTML report:** run in a terminal, the scan also writes the same report as a web page and opens it in your browser. It's one self-contained file, with no scripts, fonts, or images loaded from anywhere, so it can be emailed or attached, and it prints cleanly to PDF. It's written for whoever you send it to:
 
-Workloads scaled to zero by something other than Hybernate, and ones labelled `hybernate.io/ignore=true`, aren't counted.
+- two headline figures: what Hybernate has saved this month, and what pausing could save a month (measured for dry-run workloads, estimated from history for unmanaged ones), as a share of what the workloads cost; without either, what idle workloads cost while running
+- four facts: what the workloads cost, what's idle right now, how many unmanaged workloads would have slept, and how many Hybernate manages
+- a table by namespace (with a filter), every workload with the same columns as the terminal (sortable, with a filter), and the dependencies found
+- what the numbers mean, in plain words, and the next steps
+
+Dependency addresses are left out of the page, since it's meant to be passed around; the terminal and JSON keep them. A scan covers one cluster, the current kubeconfig context or the one you name with `--context`; [Hybernate Hub](https://okedeji.io/hybernate/hub) shows every cluster together.
+
+The file goes to your temporary directory unless you pass `--html FILE`. It opens only when the table is shown in a terminal on a machine with a desktop; piped output, `-o json`, CI, and SSH sessions get no report unless you ask for one with `--html`. `--open=false` keeps it from opening.
+
+**Cluster names:** EKS and GKE contexts are shortened to the cluster with its provider and region, such as `staging (EKS us-east-1)` for `arn:aws:eks:us-east-1:123456789012:cluster/staging`. Any other context is shown as named. JSON and YAML keep the full context name.
+
+**STATE** is what the workload is doing right now, and the bracket how Hybernate is involved: **unmanaged**, not at all; **dry-run**, it measures but never pauses; **live**, it pauses the workload while idle. A workload someone scaled to zero shows as `paused (unmanaged)`: it costs nothing now, but nothing will wake it on a request, and the headline counts it apart from what Hybernate has paused. Workloads labelled `hybernate.io/ignore=true` aren't listed.
 
 ```bash
-# Several clusters, with a combined total
-kubectl hybernate scan --context staging --context sandboxes
-kubectl hybernate scan --all-contexts
+# Another cluster in your kubeconfig
+kubectl hybernate scan --context staging
 
 # Some namespaces, as JSON or YAML, at your own prices
-kubectl hybernate scan -n sandbox-42 -n preview-918 -o json --cpu-price 0.045 --memory-price 0.006
+kubectl hybernate scan -n preview-42 -n preview-918 -o json --cpu-price 0.045 --memory-price 0.006
 
 # A month of history from a Prometheus outside the cluster, with a 2h idleAfter
 kubectl hybernate scan --window 30d --idle-after 2h --prometheus-url https://thanos.example.com
 
 # CPU right now only
 kubectl hybernate scan --window 0
+
+# Save the report to send around
+kubectl hybernate scan --html workload-scan.html
 ```
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--context` | | current context | Kubeconfig context to scan; repeat for several |
-| `--all-contexts` | | `false` | Scan every context in the kubeconfig |
+| `--context` | | current context | Kubeconfig context of the cluster to scan |
 | `--namespace` | `-n` | all you can read | Namespace to scan; repeat for several |
 | `--exclude-namespaces` | | `kube-system`, `kube-public`, `kube-node-lease` | Namespaces to skip |
 | `--output` | `-o` | `table` | `table`, `json`, or `yaml` |
 | `--limit` | | `25` | Workloads listed per cluster in the table, idle first; `0` for all |
-| `--cpu-threshold` | | `10` | CPU use, as a percentage of requests, below which a workload counts as idle |
+| `--cpu-threshold` | | `10` | CPU use, as a percentage of requests, at which a workload counts as active, now and in the replay. Workloads Hybernate manages use their own setting |
 | `--cpu-price` | | `0.031` | Your price per vCPU-hour, in dollars |
 | `--memory-price` | | `0.004` | Your price per GiB-hour of memory, in dollars |
 | `--window` | | `7d` | How much Prometheus history to replay, such as `7d` or `36h`; `0` judges from CPU right now only |
-| `--idle-after` | | `1h` | How long without activity before the replay pauses a workload, as Hybernate's `idleAfter` |
+| `--idle-after` | | `1h` | How long without activity makes a workload idle, now and in the replay, as Hybernate's `idleAfter`. Workloads Hybernate manages use their own setting |
 | `--prometheus-url` | | found in the cluster | Prometheus API to read history from |
+| `--html` | | a temporary file | Save the HTML report to this file, to share |
+| `--open` | | `true` | Open the HTML report in your browser, when the table is shown in a terminal |
 
 Your user needs to read Deployments, StatefulSets, ReplicaSets, Pods, and pod metrics in the namespaces scanned, and to list namespaces unless you name them with `-n`. The standard `view` role covers it. Reading history through the service proxy also needs `get` on `services/proxy` for the Prometheus Service, which `view` doesn't include. Without it, the scan judges from CPU right now and prints what an admin can run to let you, for that one Service and nothing else:
 
@@ -167,7 +187,7 @@ waking staging/my-api...
 staging/my-api is Running after 23s
 ```
 
-`wake` marks the ManagedWorkload as active now by setting its `hybernate.io/last-activity` annotation, the same [activity annotation](../concepts/idle-detection.md#activity-annotations) a sandbox UI would set. A paused workload wakes, along with the workloads it [depends on](../concepts/dependencies.md); a running one has its idle clock restarted. It then waits until the workload is Running.
+`wake` marks the ManagedWorkload as active now by setting its `hybernate.io/last-activity` annotation, the same [activity annotation](../concepts/idle-detection.md#activity-annotations) a developer portal would set. A paused workload wakes, along with the workloads it [depends on](../concepts/dependencies.md); a running one has its idle clock restarted. It then waits until the workload is Running.
 
 ```bash
 # Keep it awake for the next two hours, e.g. for a demo
@@ -193,9 +213,9 @@ Your user needs `get` and `patch` on `managedworkloads` in the namespace.
 A workload opted in with `hybernate.io/dry-run: "true"` is measured but never paused. `enable` ends that, so Hybernate starts pausing it while idle:
 
 ```bash
-kubectl hybernate enable checkout-api -n sandbox-42
-kubectl hybernate enable statefulset/postgres -n sandbox-42
-kubectl hybernate enable --all -n sandbox-42
+kubectl hybernate enable checkout-api -n preview-42
+kubectl hybernate enable statefulset/postgres -n preview-42
+kubectl hybernate enable --all -n preview-42
 ```
 
 ```

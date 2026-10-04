@@ -50,7 +50,22 @@ type Dependency struct {
 	Headless bool `json:"headless"`
 	// Declared means the workload's ManagedWorkload already depends on it.
 	Declared bool `json:"declared"`
+	// Source is how it was found: in the workload's environment, or, once
+	// Hybernate learns them, from a wake it saw the workload cause.
+	Source DependencySource `json:"source"`
+	// Connected means Hybernate has applied it, waking and holding the
+	// dependency with the workload. Hybernate doesn't apply the
+	// dependencies it finds yet, so this stays false until it does.
+	Connected bool `json:"connected,omitempty"`
 }
+
+// DependencySource is how a dependency was found.
+type DependencySource string
+
+const (
+	SourceEnvironment DependencySource = "environment"
+	SourceWake        DependencySource = "wake"
+)
 
 type workloadKey struct {
 	namespace string
@@ -112,7 +127,7 @@ func (s *Scanner) findDependencies(ctx context.Context, workloads []Workload, so
 					}
 					w.Dependencies = addDependency(w.Dependencies, Dependency{
 						Namespace: target.key.namespace, Kind: target.key.kind, Name: target.key.name,
-						Via: v.name, Address: shown(addr.raw), Headless: target.headless,
+						Via: v.name, Address: shown(addr.raw), Headless: target.headless, Source: SourceEnvironment,
 						Declared: declares(source.managed, w.Namespace, target.key),
 					})
 				}

@@ -222,7 +222,7 @@ func TestReconcileDoorman_PortsAreUniqueAcrossWorkloads(t *testing.T) {
 	want, err := doorman.AllocatePort("default", "api", "http", nil)
 	require.NoError(t, err)
 	other := lifecycleWorkload("other", nil, v1alpha1.PhasePaused)
-	other.Namespace = "sandbox-9"
+	other.Namespace = "preview-9"
 	other.UID = "other-uid"
 	other.Status.Doorman = []v1alpha1.DoormanRoute{{Service: "other", PortName: "http", DoormanPort: want}}
 	r := doormanReconciler(t, workload, other, doormanEndpoints("10.0.0.7"),
@@ -241,7 +241,7 @@ func TestReconcileDoorman_MovesOffAPortTakenByAnotherWorkload(t *testing.T) {
 	const taken = int32(21000)
 	workload.Status.Doorman = []v1alpha1.DoormanRoute{{Service: "api", PortName: "http", DoormanPort: taken}}
 	other := lifecycleWorkload("other", nil, v1alpha1.PhasePaused)
-	other.Namespace = "sandbox-9"
+	other.Namespace = "preview-9"
 	other.UID = "other-uid"
 	other.Status.Doorman = []v1alpha1.DoormanRoute{{Service: "other", PortName: "http", DoormanPort: taken}}
 	r := doormanReconciler(t, workload, other, doormanEndpoints("10.0.0.7"),

@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -59,7 +60,7 @@ func TestReplay(t *testing.T) {
 		name       string
 		replay     replay
 		wantSleep  float64
-		wantIdle   float64
+		wantQuiet  float64
 		wantWakes  int
 		wantFreed  float64
 		wantRuning float64
@@ -73,7 +74,7 @@ func TestReplay(t *testing.T) {
 			name:   "idle all week sleeps after the first idleAfter",
 			replay: week(func(time.Time) float64 { return 0.01 }),
 			// Asleep from the step an hour after the start to the end.
-			wantSleep: 168 - 1, wantIdle: 168, wantRuning: 168,
+			wantSleep: 168 - 1, wantQuiet: 168, wantRuning: 168,
 			wantFreed: (168 - 1) * 2 * 0.05,
 		},
 		{
@@ -82,7 +83,7 @@ func TestReplay(t *testing.T) {
 			// Five 8-hour days are active. The clock runs out an hour after
 			// the last busy step, at 16:55, so 55 minutes after each day are
 			// awake. The rest, less the first hour, is asleep.
-			wantSleep: 168 - 5*8 - 5*55.0/60 - 1, wantIdle: 168 - 5*8, wantRuning: 168, wantWakes: 5,
+			wantSleep: 168 - 5*8 - 5*55.0/60 - 1, wantQuiet: 168 - 5*8, wantRuning: 168, wantWakes: 5,
 			wantFreed: (168 - 5*8 - 5*55.0/60 - 1) * 2 * 0.05,
 		},
 	}
@@ -92,7 +93,7 @@ func TestReplay(t *testing.T) {
 
 			assert.InDelta(t, 168, h.Hours, 0.01)
 			assert.InDelta(t, tt.wantRuning, h.RunningHours, 0.01)
-			assert.InDelta(t, tt.wantIdle, h.IdleHours, 0.01)
+			assert.InDelta(t, tt.wantQuiet, h.QuietHours, 0.01)
 			assert.InDelta(t, tt.wantSleep, h.SleepHours, 0.01)
 			assert.Equal(t, tt.wantWakes, h.Wakes)
 			assert.InDelta(t, tt.wantFreed, h.Freed, 0.01)
@@ -260,4 +261,64 @@ func TestScanCluster_SaysWhenPrometheusKeepsLessHistory(t *testing.T) {
 	h := byName(report)["idle-api"].History
 	require.NotNil(t, h)
 	assert.InDelta(t, h.Freed/h.Hours*hoursPerMonth, h.MonthlyFreed, 0.001, "a month at the rate it covered")
+}
+
+// Workloads Hybernate manages are replayed with their own idleAfter;
+// others with the scan's.
+func TestScanCluster_ReplaysEachWithItsIdleAfter(t *testing.T) {
+	quiet := func(time.Time) float64 { return 0 }
+	f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{testNamespace: {
+		{pod: "plain-7d9f8c6b5-abcde", container: "main", cores: quiet},
+		{pod: "managed-7d9f8c6b5-abcde", container: "main", cores: quiet},
+	}}}
+	objs := deploymentWithRollout("plain", testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, makePodMetrics("plain", testNamespace, "1m", "20Mi"))
+	objs = append(objs, deploymentWithRollout("managed", testNamespace, 1, 30*24*time.Hour)...)
+	mw := managedFor("managed", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning})
+	mw.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: 3 * time.Hour}}
+	objs = append(objs, makePodMetrics("managed", testNamespace, "1m", "20Mi"), mw)
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, 2*time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	got := byName(report)
+	require.NotNil(t, got["plain"].History)
+	require.NotNil(t, got["managed"].History)
+	assert.InDelta(t, 168-2, got["plain"].History.SleepHours, 0.1, "the scan's --idle-after")
+	assert.InDelta(t, 168-3, got["managed"].History.SleepHours, 0.1, "its own idle-after")
+}
+
+// A managed workload's own CPU threshold decides whether its CPU is
+// activity, now and in the replay; others use the scan's.
+func TestScanCluster_EachWithItsCPUThreshold(t *testing.T) {
+	busyish := func(time.Time) float64 { return 0.02 } // 20% of 100m
+	f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{testNamespace: {
+		{pod: "plain-7d9f8c6b5-abcde", container: "main", cores: busyish},
+		{pod: "managed-7d9f8c6b5-abcde", container: "main", cores: busyish},
+	}}}
+	objs := deploymentWithRollout("plain", testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, makePodMetrics("plain", testNamespace, "20m", "20Mi"))
+	objs = append(objs, deploymentWithRollout("managed", testNamespace, 1, 30*24*time.Hour)...)
+	mw := managedFor("managed", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
+		Activity: &v1alpha1.ActivityStatus{LastActivityTime: metav1.NewTime(scanTime.Add(-5 * time.Hour)),
+			LastActivitySource: v1alpha1.ActivitySourceCPU}})
+	mw.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{Activity: &v1alpha1.ActivitySpec{CPUThreshold: 50}}
+	objs = append(objs, makePodMetrics("managed", testNamespace, "20m", "20Mi"), mw)
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	got := byName(report)
+	assert.Equal(t, StateActive, got["plain"].State, "20% is above the scan's 10%")
+	assert.Equal(t, StateIdle, got["managed"].State, "but under its own 50%")
+	require.NotNil(t, got["plain"].History)
+	require.NotNil(t, got["managed"].History)
+	assert.Zero(t, got["plain"].History.SleepHours)
+	assert.InDelta(t, 168-1, got["managed"].History.SleepHours, 0.1)
 }
