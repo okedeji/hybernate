@@ -122,7 +122,7 @@ func TestScanCluster_Clues(t *testing.T) {
 
 	got := byName(scanWorkloads(t, objs...))
 
-	assert.Equal(t, []string{"not deployed in 23 days"}, got["old"].Clues)
+	assert.Equal(t, []string{"last deployed 23 days ago"}, got["old"].Clues)
 	assert.Empty(t, got["fresh"].Clues)
 	assert.Empty(t, got["web"].Clues, "a namespace's name says nothing certain about its use")
 	require.NotNil(t, got["old"].LastDeployed)
@@ -138,12 +138,27 @@ func TestScanCluster_SaysWhyCPUWasntMeasured(t *testing.T) {
 	assert.Equal(t, "no CPU requests", got["sidecarless"].Unmeasured)
 }
 
-func TestScanCluster_SkipsWhatIsntInPlay(t *testing.T) {
+func TestScanCluster_SkipsIgnored(t *testing.T) {
 	ignored := makeDeployment("ignored", testNamespace, 1, "100m", "128Mi", map[string]string{v1alpha1.LabelIgnore: "true"})
-	report := scanWorkloads(t, makeDeployment("off", testNamespace, 0, "100m", "128Mi", nil), ignored)
 
-	assert.Empty(t, report.Workloads)
-	assert.Contains(t, report.Notes, "1 workload is already scaled to zero, not counted")
+	assert.Empty(t, scanWorkloads(t, ignored).Workloads)
+}
+
+// A workload someone scaled to zero is paused, but not by Hybernate: it
+// costs nothing now and nothing will wake it, so it's listed and counted
+// apart from what Hybernate has paused.
+func TestScanCluster_ScaledToZeroByHand(t *testing.T) {
+	report := scanWorkloads(t, makeDeployment("off", testNamespace, 0, "100m", "128Mi", nil))
+
+	require.Len(t, report.Workloads, 1)
+	w := report.Workloads[0]
+	assert.Equal(t, StatePaused, w.State)
+	assert.True(t, w.ScaledByHand)
+	assert.False(t, w.Managed)
+	assert.Equal(t, "scaled to zero, not by Hybernate", w.Reason)
+	assert.Zero(t, w.HourlyCost)
+	assert.Equal(t, 1, report.Totals.ScaledToZero)
+	assert.Zero(t, report.Totals.Paused, "Hybernate didn't pause it")
 }
 
 func TestScanCluster_MarksManagedWorkloads(t *testing.T) {
@@ -178,11 +193,11 @@ func TestScanCluster_WithoutTheMetricsAPI(t *testing.T) {
 
 func TestNamespaces(t *testing.T) {
 	ns := func(name string) runtime.Object { return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}} }
-	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(ns("sandbox-42"), ns("kube-system"), ns("api")).Build()
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(ns("preview-42"), ns("kube-system"), ns("api")).Build()
 
 	got, err := Namespaces(context.Background(), c, nil, SystemNamespaces)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"api", "sandbox-42"}, got)
+	assert.Equal(t, []string{"api", "preview-42"}, got)
 
 	got, err = Namespaces(context.Background(), c, []string{"kube-system"}, SystemNamespaces)
 	require.NoError(t, err)
@@ -236,7 +251,7 @@ func TestScanCluster_UnmanagedActivitySources(t *testing.T) {
 	assert.Equal(t, "activity annotation 10m ago", got["touched"].Reason)
 	assert.Equal(t, StateIdle, got["expired"].State, "a hold that has ended doesn't keep it awake")
 	assert.Equal(t, StateIdle, got["stale"].State, "activity older than idleAfter doesn't count")
-	assert.Equal(t, "CPU 1%", got["stale"].Reason)
+	assert.Equal(t, "CPU 1% of its request", got["stale"].Reason)
 	assert.Equal(t, StateActive, got["deployed"].State)
 	assert.Equal(t, "deployed 20m ago", got["deployed"].Reason)
 }
@@ -248,7 +263,7 @@ func TestScanCluster_BusyCPUExplainsActivity(t *testing.T) {
 
 	got := byName(scanWorkloads(t, objs...))
 
-	assert.Equal(t, "CPU 900%", got["busy"].Reason)
+	assert.Equal(t, "CPU 900% of its request", got["busy"].Reason)
 }
 
 func managedFor(name string, status v1alpha1.ManagedWorkloadStatus) *v1alpha1.ManagedWorkload {
@@ -359,4 +374,87 @@ func TestMeasured(t *testing.T) {
 			assert.InDelta(t, tt.wantHours*0.5, m.Freed, 0.001, "priced at the scan's hourly cost")
 		})
 	}
+}
+
+// A workload Hybernate doesn't manage is idle after the scan's idleAfter.
+func TestScanCluster_UnmanagedIdleAfter(t *testing.T) {
+	objs := deploymentWithRollout("deployed", testNamespace, 1, 90*time.Minute)
+	objs = append(objs, makePodMetrics("deployed", testNamespace, "1m", "10Mi"))
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	for idleAfter, want := range map[time.Duration]State{time.Hour: StateIdle, 2 * time.Hour: StateActive} {
+		opts := scanOptions(testNamespace)
+		opts.IdleAfter = idleAfter
+		report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+		require.NoError(t, err)
+		assert.Equal(t, want, byName(report)["deployed"].State, "deployed 90m ago, with idleAfter %s", idleAfter)
+	}
+}
+
+// A workload labelled for Hybernate keeps its own idleAfter before Hybernate
+// has started its activity clock.
+func TestScanCluster_ManagedBeforeItsClockStarts(t *testing.T) {
+	mw := managedFor("deployed", v1alpha1.ManagedWorkloadStatus{})
+	mw.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: 2 * time.Hour}}
+	objs := deploymentWithRollout("deployed", testNamespace, 1, 90*time.Minute)
+	objs = append(objs, mw, makePodMetrics("deployed", testNamespace, "1m", "10Mi"))
+
+	got := byName(scanWorkloads(t, objs...))
+
+	assert.Equal(t, StateActive, got["deployed"].State, "deployed 90m ago, with its own idleAfter of 2h")
+}
+
+// What Hybernate saved, what dry-run measured, and what history estimates
+// are summed apart, each for the workloads it applies to.
+func TestScanCluster_SavingsBySource(t *testing.T) {
+	live := managedFor("live", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
+		Cost: &v1alpha1.CostStatus{EstimatedMonthlySavings: "$12.40"}})
+	dry := managedFor("dry", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
+		DryRun: &v1alpha1.DryRunStatus{Since: metav1.NewTime(scanTime.Add(-73 * time.Hour)), Pauses: 2,
+			Slept: metav1.Duration{Duration: 10 * time.Hour}}})
+	dry.Spec.DryRun = true
+	objs := make([]runtime.Object, 0, 8)
+	objs = append(objs, live, dry)
+	for _, name := range []string{"live", "dry", "plain"} {
+		objs = append(objs, deploymentWithRollout(name, testNamespace, 1, 30*24*time.Hour)...)
+		objs = append(objs, makePodMetrics(name, testNamespace, "1m", "10Mi"))
+	}
+
+	report := scanWorkloads(t, objs...)
+	got := byName(report)
+
+	assert.InDelta(t, 12.40, got["live"].SavedThisMonth, 0.001)
+	assert.Zero(t, got["dry"].SavedThisMonth, "dry-run saves nothing yet")
+	require.NotNil(t, got["dry"].Measured)
+	assert.InDelta(t, got["dry"].Measured.Freed/73*hoursPerMonth, got["dry"].Measured.MonthlyFreed, 0.001,
+		"a month at the rate measured since dry-run started")
+	assert.InDelta(t, got["dry"].Measured.MonthlyFreed, CouldSave(got["dry"]), 0.001)
+	assert.Zero(t, CouldSave(got["live"]), "a live workload's saving is already happening")
+	assert.Equal(t, 1, report.Totals.Live)
+	assert.InDelta(t, 12.40, report.Totals.SavedThisMonth, 0.001)
+	assert.Equal(t, 1, report.Totals.DryRun)
+	assert.InDelta(t, got["dry"].Measured.MonthlyFreed, report.Totals.Measured.MonthlyFreed, 0.001)
+}
+
+func TestCPUReason(t *testing.T) {
+	percent := func(n int) *int { return &n }
+	assert.Equal(t, "no CPU use", cpuReason(Workload{CPUPercent: percent(0)}))
+	assert.Equal(t, "CPU under 1% of its request", cpuReason(Workload{CPUPercent: percent(0), CPUMillisUsed: 3}),
+		"a little use that rounds to 0% isn't none")
+	assert.Equal(t, "CPU 64% of its request", cpuReason(Workload{CPUPercent: percent(64), CPUMillisUsed: 640}))
+}
+
+// A would-be pause still under way hasn't been ended by a wake yet.
+func TestMeasured_Wakes(t *testing.T) {
+	now := scanTime
+	idleSince := metav1.NewTime(now.Add(-time.Hour))
+	dry := func(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
+		return &v1alpha1.ManagedWorkload{Spec: v1alpha1.ManagedWorkloadSpec{DryRun: true},
+			Status: v1alpha1.ManagedWorkloadStatus{Phase: phase, LastTransitionTime: &idleSince,
+				DryRun: &v1alpha1.DryRunStatus{Since: metav1.NewTime(now.Add(-48 * time.Hour)), Pauses: 3,
+					Resources: &v1alpha1.ResourceSnapshot{Replicas: 1}}}}
+	}
+
+	assert.Equal(t, 3, measured(dry(v1alpha1.PhaseRunning), 0.1, now).Wakes, "every pause ended")
+	assert.Equal(t, 2, measured(dry(v1alpha1.PhaseIdle), 0.1, now).Wakes, "one still under way")
 }
