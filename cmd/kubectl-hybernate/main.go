@@ -46,6 +46,9 @@ func main() {
 	root := &cobra.Command{
 		Use:   "kubectl-hybernate",
 		Short: "Hybernate kubectl plugin for workload lifecycle management",
+		// Usage is for a mistyped command, which cobra reports before RunE;
+		// an error from the cluster isn't helped by printing the flags.
+		SilenceUsage: true,
 	}
 
 	root.AddCommand(depsCmd(), enableCmd(), scanCmd(), wakeCmd())
