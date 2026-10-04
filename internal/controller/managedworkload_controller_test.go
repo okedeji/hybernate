@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/autoscaler"
 	"github.com/okedeji/hybernate/internal/lifecycle"
 	"github.com/okedeji/hybernate/internal/metrics"
 )
@@ -69,6 +71,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(s))
 	require.NoError(t, appsv1.AddToScheme(s))
+	require.NoError(t, autoscalingv2.AddToScheme(s))
 	require.NoError(t, corev1.AddToScheme(s))
 	require.NoError(t, discoveryv1.AddToScheme(s))
 	return s
@@ -357,7 +360,7 @@ func TestReconcileDelete_RestoresAPausedWorkload(t *testing.T) {
 			}
 			c := builder.Build()
 			r := &Reconciler{Client: c, Scheme: testScheme(t), Recorder: events.NewFakeRecorder(10),
-				pauser:  lifecycle.NewPauser(c),
+				pauser:  lifecycle.NewPauser(c, autoscaler.NewFinder(c)),
 				engines: newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
 				clock:   func() time.Time { return fixedTime }}
 

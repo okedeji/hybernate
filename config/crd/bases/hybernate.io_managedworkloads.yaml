@@ -647,6 +647,11 @@ spec:
                     - replicas
                     - storageBytes
                     type: object
+                  scaledObject:
+                    description: |-
+                      ScaledObject is the KEDA ScaledObject held at zero while the workload
+                      is paused, so KEDA doesn't scale it up. Resuming releases it.
+                    type: string
                 required:
                 - previousReplicas
                 type: object

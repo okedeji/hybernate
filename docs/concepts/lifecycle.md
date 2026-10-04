@@ -61,6 +61,7 @@ The operator sets standard Kubernetes conditions on the CR, each with `Reason`, 
 | `DependencyCycle`, `DependencyNotFound` | A problem with `dependsOn` |
 | `DuplicateTarget` | Another ManagedWorkload manages the same target |
 | `GitOpsConflict` | A GitOps tool undid its last pause; see [Argo CD and Flux](../guides/gitops.md) |
+| `Autoscaled` | An HPA or KEDA ScaledObject scales it, and its range; see [HPA and KEDA](../guides/autoscalers.md) |
 
 ## Events
 

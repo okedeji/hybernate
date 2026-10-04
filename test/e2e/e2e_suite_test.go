@@ -44,6 +44,9 @@ var (
 	// ingressNginxManifest is the project's final release; it's archived, but
 	// still widely run, so wake on request is tested through it.
 	ingressNginxManifest = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/baremetal/deploy.yaml"
+	// kedaManifest is pinned so the autoscaler specs don't change under
+	// the suite; its images are preloaded by the Makefile.
+	kedaManifest = "https://github.com/kedacore/keda/releases/download/v2.20.2/keda-2.20.2.yaml"
 	// metricsServerManifest is pinned so the idle clock spec doesn't change
 	// under the suite; its image is preloaded by the Makefile.
 	metricsServerManifest = "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml"
