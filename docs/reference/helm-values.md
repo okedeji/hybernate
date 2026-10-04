@@ -47,6 +47,18 @@ When running multiple replicas, leader election ensures only one instance runs r
 
 Memory usage scales with the number of ManagedWorkloads. Each workload's forecast engine state is ~10KB. For 1000 workloads, expect ~10MB of additional memory.
 
+## Namespaces
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `watchNamespaces` | `[]` | Namespaces Hybernate works in. Empty means every namespace. Set, Hybernate gets a Role in each of them instead of a ClusterRole, so Kubernetes itself refuses it anything elsewhere; see [RBAC](#rbac). Passed as `--watch-namespaces`, to the doorman too |
+| `protectedNamespaces` | `[]` | Name patterns, such as `prod-*`, of namespaces Hybernate never manages, as if labelled `hybernate.io/protected=true`, unless one is labelled `hybernate.io/allow-protected=true`. See [Protected namespaces](../guides/opt-in.md#protected-namespaces). Passed as `--protected-namespaces` |
+
+```yaml title="values.yaml"
+watchNamespaces: [preview-1, preview-2, staging]
+protectedNamespaces: ["prod-*", production]
+```
+
 ## Opt-In Defaults
 
 Settings for workloads opted in with the `hybernate.io/managed` label, used when neither the workload nor its namespace sets the annotation. See [Opting In](../guides/opt-in.md#which-setting-wins).
@@ -154,7 +166,7 @@ These are not configurable via values. To override, use Helm post-rendering or K
 
 ## RBAC
 
-The chart creates a ClusterRole with permissions to:
+By default the chart creates a ClusterRole with permissions to:
 
 - Manage `ManagedWorkload` CRs, including creating them for labelled workloads
 - Read Namespaces, for the `hybernate.io/managed` label and settings annotations on them
@@ -168,6 +180,10 @@ The chart creates a ClusterRole with permissions to:
 - Read Services, and manage the EndpointSlices that route paused workloads to the doorman
 
 The doorman has its own ServiceAccount and ClusterRole: it reads ManagedWorkloads and EndpointSlices, patches ManagedWorkloads to wake them, and creates Events.
+
+With `watchNamespaces` set, both get a Role and RoleBinding in each of those namespaces instead, and the doorman has no cluster-wide permission at all. The operator keeps one ClusterRole, to read Namespaces and Nodes, which only a ClusterRole can grant: it can read their labels everywhere, and nothing more. Workloads in other namespaces can't be read, scaled, or opted in, and dependencies on them aren't held or woken.
+
+What all of this reads, writes, and sends is listed in [Data and Access](data-and-access.md).
 
 If leader election is enabled, a namespaced Role is created for Lease and ConfigMap access.
 
