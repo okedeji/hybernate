@@ -6,9 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 env:
   REGISTRY: ghcr.io
@@ -19,43 +17,61 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: make test
+      - run: make vulncheck
+
+  # Scanned before anything is pushed: once the release job pushes, the
+  # version's tag and latest already point at the image.
+  scan:
+    name: Image vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: docker build -t hybernate:scan .
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hybernate:scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
 
   release:
     name: Build and Release
-    needs: test
+    needs: [test, scan]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # the GitHub release
+      packages: write # the image and chart in GHCR
+      id-token: write # keyless signing
+      attestations: write # build provenance
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Extract version
         id: version
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push multi-arch image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -68,16 +84,21 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.tag }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+      - name: Attest the image's build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
       - name: Sign container image
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
 
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@v0
-
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
       - name: Generate SBOM
         run: |
           syft ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }} -o spdx-json=sbom.spdx.json
@@ -136,10 +157,31 @@ jobs:
         run: |
           make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
 
-      - name: Package and push Helm chart
+      - name: Package, push, and sign Helm chart
         run: |
           helm package charts/hybernate --version ${{ steps.version.outputs.tag }} --app-version ${{ steps.version.outputs.tag }}
-          helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+          helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts 2>&1 | tee helm-push.log
+          digest=$(awk '/^Digest:/ {print $2}' helm-push.log)
+          test -n "$digest"
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/hybernate@${digest}
+
+      - name: Sign the release files' checksums
+        run: |
+          sha256sum dist/install.yaml hybernate-*.tgz kubectl-hybernate-*.tar.gz krew-hybernate.yaml sbom.spdx.json \
+            > checksums.txt
+          cosign sign-blob --yes --bundle checksums.txt.sigstore.json checksums.txt
+
+      - name: Attest the release files' build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-checksums: checksums.txt
+
+      - name: Report the image's vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: table
+          output: vulnerabilities.txt
 
       - name: Extract changelog for release
         id: changelog
@@ -150,7 +192,7 @@ jobs:
           awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found" CHANGELOG.md > release-notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           body_path: release-notes.md
           files: |
@@ -159,3 +201,6 @@ jobs:
             kubectl-hybernate-*.tar.gz
             krew-hybernate.yaml
             sbom.spdx.json
+            checksums.txt
+            checksums.txt.sigstore.json
+            vulnerabilities.txt

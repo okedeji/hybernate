@@ -85,6 +85,7 @@ nav:
       - Metrics: reference/metrics.md
       - Labels & Annotations: reference/labels-annotations.md
       - Data and Access: reference/data-and-access.md
+      - Security: reference/security.md
       - Configuration: reference/configuration.md
       - Compatibility: reference/compatibility.md
   - Operations:

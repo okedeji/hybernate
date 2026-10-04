@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Released Helm charts are signed with cosign, like the image, and every release publishes a signed `checksums.txt` (`checksums.txt.sigstore.json`) covering the plugin binaries, `install.yaml`, the chart, and the SBOM, and GitHub build provenance for the image and those files (`gh attestation verify`). See [Security](https://okedeji.io/hybernate/reference/security/) for the commands
+- Every pull request and release scans the Go code with govulncheck and the image with Trivy, failing on reachable Go vulnerabilities and on critical and high image vulnerabilities with a fix; each release attaches Trivy's report as `vulnerabilities.txt`. A release is scanned before anything is pushed
+- Builds use Go 1.26.8, fixing 27 reachable vulnerabilities in the standard library, gRPC, OpenTelemetry, `golang.org/x/net`, and `golang.org/x/text`; CI built with Go 1.25.3. The base images are pinned by digest, every GitHub Action by commit, and Dependabot updates them weekly. Workflows get read-only permissions unless a job needs more
+
 ### Added
 
 - Protected namespaces: label a namespace `hybernate.io/protected: "true"`, or match the Helm value `protectedNamespaces` (`--protected-namespaces`, patterns such as `prod-*`), and Hybernate never manages anything in it: nothing is opted in, a ManagedWorkload there reports `Protected=True` and is never paused, and a workload it had paused is woken. `hybernate.io/allow-protected: "true"` on the namespace allows it. The scan shows such workloads as `(protected)` and leaves them out of what pausing could save

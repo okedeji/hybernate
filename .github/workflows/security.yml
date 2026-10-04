@@ -1,0 +1,36 @@
+name: Security
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: Go vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      # Fails only on vulnerabilities Hybernate's code reaches, not every
+      # one in a module it imports.
+      - run: make vulncheck
+
+  image:
+    name: Image vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: docker build -t hybernate:scan .
+      # Fails on critical and high vulnerabilities with a fix available;
+      # unfixed ones are reported, not blocking, so an upstream bug with no
+      # fix can't hold up every pull request.
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hybernate:scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
