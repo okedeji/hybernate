@@ -645,6 +645,48 @@ spec:
 				g.Expect(app).To(HavePrefix(webName+"-"), "the reload reaches the app")
 			}, time.Minute, time.Second).Should(Succeed())
 		})
+
+		It("learns that a workload Hybernate manages depends on the one its request woke", func() {
+			const callerName = "e2e-caller"
+			By("running a caller that Hybernate manages, with nothing in its environment naming the app")
+			Expect(kubectlApply(webManifest(callerName, wakeNamespace))).To(Succeed())
+			_, err := utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+callerName,
+				"-n", wakeNamespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: %[1]s, namespace: %[2]s}
+spec:
+  target: {kind: Deployment, name: %[1]s}
+  idlePolicy: {idleAfter: 1h}
+  prediction: {confidence: 85}
+`, callerName, wakeNamespace))).To(Succeed())
+
+			waitForDoorman()
+
+			By("connecting from the caller to the paused app")
+			// Retried until kube-proxy routes the Service to the doorman; a
+			// connection the doorman holds isn't refused.
+			Eventually(func() error {
+				_, err := utils.Run(exec.Command("kubectl", "exec", "-n", wakeNamespace, "deploy/"+callerName, "--",
+					"/agnhost", "connect", "--timeout", "5s", webName+":80"))
+				return err
+			}, time.Minute, 2*time.Second).Should(Succeed())
+
+			expectAwake()
+
+			By("checking the caller now depends on the app, learned from the wake")
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", callerName, wakeNamespace,
+					"{.status.learnedDependencies.dependencies[*].name}")).To(Equal(webName))
+				g.Expect(jsonpath("managedworkload", callerName, wakeNamespace,
+					"{.status.learnedDependencies.dependencies[*].source}")).To(Equal("wake"))
+			}, time.Minute, 5*time.Second).Should(Succeed())
+			out, err := utils.Run(exec.Command(pluginBinary, "deps", webName, "-n", wakeNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(MatchRegexp(wakeNamespace + `/` + callerName + `\s+learned from a wake\s+Running`))
+		})
 	})
 
 	// Runs after "Idle clock", which installs metrics-server.
