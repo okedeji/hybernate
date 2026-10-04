@@ -180,12 +180,24 @@ func (r *Reconciler) stampLastActed(workload *v1alpha1.ManagedWorkload) {
 	workload.Status.LastActedAt = &now
 }
 
+// resolveCostRates is what a workload is priced at: the rates it sets in
+// costTracking.rates, then the list rates of the nodes it ran on, then the
+// defaults, each part by part.
 func resolveCostRates(workload *v1alpha1.ManagedWorkload) cost.Rates {
 	rates := cost.DefaultRates
-	if workload.Spec.CostTracking == nil || workload.Spec.CostTracking.Rates == nil {
+	if c := workload.Status.Cost; c != nil {
+		rates = withRates(rates, c.ListRates)
+	}
+	if workload.Spec.CostTracking != nil {
+		rates = withRates(rates, workload.Spec.CostTracking.Rates)
+	}
+	return rates
+}
+
+func withRates(rates cost.Rates, r *v1alpha1.CostRates) cost.Rates {
+	if r == nil {
 		return rates
 	}
-	r := workload.Spec.CostTracking.Rates
 	if r.CPUPerHour != nil {
 		rates.CPUPerHour = r.CPUPerHour.AsApproximateFloat64()
 	}

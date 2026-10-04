@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/forecast"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
 
@@ -62,6 +63,11 @@ type metricsReader interface {
 	PodRequestsPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cpuMillis, memBytes float64, err error)
 	Replicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error)
 	TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
+}
+
+// listPricer prices a workload at the nodes it runs on.
+type listPricer interface {
+	ListRates(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cost.Rates, bool, error)
 }
 
 // engineRegistry manages forecast engines per workload.

@@ -19,6 +19,7 @@ package metrics
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,9 +30,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/cost"
 )
 
 func container(name, cpu string) corev1.Container {
@@ -163,6 +166,85 @@ func TestPodRequests(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cpu, _ := PodRequests(tt.pods, template)
 			assert.Equal(t, tt.wantCPU, cpu)
+		})
+	}
+}
+
+func pricedNode(name, instanceType, region string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{
+		"node.kubernetes.io/instance-type": instanceType,
+		"topology.kubernetes.io/region":    region,
+	}}}
+}
+
+func webPod(name, node string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "shop", Labels: map[string]string{"app": "web"}},
+		Spec:       corev1.PodSpec{NodeName: node, Containers: []corev1.Container{container("web", "100m")}},
+	}
+}
+
+func deleting(pod *corev1.Pod) *corev1.Pod {
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	pod.Finalizers = []string{"e2e.hybernate.io/hold"}
+	return pod
+}
+
+// A workload is priced at the nodes its pods are on, averaged over them.
+func TestReader_ListRates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	labels := map[string]string{"app": "web"}
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop"},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}},
+		},
+	}
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop"},
+		Spec:       v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "web"}},
+	}
+	small, _ := cost.ListPriceOf(cost.NodeType{InstanceType: "m6i.large", Region: "us-east-1"})
+	large, _ := cost.ListPriceOf(cost.NodeType{InstanceType: "r6i.4xlarge", Region: "us-east-1"})
+	nodes := []client.Object{pricedNode("small", "m6i.large", "us-east-1"),
+		pricedNode("large", "r6i.4xlarge", "us-east-1"), pricedNode("metal", "custom.metal", "us-east-1")}
+
+	tests := []struct {
+		name    string
+		pods    []client.Object
+		want    cost.Rates
+		listed  bool
+		wantErr error
+	}{
+		{name: "one node type", pods: []client.Object{webPod("a", "small"), webPod("b", "small")},
+			want: small.Rates, listed: true},
+		{name: "averaged over its pods", pods: []client.Object{webPod("a", "small"), webPod("b", "large")},
+			want: cost.Mean([]cost.Rates{small.Rates, large.Rates}), listed: true},
+		{name: "unlisted nodes are left out", pods: []client.Object{webPod("a", "small"), webPod("b", "metal")},
+			want: small.Rates, listed: true},
+		{name: "a pod being deleted is left out", pods: []client.Object{webPod("a", "small"), deleting(webPod("b", "large"))},
+			want: small.Rates, listed: true},
+		{name: "only unlisted nodes", pods: []client.Object{webPod("a", "metal")}},
+		{name: "not scheduled yet", pods: []client.Object{webPod("a", "")}, wantErr: ErrNoScheduledPods},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := append(append([]client.Object{deploy}, nodes...), tt.pods...)
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+
+			got, listed, err := NewReader(c, c).ListRates(context.Background(), workload)
+
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.listed, listed)
+			assert.InDelta(t, tt.want.CPUPerHour, got.CPUPerHour, 1e-9)
+			assert.InDelta(t, tt.want.MemoryPerHour, got.MemoryPerHour, 1e-9)
 		})
 	}
 }

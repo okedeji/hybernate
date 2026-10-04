@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -28,6 +29,8 @@ import (
 	"k8s.io/client-go/tools/events"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/cost"
+	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 func costWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
@@ -42,12 +45,12 @@ func costWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
 	}
 }
 
-func costReconciler(now time.Time, metrics *stubMetrics) *Reconciler {
+func costReconciler(now time.Time, m *stubMetrics) *Reconciler {
 	r := &Reconciler{
 		clock: func() time.Time { return now },
 	}
-	if metrics != nil {
-		r.metrics = metrics
+	if m != nil {
+		r.metrics = m
 	}
 	return r
 }
@@ -366,4 +369,110 @@ func TestCaptureResourceSnapshot_MissingTargetEmitsNoEvent(t *testing.T) {
 	recorder, ok := r.Recorder.(*events.FakeRecorder)
 	require.True(t, ok)
 	assert.Empty(t, recorder.Events, "capturing a snapshot must not report TargetNotFound as a side effect")
+}
+
+type stubPricer struct {
+	rates  cost.Rates
+	listed bool
+	err    error
+}
+
+func (p stubPricer) ListRates(_ context.Context, _ *v1alpha1.ManagedWorkload) (cost.Rates, bool, error) {
+	return p.rates, p.listed, p.err
+}
+
+var nodeRates = cost.Rates{CPUPerHour: 0.05, MemoryPerHour: 0.006}
+
+// recordedRates are list rates Hybernate recorded for a workload's nodes.
+func recordedRates() *v1alpha1.CostRates {
+	c, m := resource.MustParse("0.05"), resource.MustParse("0.006")
+	return &v1alpha1.CostRates{CPUPerHour: &c, MemoryPerHour: &m}
+}
+
+// What the nodes a workload runs on cost is recorded while it runs, and
+// kept when there's nothing new to price it at.
+func TestAccumulateCost_RecordsListRates(t *testing.T) {
+	tests := []struct {
+		name   string
+		phase  v1alpha1.WorkloadPhase
+		pricer stubPricer
+		before *v1alpha1.CostRates
+		want   *v1alpha1.CostRates
+	}{
+		{name: "running on listed nodes", phase: v1alpha1.PhaseRunning,
+			pricer: stubPricer{rates: nodeRates, listed: true}, want: recordedRates()},
+		{name: "moved to nodes not in the table", phase: v1alpha1.PhaseRunning,
+			pricer: stubPricer{}, before: recordedRates()},
+		{name: "no pod on a node yet", phase: v1alpha1.PhaseRunning,
+			pricer: stubPricer{err: metrics.ErrNoScheduledPods}, before: recordedRates(),
+			want: recordedRates()},
+		{name: "nodes can't be read", phase: v1alpha1.PhaseIdle,
+			pricer: stubPricer{err: errors.New("forbidden")}, before: recordedRates(),
+			want: recordedRates()},
+		{name: "paused: priced where it ran", phase: v1alpha1.PhasePaused,
+			pricer: stubPricer{rates: cost.Rates{CPUPerHour: 1}, listed: true}, before: recordedRates(),
+			want: recordedRates()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := costWorkload(tt.phase)
+			w.Status.Cost = &v1alpha1.CostStatus{ListRates: tt.before}
+			r := costReconciler(fixedTime, &stubMetrics{cpuMillis: 1000})
+			r.prices = tt.pricer
+
+			r.accumulateCost(context.Background(), w)
+
+			if tt.want == nil {
+				assert.Nil(t, w.Status.Cost.ListRates)
+				return
+			}
+			require.NotNil(t, w.Status.Cost.ListRates)
+			assert.InDelta(t, tt.want.CPUPerHour.AsApproximateFloat64(),
+				w.Status.Cost.ListRates.CPUPerHour.AsApproximateFloat64(), 1e-6)
+			assert.InDelta(t, tt.want.MemoryPerHour.AsApproximateFloat64(),
+				w.Status.Cost.ListRates.MemoryPerHour.AsApproximateFloat64(), 1e-6)
+		})
+	}
+}
+
+// A paused workload's savings are priced at the nodes it ran on.
+func TestAccumulateCost_PausedSavingsAtListRates(t *testing.T) {
+	saved := func(rates *v1alpha1.CostRates) float64 {
+		last := metav1.NewTime(fixedTime.Add(-time.Hour))
+		w := costWorkload(v1alpha1.PhasePaused)
+		w.Status.Cost = &v1alpha1.CostStatus{LastAccumulatedAt: &last, ListRates: rates}
+		w.Status.Pause = &v1alpha1.PauseStatus{Resources: &v1alpha1.ResourceSnapshot{
+			Replicas: 1, CPUMillis: 2000, MemoryBytes: 8 * bytesPerGiB}}
+		costReconciler(fixedTime, &stubMetrics{}).accumulateCost(context.Background(), w)
+		return parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
+	}
+
+	assert.InDelta(t, 2*0.031+8*0.004, saved(nil), 0.005, "default rates without list rates")
+	assert.InDelta(t, 2*0.05+8*0.006, saved(recordedRates()), 0.005, "the nodes' list rates")
+}
+
+func TestAccumulateCost_MonthlyResetKeepsListRates(t *testing.T) {
+	lastMonth := metav1.NewTime(time.Date(2026, 2, 28, 23, 0, 0, 0, time.UTC))
+	w := costWorkload(v1alpha1.PhasePaused)
+	w.Status.Cost = &v1alpha1.CostStatus{LastAccumulatedAt: &lastMonth, EstimatedMonthlySavings: "$42.00",
+		ListRates: recordedRates()}
+
+	costReconciler(fixedTime, &stubMetrics{}).accumulateCost(context.Background(), w)
+
+	assert.NotNil(t, w.Status.Cost.ListRates)
+	assert.Less(t, parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings), 42.0, "the month's totals reset")
+}
+
+// Rates a workload sets win over its nodes' list rates, part by part.
+func TestResolveCostRates(t *testing.T) {
+	w := costWorkload(v1alpha1.PhaseRunning)
+	w.Status.Cost = &v1alpha1.CostStatus{ListRates: recordedRates()}
+	cpu := resource.MustParse("0.1")
+	w.Spec.CostTracking.Rates = &v1alpha1.CostRates{CPUPerHour: &cpu}
+
+	got := resolveCostRates(w)
+
+	assert.InDelta(t, 0.1, got.CPUPerHour, 1e-9, "its own CPU rate")
+	assert.InDelta(t, 0.006, got.MemoryPerHour, 1e-9, "its nodes' memory rate")
+	assert.InDelta(t, cost.DefaultRates.StoragePerMonth, got.StoragePerMonth, 1e-9, "the default storage rate")
 }

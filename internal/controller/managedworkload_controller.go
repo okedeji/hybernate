@@ -72,6 +72,7 @@ type Reconciler struct {
 	pauser        lifecyclePauser
 	destroyer     lifecycleDestroyer
 	metrics       metricsReader
+	prices        listPricer
 	engines       *engineRegistry
 	activityMemo  activityMemo
 	prometheusURL string
@@ -98,6 +99,7 @@ type lifecycleDestroyer interface {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
@@ -918,7 +920,11 @@ func (r *Reconciler) initDefaults() {
 		if pods == nil {
 			pods = r.Client
 		}
-		r.metrics = metrics.NewReader(r.Client, pods)
+		reader := metrics.NewReader(r.Client, pods)
+		r.metrics = reader
+		if r.prices == nil {
+			r.prices = reader
+		}
 	}
 	if r.engines == nil {
 		r.engines = newEngineRegistry(func(threshold int) forecaster {

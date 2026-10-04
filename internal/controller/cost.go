@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"math"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -26,6 +28,7 @@ import (
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
+	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 const bytesPerGiB = 1024 * 1024 * 1024
@@ -37,7 +40,6 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 
 	logger := log.FromContext(ctx)
 	now := r.now()
-	rates := resolveCostRates(workload)
 
 	if workload.Status.Cost == nil {
 		workload.Status.Cost = &v1alpha1.CostStatus{}
@@ -48,9 +50,15 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 	// previous month's totals.
 	if last := workload.Status.Cost.LastAccumulatedAt; last != nil {
 		if last.Year() != now.Year() || last.Month() != now.Month() {
-			workload.Status.Cost = &v1alpha1.CostStatus{}
+			workload.Status.Cost = &v1alpha1.CostStatus{ListRates: workload.Status.Cost.ListRates}
 		}
 	}
+
+	phase := workload.Status.Phase
+	if phase != v1alpha1.PhasePaused && phase != v1alpha1.PhaseDestroyed {
+		r.recordListRates(ctx, workload)
+	}
+	rates := resolveCostRates(workload)
 
 	elapsed := time.Duration(0)
 	if workload.Status.Cost.LastAccumulatedAt != nil {
@@ -63,8 +71,6 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 		StorageHours:       workload.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64(),
 		EstimatedSavedCost: parseDollarAmount(workload.Status.Cost.EstimatedMonthlySavings),
 	}
-
-	phase := workload.Status.Phase
 
 	switch phase {
 	case v1alpha1.PhasePaused:
@@ -174,6 +180,37 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 	default:
 		workload.Status.Cost.ResourceReduction = nil
 	}
+}
+
+// recordListRates notes what the nodes the workload runs on cost, which it's
+// priced at from then on, including while it's paused. Without a pod on a
+// node there's nothing new to price, so the last rates are kept.
+func (r *Reconciler) recordListRates(ctx context.Context, workload *v1alpha1.ManagedWorkload) {
+	if r.prices == nil {
+		return
+	}
+	rates, listed, err := r.prices.ListRates(ctx, workload)
+	if errors.Is(err, metrics.ErrNoScheduledPods) {
+		return
+	}
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("keeping the last list rates", "error", err)
+		return
+	}
+	if !listed {
+		workload.Status.Cost.ListRates = nil
+		return
+	}
+	workload.Status.Cost.ListRates = &v1alpha1.CostRates{
+		CPUPerHour:    microQuantity(rates.CPUPerHour),
+		MemoryPerHour: microQuantity(rates.MemoryPerHour),
+	}
+}
+
+// microQuantity keeps a rate to a millionth of a dollar: a GiB-hour costs
+// a few thousandths, which milli-units would round by a fifth.
+func microQuantity(v float64) *resource.Quantity {
+	return resource.NewScaledQuantity(int64(math.Round(v*1e6)), resource.Micro)
 }
 
 func daysInMonth(t time.Time) int {
