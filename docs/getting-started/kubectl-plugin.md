@@ -168,6 +168,7 @@ kubectl hybernate scan --html workload-scan.html
 | `--window` | | `7d` | How much Prometheus history to replay, such as `7d` or `36h`; `0` judges from CPU right now only |
 | `--idle-after` | | `1h` | How long without activity makes a workload idle, now and in the replay, as Hybernate's `idleAfter`. Workloads Hybernate manages use their own setting |
 | `--prometheus-url` | | found in the cluster | Prometheus API to read history from |
+| `--timeout` | | `5m` | How long the scan may take before it gives up. Each request to the API server also gives up after 30 seconds, so a cluster that stops answering ends the scan with an error, not a hang |
 | `--html` | | a temporary file | Save the HTML report to this file, to share |
 | `--open` | | `true` | Open the HTML report in your browser, when the table is shown in a terminal |
 

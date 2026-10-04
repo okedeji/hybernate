@@ -60,6 +60,7 @@ type scanOptions struct {
 	ownMemoryPrice bool
 	window         string
 	idleAfter      time.Duration
+	timeout        time.Duration
 	promURL        string
 	html           string
 	open           bool
@@ -94,6 +95,7 @@ func scanCmd() *cobra.Command {
 		memoryPrice:  cost.DefaultRates.MemoryPerHour,
 		window:       "7d",
 		idleAfter:    time.Hour,
+		timeout:      5 * time.Minute,
 		open:         true,
 	}
 	cmd := &cobra.Command{
@@ -141,8 +143,17 @@ Examples:
 			if opts.idleAfter <= 0 {
 				return errors.New("--idle-after must be more than zero")
 			}
+			if opts.timeout <= 0 {
+				return errors.New("--timeout must be more than zero")
+			}
 			opts.ownCPUPrice, opts.ownMemoryPrice = ownPrices(cmd)
-			result, err := scanCluster(cmd.Context(), window, opts)
+			ctx, cancel := context.WithTimeout(cmd.Context(), opts.timeout)
+			defer cancel()
+			result, err := scanCluster(ctx, window, opts)
+			if errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("the scan didn't finish within --timeout %s: the cluster's API server answered too "+
+					"slowly; scan fewer namespaces with -n, or pass a longer --timeout", opts.timeout)
+			}
 			if err != nil {
 				return err
 			}
@@ -172,6 +183,8 @@ Examples:
 		"How much Prometheus history to replay, such as 7d or 36h; 0 judges from CPU right now only")
 	cmd.Flags().DurationVar(&opts.idleAfter, "idle-after", opts.idleAfter,
 		"How long without activity makes a workload idle, as Hybernate's idleAfter; managed workloads use their own")
+	cmd.Flags().DurationVar(&opts.timeout, "timeout", opts.timeout,
+		"How long the scan may take before it gives up")
 	cmd.Flags().StringVar(&opts.promURL, "prometheus-url", "",
 		"Prometheus API to read history from, such as Thanos or Mimir (defaults to one found in the cluster)")
 	cmd.Flags().StringVar(&opts.html, "html", "",
@@ -204,6 +217,8 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 		return scanResult{}, err
 	}
 	scan := scanResult{Context: current, Cluster: clusterName(current)}
+	config.Timeout = apiRequestTimeout
+	config.Wrap(cancelWith(ctx))
 	c, err := client.New(config, client.Options{Scheme: scheme})
 	if err != nil {
 		return scanResult{}, fmt.Errorf("creating client: %w", err)
@@ -252,9 +267,36 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	if len(namespaces) > 0 {
 		report.Notes = append(discovery.AccessNotes(ctx, c, namespaces[0]), report.Notes...)
 	}
+	// The scan carries on past calls that fail, noting what it couldn't
+	// read; once the deadline passes they all fail, and what it has isn't
+	// the cluster.
+	if err := ctx.Err(); err != nil {
+		return scanResult{}, err
+	}
 	scan.ClusterReport = report
 	return scan, nil
 }
+
+// cancelWith ends every request to the API server when ctx ends. The
+// client's API discovery doesn't take a context, so without it a scan past
+// its deadline still waits out each discovery request in turn.
+func cancelWith(ctx context.Context) func(http.RoundTripper) http.RoundTripper {
+	return func(rt http.RoundTripper) http.RoundTripper {
+		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			reqCtx, cancel := context.WithCancelCause(r.Context())
+			context.AfterFunc(ctx, func() { cancel(context.Cause(ctx)) })
+			return rt.RoundTrip(r.WithContext(reqCtx))
+		})
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// apiRequestTimeout bounds each request to the API server. A scan makes many
+// small ones, so one that takes this long means the server isn't answering.
+const apiRequestTimeout = 30 * time.Second
 
 // historySource finds the Prometheus to replay history from, or says why
 // there's none to use.
