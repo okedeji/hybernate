@@ -79,8 +79,8 @@ echo "leaving the unwatched namespace alone"
 [ "$(kubectl get deployment app -n "$UNWATCHED" -o 'jsonpath={.spec.replicas}')" = 2 ]
 
 echo "checking nothing was denied"
-logs=$(kubectl logs -n hybernate-system deployment/hybernate; \
-  kubectl logs -n hybernate-system deployment/hybernate-doorman)
+# Every pod of the operator and the doorman, not one per Deployment.
+logs=$(kubectl logs -n hybernate-system -l app.kubernetes.io/instance=hybernate --prefix --tail=-1)
 if grep -i "forbidden" <<<"$logs"; then
   echo "the operator or the doorman was denied something"
   exit 1
