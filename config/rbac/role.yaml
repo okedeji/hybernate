@@ -20,17 +20,9 @@ rules:
   resources:
   - namespaces
   - nodes
+  - persistentvolumeclaims
   - services
   verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - persistentvolumeclaims
-  verbs:
-  - delete
   - get
   - list
   - watch
@@ -56,10 +48,8 @@ rules:
   - deployments
   - statefulsets
   verbs:
-  - delete
   - get
   - list
-  - update
   - watch
 - apiGroups:
   - apps
