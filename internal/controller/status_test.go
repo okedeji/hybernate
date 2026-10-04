@@ -34,7 +34,7 @@ func busyWorkloadReconciler(t *testing.T) (*Reconciler, *time.Time) {
 	t.Helper()
 	workload := lifecycleWorkload("busy-app", nil, v1alpha1.PhaseRunning)
 	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
-	r := newTestReconciler(t, workload, &stubPauser{}, &stubDestroyer{})
+	r := newTestReconciler(t, workload, &stubPauser{})
 	r.metrics = &stubMetrics{cpuMillis: 500, cpuPerReplica: 1000, replicas: 1, memoryBytes: 1 << 30}
 	now := fixedTime
 	r.clock = func() time.Time { return now }

@@ -55,7 +55,7 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 	}
 
 	phase := workload.Status.Phase
-	if phase != v1alpha1.PhasePaused && phase != v1alpha1.PhaseDestroyed {
+	if phase != v1alpha1.PhasePaused {
 		r.recordListRates(ctx, workload)
 	}
 	rates := resolveCostRates(workload)
@@ -87,32 +87,7 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 			replicas := float64(rs.Replicas)
 			cpuCores := replicas * float64(rs.CPUMillis) / 1000
 			memGiB := replicas * float64(rs.MemoryBytes) / bytesPerGiB
-			snap = cost.AccumulateSavings(snap, cpuCores, memGiB, 0, elapsed, rates)
-		}
-
-	case v1alpha1.PhaseDestroyed:
-		// Target is deleted — use the snapshot captured at destroy time.
-		if workload.Status.Destroy != nil && workload.Status.Destroy.Resources != nil {
-			rs := workload.Status.Destroy.Resources
-			replicas := float64(rs.Replicas)
-			cpuCores := replicas * float64(rs.CPUMillis) / 1000
-			memGiB := replicas * float64(rs.MemoryBytes) / bytesPerGiB
-			storageGiB := float64(rs.StorageBytes) / bytesPerGiB
-
-			pvcsCleanedUp := workload.Status.Destroy.PVCRetentionExpiresAt == nil ||
-				!now.Before(workload.Status.Destroy.PVCRetentionExpiresAt.Time)
-
-			// Still paying for storage while PVCs are retained.
-			if !pvcsCleanedUp {
-				snap = cost.Accumulate(snap, 0, 0, storageGiB, elapsed)
-			}
-
-			// Compute is always saved. Storage saved only after PVCs cleaned up.
-			savedStorage := float64(0)
-			if pvcsCleanedUp {
-				savedStorage = storageGiB
-			}
-			snap = cost.AccumulateSavings(snap, cpuCores, memGiB, savedStorage, elapsed, rates)
+			snap = cost.AccumulateSavings(snap, cpuCores, memGiB, elapsed, rates)
 		}
 
 	default:
@@ -157,28 +132,15 @@ func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.Mana
 
 	workload.Status.Cost.EstimatedCostWithoutManagement = cost.FormatDollars(cost.EstimatedCostWithoutManagement(snap, rates))
 
-	// Populate resource reduction from the snapshot captured at pause/destroy time.
-	switch phase {
-	case v1alpha1.PhasePaused:
-		if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
-			rs := workload.Status.Pause.Resources
-			workload.Status.Cost.ResourceReduction = &v1alpha1.ResourceReduction{
-				CPUMillis:   rs.CPUMillis * int64(rs.Replicas),
-				MemoryBytes: rs.MemoryBytes * int64(rs.Replicas),
-				Replicas:    rs.Replicas,
-			}
+	// Populate resource reduction from the snapshot captured at pause time.
+	workload.Status.Cost.ResourceReduction = nil
+	if p := workload.Status.Pause; phase == v1alpha1.PhasePaused && p != nil && p.Resources != nil {
+		rs := p.Resources
+		workload.Status.Cost.ResourceReduction = &v1alpha1.ResourceReduction{
+			CPUMillis:   rs.CPUMillis * int64(rs.Replicas),
+			MemoryBytes: rs.MemoryBytes * int64(rs.Replicas),
+			Replicas:    rs.Replicas,
 		}
-	case v1alpha1.PhaseDestroyed:
-		if workload.Status.Destroy != nil && workload.Status.Destroy.Resources != nil {
-			rs := workload.Status.Destroy.Resources
-			workload.Status.Cost.ResourceReduction = &v1alpha1.ResourceReduction{
-				CPUMillis:   rs.CPUMillis * int64(rs.Replicas),
-				MemoryBytes: rs.MemoryBytes * int64(rs.Replicas),
-				Replicas:    rs.Replicas,
-			}
-		}
-	default:
-		workload.Status.Cost.ResourceReduction = nil
 	}
 }
 
@@ -218,13 +180,6 @@ func daysInMonth(t time.Time) int {
 }
 
 func (r *Reconciler) captureResourceSnapshot(ctx context.Context, workload *v1alpha1.ManagedWorkload) *v1alpha1.ResourceSnapshot {
-	// If the workload was paused, pods are already gone — reuse the snapshot
-	// captured at pause time rather than querying dead metrics.
-	if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
-		rs := *workload.Status.Pause.Resources
-		return &rs
-	}
-
 	if r.metrics == nil {
 		return nil
 	}

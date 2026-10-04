@@ -64,6 +64,7 @@ const (
 	AnnotationWakeMaxWait   = "hybernate.io/wake-max-wait"
 	AnnotationWakePage      = "hybernate.io/wake-page"
 
-	// FinalizerCleanup is the finalizer added to ManagedWorkloads for PVC retention cleanup.
+	// FinalizerCleanup is the finalizer added to ManagedWorkloads, so deleting
+	// one scales its paused workload back up first.
 	FinalizerCleanup = "hybernate.io/cleanup"
 )

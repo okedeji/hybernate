@@ -36,7 +36,6 @@ func TestOptInSpec_Defaults(t *testing.T) {
 	assert.False(t, spec.DryRun)
 	assert.Equal(t, time.Hour, spec.IdlePolicy.IdleAfter.Duration)
 	assert.Equal(t, 10, spec.IdlePolicy.Activity.CPUThreshold)
-	assert.Equal(t, v1alpha1.IdleActionPause, spec.IdlePolicy.Action)
 	assert.False(t, spec.IdlePolicy.AutoResume)
 	assert.True(t, *spec.Wake.OnRequest)
 	assert.Equal(t, 2*time.Minute, spec.Wake.MaxWait.Duration)

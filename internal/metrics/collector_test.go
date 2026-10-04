@@ -37,13 +37,11 @@ func TestAllMetricsRegistered(t *testing.T) {
 		"hybernate_prediction_data_points",
 		"hybernate_prediction_anomalies_total",
 		"hybernate_idle_detections_total",
-		"hybernate_pause_expiry_actions_total",
 		"hybernate_external_scale_ups_total",
 
 		// Tier 3
 		"hybernate_idle_seconds",
 		"hybernate_prediction_regime_changes_total",
-		"hybernate_pvc_retention_remaining_seconds",
 		"hybernate_automation_skipped_total",
 		"hybernate_dryrun_actions_total",
 		"hybernate_target_unavailable_total",
@@ -69,12 +67,10 @@ func TestAllMetricsRegistered(t *testing.T) {
 	PredictionPhase.WithLabelValues("ns", "w").Set(1)
 	PredictionDataPoints.WithLabelValues("ns", "w").Set(10)
 	PredictionAnomalies.WithLabelValues("ns", "w").Inc()
-	IdleDetections.WithLabelValues("pause", "ns", "w").Inc()
-	PauseExpiryActions.WithLabelValues("resume").Inc()
+	IdleDetections.WithLabelValues("ns", "w").Inc()
 	ExternalScaleUps.WithLabelValues("argo-cd").Inc()
 	IdleSeconds.WithLabelValues("ns", "w").Set(60)
 	PredictionRegimeChanges.WithLabelValues("ns", "w").Inc()
-	PVCRetentionRemaining.WithLabelValues("ns", "w").Set(3600)
 	AutomationSkipped.WithLabelValues("ns", "w").Inc()
 	DryrunActions.WithLabelValues("scale_up").Inc()
 	TargetUnavailable.WithLabelValues("ns", "w").Inc()

@@ -53,13 +53,12 @@ func init() {
 
 // --- Spec ---
 
-// +kubebuilder:validation:Enum=Running;Paused;Destroyed
+// +kubebuilder:validation:Enum=Running;Paused
 type DesiredState string
 
 const (
-	DesiredStateRunning   DesiredState = "Running"
-	DesiredStatePaused    DesiredState = "Paused"
-	DesiredStateDestroyed DesiredState = "Destroyed"
+	DesiredStateRunning DesiredState = "Running"
+	DesiredStatePaused  DesiredState = "Paused"
 )
 
 // ManagedWorkloadSpec defines the desired lifecycle behavior for a workload.
@@ -73,9 +72,8 @@ type ManagedWorkloadSpec struct {
 	// +optional
 	DesiredState *DesiredState `json:"desiredState,omitempty"`
 
-	// IdlePolicy configures automatic idle detection. Signals detect ground
-	// truth, the prediction engine confirms the pattern, and after a grace
-	// period the operator executes the configured action (pause or destroy).
+	// IdlePolicy configures automatic pausing: the operator pauses the
+	// workload once it has had no activity for IdlePolicy.IdleAfter.
 	// +optional
 	IdlePolicy *IdlePolicySpec `json:"idlePolicy,omitempty"`
 
@@ -90,16 +88,6 @@ type ManagedWorkloadSpec struct {
 	// it's paused.
 	// +optional
 	Wake *WakeSpec `json:"wake,omitempty"`
-
-	// Pause configures behavior while the workload is paused, including
-	// automatic expiry and what action to take when the pause expires.
-	// +optional
-	Pause *PauseSpec `json:"pause,omitempty"`
-
-	// Destroy configures behavior after the workload is destroyed, including
-	// PVC retention and cleanup.
-	// +optional
-	Destroy *DestroySpec `json:"destroy,omitempty"`
 
 	// Prediction configures the Holt-Winters forecasting engine that confirms
 	// idle detection and wakes paused workloads ahead of predicted demand.
@@ -192,26 +180,12 @@ type PredictionSpec struct {
 	Confidence int `json:"confidence"`
 }
 
-// +kubebuilder:validation:Enum=pause;destroy
-type IdleAction string
-
-const (
-	IdleActionPause   IdleAction = "pause"
-	IdleActionDestroy IdleAction = "destroy"
-)
-
 // IdlePolicySpec configures automatic pausing. The operator tracks when the
-// workload was last active and acts once it has been inactive for IdleAfter.
-// Any single activity source keeps the workload awake.
+// workload was last active and pauses it once it has been inactive for
+// IdleAfter. Any single activity source keeps the workload awake.
 type IdlePolicySpec struct {
-	// Action to take once the workload has been idle for IdleAfter. "pause"
-	// scales to zero; "destroy" deletes the workload.
-	// +kubebuilder:default=pause
-	// +optional
-	Action IdleAction `json:"action,omitempty"`
-
 	// IdleAfter is how long the workload must go without any activity
-	// before the operator acts.
+	// before the operator pauses it.
 	// +kubebuilder:default="1h"
 	// +kubebuilder:validation:Format=duration
 	// +optional
@@ -253,44 +227,6 @@ type PrometheusActivity struct {
 	PromQL string `json:"promQL"`
 }
 
-// +kubebuilder:validation:Enum=destroy;resume
-type ExpireAction string
-
-const (
-	ExpireActionDestroy ExpireAction = "destroy"
-	ExpireActionResume  ExpireAction = "resume"
-)
-
-// PauseSpec configures pause behavior and automatic expiry.
-type PauseSpec struct {
-	// ExpireAfter is the maximum duration a workload can remain paused.
-	// After this period, the operator executes the ExpireAction.
-	// +optional
-	// +kubebuilder:validation:Format=duration
-	ExpireAfter *metav1.Duration `json:"expireAfter,omitempty"`
-
-	// ExpireAction determines what happens when ExpireAfter elapses.
-	// "destroy" deletes the workload; "resume" scales it back up.
-	// +kubebuilder:default=destroy
-	// +optional
-	ExpireAction ExpireAction `json:"expireAction,omitempty"`
-}
-
-// DestroySpec configures cleanup behavior after a workload is destroyed.
-type DestroySpec struct {
-	// PVCRetention is how long to keep PVCs after the workload is destroyed.
-	// After this period, PVCs are deleted. Omit to delete PVCs immediately.
-	// +optional
-	// +kubebuilder:validation:Format=duration
-	PVCRetention *metav1.Duration `json:"pvcRetention,omitempty"`
-
-	// PVCRetentionWarning triggers a warning event this duration before
-	// PVCs are deleted, giving users time to recover data if needed.
-	// +optional
-	// +kubebuilder:validation:Format=duration
-	PVCRetentionWarning *metav1.Duration `json:"pvcRetentionWarning,omitempty"`
-}
-
 // CostTrackingSpec configures resource cost calculation for this workload.
 // Cost tracking is always enabled. This struct exists to allow custom rate overrides.
 type CostTrackingSpec struct {
@@ -318,18 +254,16 @@ type CostRates struct {
 
 // --- Status ---
 
-// +kubebuilder:validation:Enum=Creating;Running;Idle;Pausing;Paused;Resuming;Destroying;Destroyed
+// +kubebuilder:validation:Enum=Creating;Running;Idle;Pausing;Paused;Resuming
 type WorkloadPhase string
 
 const (
-	PhaseCreating   WorkloadPhase = "Creating"
-	PhaseRunning    WorkloadPhase = "Running"
-	PhaseIdle       WorkloadPhase = "Idle"
-	PhasePausing    WorkloadPhase = "Pausing"
-	PhasePaused     WorkloadPhase = "Paused"
-	PhaseResuming   WorkloadPhase = "Resuming"
-	PhaseDestroying WorkloadPhase = "Destroying"
-	PhaseDestroyed  WorkloadPhase = "Destroyed"
+	PhaseCreating WorkloadPhase = "Creating"
+	PhaseRunning  WorkloadPhase = "Running"
+	PhaseIdle     WorkloadPhase = "Idle"
+	PhasePausing  WorkloadPhase = "Pausing"
+	PhasePaused   WorkloadPhase = "Paused"
+	PhaseResuming WorkloadPhase = "Resuming"
 )
 
 // ManagedWorkloadStatus reflects the observed state of the workload.
@@ -353,10 +287,6 @@ type ManagedWorkloadStatus struct {
 	// the workload up while it was paused, which wakes it.
 	// +optional
 	LastScaledUp *ScaledUp `json:"lastScaledUp,omitempty"`
-
-	// Destroy holds state after the workload is destroyed.
-	// +optional
-	Destroy *DestroyStatus `json:"destroy,omitempty"`
 
 	// Prediction reflects the current state of the forecasting engine.
 	// +optional
@@ -383,7 +313,7 @@ type ManagedWorkloadStatus struct {
 	DryRun *DryRunStatus `json:"dryRun,omitempty"`
 
 	// LastActedAt is when the operator last mutated the target workload
-	// (pause, resume, destroy, or drift correction).
+	// (pause or resume).
 	// +optional
 	LastActedAt *metav1.Time `json:"lastActedAt,omitempty"`
 
@@ -520,22 +450,6 @@ type PauseStatus struct {
 	Resources *ResourceSnapshot `json:"resources,omitempty"`
 }
 
-// DestroyStatus records state after the workload is destroyed.
-type DestroyStatus struct {
-	// DestroyedAt is when the workload was destroyed.
-	DestroyedAt *metav1.Time `json:"destroyedAt,omitempty"`
-
-	// Resources captures the workload's resource profile at destroy time
-	// for cost savings calculation.
-	// +optional
-	Resources *ResourceSnapshot `json:"resources,omitempty"`
-
-	// PVCRetentionExpiresAt is when remaining PVCs will be cleaned up.
-	// Only set when DestroySpec.PVCRetention is configured.
-	// +optional
-	PVCRetentionExpiresAt *metav1.Time `json:"pvcRetentionExpiresAt,omitempty"`
-}
-
 // PredictionStatus reflects the current state of the Holt-Winters engine's
 // dual-season lifecycle.
 type PredictionStatus struct {
@@ -570,7 +484,7 @@ type CostStatus struct {
 	EstimatedMonthlyCost string `json:"estimatedMonthlyCost"`
 
 	// EstimatedMonthlySavings is the projected dollar amount saved by Hybernate
-	// actions (pause, destroy) this month. These savings are only
+	// pauses this month. These savings are only
 	// realized when freed resources lead to node removal by a cluster autoscaler.
 	EstimatedMonthlySavings string `json:"estimatedMonthlySavings"`
 
@@ -599,7 +513,7 @@ type CostStatus struct {
 }
 
 // ResourceReduction tracks the workload-level resources freed by Hybernate
-// actions (pause, destroy). These resources are released on the
+// pauses. These resources are released on the
 // node when pods are removed, but the node itself is only removed if a
 // cluster autoscaler determines it is underutilized.
 type ResourceReduction struct {

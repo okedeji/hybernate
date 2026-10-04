@@ -154,72 +154,6 @@ func TestAccumulateCost_PausedAccumulatesStorageAndSavings(t *testing.T) {
 	assert.Greater(t, savings, 0.0, "should show savings from paused compute")
 }
 
-func TestAccumulateCost_DestroyedWithRetainedPVCs(t *testing.T) {
-	lastAccumulated := fixedTime.Add(-1 * time.Hour)
-	lastMeta := metav1.NewTime(lastAccumulated)
-	pvcExpiry := metav1.NewTime(fixedTime.Add(24 * time.Hour))
-
-	w := costWorkload(v1alpha1.PhaseDestroyed)
-	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:  "$0.00",
-		LastAccumulatedAt:        &lastMeta,
-	}
-	w.Status.Destroy = &v1alpha1.DestroyStatus{
-		Resources: &v1alpha1.ResourceSnapshot{
-			Replicas:     2,
-			CPUMillis:    1000,
-			MemoryBytes:  4 * bytesPerGiB,
-			StorageBytes: 50 * bytesPerGiB,
-		},
-		PVCRetentionExpiresAt: &pvcExpiry,
-	}
-
-	r := costReconciler(fixedTime, &stubMetrics{})
-	r.accumulateCost(context.Background(), w)
-
-	storageHours := w.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64()
-	assert.InDelta(t, 50.0, storageHours, 0.01, "retained PVCs still cost")
-
-	savings := parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
-	assert.Greater(t, savings, 0.0, "compute savings from destroyed workload")
-}
-
-func TestAccumulateCost_DestroyedPVCsCleanedUp(t *testing.T) {
-	lastAccumulated := fixedTime.Add(-1 * time.Hour)
-	lastMeta := metav1.NewTime(lastAccumulated)
-	pvcExpiry := metav1.NewTime(fixedTime.Add(-1 * time.Hour))
-
-	w := costWorkload(v1alpha1.PhaseDestroyed)
-	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:  "$0.00",
-		LastAccumulatedAt:        &lastMeta,
-	}
-	w.Status.Destroy = &v1alpha1.DestroyStatus{
-		Resources: &v1alpha1.ResourceSnapshot{
-			Replicas:     2,
-			CPUMillis:    1000,
-			MemoryBytes:  4 * bytesPerGiB,
-			StorageBytes: 50 * bytesPerGiB,
-		},
-		PVCRetentionExpiresAt: &pvcExpiry,
-	}
-
-	r := costReconciler(fixedTime, &stubMetrics{})
-	r.accumulateCost(context.Background(), w)
-
-	storageHours := w.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64()
-	assert.InDelta(t, 0.0, storageHours, 0.001, "PVCs cleaned up, no storage cost")
-
-	savings := parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
-	assert.Greater(t, savings, 0.0, "savings include storage after cleanup")
-}
-
 func TestAccumulateCost_MonthlyReset(t *testing.T) {
 	lastMonth := time.Date(2026, 2, 28, 23, 0, 0, 0, time.UTC)
 	lastMeta := metav1.NewTime(lastMonth)
@@ -331,7 +265,7 @@ func (*zeroReplicaMetrics) Replicas(_ context.Context, _ *v1alpha1.ManagedWorklo
 
 func TestCaptureResourceSnapshot_PricesMemoryOnRequest(t *testing.T) {
 	workload := costWorkload(v1alpha1.PhaseRunning)
-	r := newTestReconciler(t, workload, &stubPauser{}, &stubDestroyer{})
+	r := newTestReconciler(t, workload, &stubPauser{})
 	r.metrics = &stubMetrics{
 		cpuPerReplica:    500,
 		memoryPerReplica: 512 << 20,
@@ -349,7 +283,7 @@ func TestCaptureResourceSnapshot_PricesMemoryOnRequest(t *testing.T) {
 
 func TestCaptureResourceSnapshot_ZeroReplicas(t *testing.T) {
 	workload := costWorkload(v1alpha1.PhaseRunning)
-	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 0)
+	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, 0)
 	r.metrics = &zeroReplicaMetrics{stubMetrics{cpuPerReplica: 500, memoryPerReplica: 512 << 20, memoryBytes: 64 << 20}}
 
 	snap := r.captureResourceSnapshot(context.Background(), workload)
@@ -361,7 +295,7 @@ func TestCaptureResourceSnapshot_ZeroReplicas(t *testing.T) {
 
 func TestCaptureResourceSnapshot_MissingTargetEmitsNoEvent(t *testing.T) {
 	workload := costWorkload(v1alpha1.PhaseRunning)
-	r := newTestReconcilerWithTarget(t, workload, &stubPauser{}, &stubDestroyer{}, false)
+	r := newTestReconcilerWithTarget(t, workload, &stubPauser{}, false)
 	r.metrics = &stubMetrics{cpuPerReplica: 500, memoryPerReplica: 512 << 20}
 
 	r.captureResourceSnapshot(context.Background(), workload)

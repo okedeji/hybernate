@@ -168,7 +168,6 @@ func optInSpec(target v1alpha1.WorkloadRef, workload, namespace map[string]strin
 		Target: target,
 		DryRun: s.boolean(v1alpha1.AnnotationDryRun, d.DryRun),
 		IdlePolicy: &v1alpha1.IdlePolicySpec{
-			Action:     v1alpha1.IdleActionPause,
 			IdleAfter:  &metav1.Duration{Duration: s.duration(v1alpha1.AnnotationIdleAfter, d.IdleAfter)},
 			Activity:   &v1alpha1.ActivitySpec{CPUThreshold: s.percent(v1alpha1.AnnotationCPUThreshold, d.CPUThreshold)},
 			AutoResume: s.boolean(v1alpha1.AnnotationAutoResume, false),

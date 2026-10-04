@@ -77,13 +77,12 @@ func depReconciler(t *testing.T, pauser *stubPauser, objs ...client.Object) *Rec
 	return &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).
 			WithStatusSubresource(&v1alpha1.ManagedWorkload{}).WithObjects(objs...).Build(),
-		Scheme:    scheme,
-		Recorder:  events.NewFakeRecorder(20),
-		pauser:    pauser,
-		destroyer: &stubDestroyer{},
-		metrics:   &metrics,
-		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{phase: forecast.Observing} }),
-		clock:     func() time.Time { return fixedTime },
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(20),
+		pauser:   pauser,
+		metrics:  &metrics,
+		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{phase: forecast.Observing} }),
+		clock:    func() time.Time { return fixedTime },
 	}
 }
 

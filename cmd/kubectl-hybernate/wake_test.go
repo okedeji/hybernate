@@ -154,7 +154,6 @@ func TestWake_RefusesWhatActivityCantWake(t *testing.T) {
 		wantHint string
 	}{
 		{name: "paused by desiredState", workload: manual, wantHint: "remove it or set it to Running"},
-		{name: "destroyed", workload: managedWorkload(v1alpha1.PhaseDestroyed), wantHint: "redeploy it"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

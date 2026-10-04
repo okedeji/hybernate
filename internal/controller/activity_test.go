@@ -129,21 +129,6 @@ func TestActivityClock_SidecarCPUIsNotActivity(t *testing.T) {
 	assert.Equal(t, 1, pauser.pauseCalls)
 }
 
-func TestActivityClock_DestroyAction(t *testing.T) {
-	target := clockTarget("app:v1", nil)
-	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
-	workload.Spec.IdlePolicy.Action = v1alpha1.IdleActionDestroy
-	destroyer := &stubDestroyer{destroyDone: true}
-	metrics := idleCPU
-	r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics, destroyer: destroyer})
-
-	_, err := r.reconcileAutomation(context.Background(), workload, target)
-	require.NoError(t, err)
-
-	assert.Equal(t, 1, destroyer.destroyCalls)
-	assert.Equal(t, v1alpha1.PhaseDestroyed, workload.Status.Phase)
-}
-
 func TestActivityClock_StaysAwake(t *testing.T) {
 	stale := fixedTime.Add(-61 * time.Minute)
 
