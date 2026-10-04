@@ -35,6 +35,9 @@ linters:
     modernize:
       disable:
         - omitzero
+        # new(expr) arrived with Go 1.26; ptr.To stays until the code moves
+        # over in one change of its own.
+        - newexpr
   exclusions:
     generated: lax
     rules:
