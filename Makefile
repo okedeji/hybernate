@@ -115,6 +115,10 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 40m
 	$(MAKE) cleanup-test-e2e
 
+.PHONY: test-helm-smoke
+test-helm-smoke: ## Install the Helm chart with watchNamespaces into Kind and check it works with only namespaced Roles
+	KIND=$(KIND) ./hack/helm-smoke.sh
+
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
