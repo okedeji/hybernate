@@ -573,6 +573,15 @@ type CostStatus struct {
 	// without Hybernate — the sum of estimated cost and estimated savings.
 	EstimatedCostWithoutManagement string `json:"estimatedCostWithoutManagement"`
 
+	// ListRates are the on-demand list rates of the nodes the workload's
+	// pods last ran on, from their instance type and region, which its cost
+	// and savings are priced at unless costTracking.rates sets its own.
+	// Kept while it's paused, so savings are priced at where it ran. Unset
+	// when its nodes aren't in Hybernate's price table, and the default
+	// rates apply.
+	// +optional
+	ListRates *CostRates `json:"listRates,omitempty"`
+
 	// ResourceReduction tracks the concrete resources freed by Hybernate actions.
 	// Unlike cost estimates, these values are always accurate regardless of
 	// whether a cluster autoscaler removes the underlying nodes.

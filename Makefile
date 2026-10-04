@@ -47,6 +47,10 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 	@# The Helm chart ships its own copy of the CRDs; keep it identical.
 	cp config/crd/bases/*.yaml charts/hybernate/crds/
 
+.PHONY: prices
+prices: ## Regenerate the on-demand list prices nodes are priced at, before each release
+	go run ./hack/prices internal/cost/prices.csv.gz
+
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="./..."

@@ -657,6 +657,14 @@ spec:
 			DeferCleanup(func() {
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", scanNamespace, "--wait=false"))
 			})
+			By("labelling the kind nodes as an EKS instance type, as a cloud provider would")
+			_, err = utils.Run(exec.Command("kubectl", "label", "nodes", "--all", "--overwrite",
+				"node.kubernetes.io/instance-type=m6i.large", "topology.kubernetes.io/region=us-east-1"))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "label", "nodes", "--all",
+					"node.kubernetes.io/instance-type-", "topology.kubernetes.io/region-"))
+			})
 			Expect(kubectlApply(deploymentManifest("e2e-quiet", scanNamespace, 2))).To(Succeed())
 			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/e2e-quiet",
 				"-n", scanNamespace, "--timeout=2m"))
@@ -685,7 +693,18 @@ spec:
 				Totals struct {
 					Paused int `json:"paused"`
 				} `json:"totals"`
+				NodePrices struct {
+					NodeTypes []struct {
+						InstanceType string `json:"instanceType"`
+						Listed       bool   `json:"listed"`
+					} `json:"nodeTypes"`
+				} `json:"nodePrices"`
 			}
+			By("checking Hybernate priced the workload at its nodes' list price while it ran")
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", "e2e-quiet", scanNamespace, "{.status.cost.listRates.cpuPerHour}")
+			}, 2*time.Minute, 5*time.Second).ShouldNot(BeEmpty(), "the operator can read the nodes it runs on")
+
 			By("scanning once Hybernate has paused the quiet workload")
 			Eventually(func(g Gomega) {
 				out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", scanNamespace, "-o", "json"))
@@ -701,7 +720,19 @@ spec:
 				g.Expect(w.Managed).To(BeTrue())
 				g.Expect(w.HourlyCost).To(BeNumerically(">", 0))
 				g.Expect(result.Totals.Paused).To(Equal(1))
+				g.Expect(result.NodePrices.NodeTypes).To(ContainElement(SatisfyAll(
+					HaveField("InstanceType", "m6i.large"), HaveField("Listed", true))))
 			}, 4*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("pricing at the user's own prices in place of the nodes'")
+			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", scanNamespace, "-o", "json",
+				"--cpu-price", "10", "--memory-price", "0"))
+			Expect(err).NotTo(HaveOccurred())
+			var own scanned
+			Expect(json.Unmarshal([]byte(out), &own)).To(Succeed())
+			Expect(own.Workloads).To(HaveLen(1))
+			Expect(own.Workloads[0].HourlyCost).To(BeNumerically("~", 2*0.010*10, 1e-6),
+				"two replicas of 10m at $10 per vCPU-hour")
 		})
 	})
 

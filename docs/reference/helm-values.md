@@ -162,6 +162,7 @@ The chart creates a ClusterRole with permissions to:
 - Read PersistentVolumeClaims (for retention cleanup)
 - Read pod metrics from metrics-server
 - Read pods, to price what pausing a workload frees, sidecars included. Pods are read when needed rather than watched, so they aren't cached
+- Read Nodes' metadata, to price workloads at the list price of the instance types they run on. Only names and labels are cached
 - Create Events for user-facing status updates
 - Read Services, and manage the EndpointSlices that route paused workloads to the doorman
 

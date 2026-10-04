@@ -466,6 +466,41 @@ spec:
                     description: LastAccumulatedAt is when costs were last accumulated.
                     format: date-time
                     type: string
+                  listRates:
+                    description: |-
+                      ListRates are the on-demand list rates of the nodes the workload's
+                      pods last ran on, from their instance type and region, which its cost
+                      and savings are priced at unless costTracking.rates sets its own.
+                      Kept while it's paused, so savings are priced at where it ran. Unset
+                      when its nodes aren't in Hybernate's price table, and the default
+                      rates apply.
+                    properties:
+                      cpuPerHour:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: 'CPUPerHour is the cost per vCPU-hour (default:
+                          $0.031, AWS on-demand).'
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memoryPerHour:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: 'MemoryPerHour is the cost per GiB-hour (default:
+                          $0.004, AWS on-demand).'
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storagePerMonth:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          StoragePerMonth is the cost per GiB-month for PVC storage
+                          (default: $0.08, AWS EBS gp3).
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
                   resourceReduction:
                     description: |-
                       ResourceReduction tracks the concrete resources freed by Hybernate actions.

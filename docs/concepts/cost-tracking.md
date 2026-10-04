@@ -10,7 +10,7 @@ Hybernate tracks per-workload resource consumption and estimates the potential c
 
 ## How Costs Are Calculated
 
-Cost tracking is always enabled. Every ManagedWorkload accumulates resource consumption and calculates savings automatically using AWS on-demand defaults.
+Cost tracking is always enabled. Every ManagedWorkload accumulates resource consumption and calculates savings automatically, priced at the on-demand list price of the nodes it runs on.
 
 ### Resource Accumulation
 
@@ -24,9 +24,13 @@ Storage Hours += storage_gib × elapsed_hours
 
 Elapsed time is capped at 2 hours per accumulation to bound error after operator restarts.
 
-### Dollar Costs
+### Prices
 
-Resource hours are converted to dollar costs using configurable rates:
+Resource hours are converted to dollars at rates per vCPU-hour and per GiB-hour. The first of these that applies sets them:
+
+1. **Your own rates**, in `costTracking.rates`, each part on its own.
+2. **The list price of its nodes.** Hybernate reads each pod's node's instance type and region from its labels (`node.kubernetes.io/instance-type`, `topology.kubernetes.io/region`), looks up its on-demand list price, and averages over the workload's pods. The rates are kept in `status.cost.listRates`, and while the workload is paused its savings stay priced at the nodes it last ran on.
+3. **The defaults**, for nodes Hybernate has no list price for, such as on-premises, custom, or kind nodes:
 
 | Resource | Default Rate | Source |
 |----------|-------------|--------|
@@ -34,9 +38,17 @@ Resource hours are converted to dollar costs using configurable rates:
 | Memory | $0.004/GiB-hour | AWS on-demand (m6i.large, us-east-1, 2026) |
 | Storage | $0.08/GiB-month ($0.000110/GiB-hour) | AWS EBS gp3, us-east-1 |
 
+**How a node's price becomes rates.** A cloud provider prices an instance as a whole, so Hybernate splits its hourly price between its vCPUs and its memory in the defaults' proportion: a vCPU costs as much as 7.75 GiB of memory. An `m6i.large` (2 vCPU, 8 GiB, $0.096 an hour) comes out at $0.032 per vCPU-hour and $0.0041 per GiB-hour. A memory-optimized instance's memory and a compute-optimized one's CPU come out at what they cost there, and a pod pays for the share of the node it requests.
+
+**Where the prices come from.** Hybernate ships with the on-demand Linux list price of every AWS, Google Cloud, and Azure instance type, in every region it's sold, taken from the providers' public price lists through [instances.vantage.sh](https://instances.vantage.sh) and refreshed each release. Nothing is looked up at runtime, so it works offline and air-gapped. Instances on GPU nodes are priced the same way, so a pod on a GPU node pays its share of the GPU too.
+
+**What list prices leave out.** Spot and preemptible nodes are priced at on-demand, so their workloads cost less than shown. Savings plans, reserved instances, committed-use discounts, and negotiated rates aren't known to Hybernate; set `costTracking.rates` for those, or see [Hybernate Hub](https://okedeji.io/hybernate/hub), which checks savings against your cloud bill.
+
+Hybernate reads Nodes' metadata to do this: only their names and labels are cached.
+
 ### Custom Rates
 
-Override defaults to match your cloud provider's pricing:
+Set your own rates to match what you pay:
 
 ```yaml title="managedworkload.yaml" linenums="1"
 spec:
@@ -82,6 +94,9 @@ status:
     estimatedMonthlyCost: "$45.60"
     estimatedMonthlySavings: "$23.40"
     estimatedCostWithoutManagement: "$69.00"
+    listRates:
+      cpuPerHour: 31661u      # $0.031661 per vCPU-hour
+      memoryPerHour: 4085u    # $0.004085 per GiB-hour
     resourceReduction:
       cpuMillis: 3000
       memoryBytes: 6442450944
@@ -94,6 +109,7 @@ status:
 | `estimatedMonthlyCost` | Projected full-month cost based on usage so far. Shows "pending" on day 1. |
 | `estimatedMonthlySavings` | Projected savings from Hybernate actions this month. Only realized when freed resources lead to node removal. |
 | `estimatedCostWithoutManagement` | Estimated cost without Hybernate: estimated cost + estimated savings. |
+| `listRates` | The on-demand list rates of the nodes the workload's pods last ran on, which it's priced at unless `costTracking.rates` sets its own. Unset when its nodes have no list price, and the defaults apply. |
 | `resourceReduction` | Concrete CPU, memory, and replicas freed by Hybernate actions. Always accurate regardless of autoscaler behavior. |
 
 ## Viewing Costs Across Workloads

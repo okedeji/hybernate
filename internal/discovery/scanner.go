@@ -26,7 +26,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
-	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 // hoursPerMonth is the average month, for monthly costs.
@@ -71,14 +70,14 @@ func (s *Scanner) listWorkloads(ctx context.Context, namespace string, kind v1al
 	}
 }
 
-// podRequests returns what one of the workload's pods requests. A pod that
-// can't be listed is priced from the template.
-func (s *Scanner) podRequests(ctx context.Context, namespace string, sel labels.Selector, spec corev1.PodSpec) (cpuMillis, memBytes int64) {
+// workloadPods are the workload's pods, or none when they can't be listed,
+// which prices it from its template at the scan's rates.
+func (s *Scanner) workloadPods(ctx context.Context, namespace string, sel labels.Selector) []corev1.Pod {
 	var pods corev1.PodList
 	if err := s.pods.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
-		return metrics.Requests(metrics.WorkloadContainers(spec))
+		return nil
 	}
-	return metrics.PodRequests(pods.Items, spec)
+	return pods.Items
 }
 
 // workloadFields extracts the common fields from a Deployment or StatefulSet.

@@ -23,17 +23,23 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/cost"
 )
 
 // ErrNoPodMetrics is returned when the Metrics API reports no pods for a
 // workload: it has no running pods, or metrics-server isn't reporting them.
 var ErrNoPodMetrics = errors.New("no pod metrics found")
+
+// ErrNoScheduledPods is returned when none of a workload's pods is on a
+// node, so there's nothing to price it at.
+var ErrNoScheduledPods = errors.New("no pods on a node")
 
 // Reader reads workload metrics from the Kubernetes Metrics API and the
 // workload's pods, finding them by the target's spec.selector.matchLabels.
@@ -147,6 +153,50 @@ func (r *Reader) PodRequestsPerReplica(ctx context.Context, workload *v1alpha1.M
 	}
 	cpu, mem := PodRequests(pods.Items, podSpecFromTarget(target))
 	return float64(cpu), float64(mem), nil
+}
+
+// ListRates is what the nodes the workload's pods run on cost per vCPU and
+// GiB at on-demand list prices, averaged over its pods, and false when none
+// runs on a node the price table has. ErrNoScheduledPods means it has no pod
+// on a node. Nodes are read as metadata only: their labels are all pricing
+// needs.
+func (r *Reader) ListRates(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cost.Rates, bool, error) {
+	target, err := r.getTarget(ctx, workload)
+	if err != nil {
+		return cost.Rates{}, false, err
+	}
+	selector, err := selectorFromTarget(target)
+	if err != nil {
+		return cost.Rates{}, false, err
+	}
+	var pods corev1.PodList
+	if err := r.pods.List(ctx, &pods, client.InNamespace(workload.Namespace),
+		client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return cost.Rates{}, false, fmt.Errorf("listing pods for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
+	}
+	var rates []cost.Rates
+	scheduled := 0
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil || pod.Spec.NodeName == "" {
+			continue
+		}
+		scheduled++
+		node := &metav1.PartialObjectMetadata{}
+		node.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Node"))
+		if err := r.client.Get(ctx, types.NamespacedName{Name: pod.Spec.NodeName}, node); err != nil {
+			return cost.Rates{}, false, fmt.Errorf("reading node %s: %w", pod.Spec.NodeName, err)
+		}
+		if p, ok := cost.ListPriceOf(cost.NodeTypeOf(node.Labels)); ok {
+			rates = append(rates, p.Rates)
+		}
+	}
+	if scheduled == 0 {
+		return cost.Rates{}, false, ErrNoScheduledPods
+	}
+	if len(rates) == 0 {
+		return cost.Rates{}, false, nil
+	}
+	return cost.Mean(rates), true, nil
 }
 
 // TotalPVCBytes returns the total provisioned PVC capacity in bytes for
