@@ -519,3 +519,19 @@ func TestWriteScan_SavedThisMonth(t *testing.T) {
 	assert.Regexp(t, `preview-3\s+deployment/web\s+paused \(live\)\s+paused 3h ago\s+\$48\s+\$4\s+-\s+-\s+-`, got,
 		"a live workload's saving is in SAVED THIS MONTH, with nothing estimated")
 }
+
+func TestWriteScan_Protected(t *testing.T) {
+	result := historyResult()
+	for i := range result.Workloads {
+		if result.Workloads[i].Name == "postgres" {
+			result.Workloads[i].Protected = true
+		}
+	}
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, result, scanOptions{output: "table"}))
+
+	got := out.String()
+	assert.Regexp(t, `statefulset/postgres\s+idle \(protected\)`, got)
+	assert.NotContains(t, got, "kubectl label statefulset postgres", "never suggested")
+}

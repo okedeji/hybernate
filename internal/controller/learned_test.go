@@ -303,3 +303,17 @@ func TestLearnDependencies_KeepsWhatWakesTaught(t *testing.T) {
 
 	assert.Equal(t, []string{"default/postgres DATABASE_URL", "default/redis "}, learnedNames(api))
 }
+
+// Installed for some namespaces only, Hybernate can't list pods across the
+// cluster, so it looks for the sender in each namespace it watches.
+func TestLearnFromWake_WatchedNamespaces(t *testing.T) {
+	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
+	postgres := wokenPostgres()
+	r := wakeReconciler(t, podOf("api", false), selecting(v1alpha1.TargetKindDeployment, "api", nil), api, postgres,
+		selecting(v1alpha1.TargetKindStatefulSet, "postgres", nil))
+	r.WatchNamespaces = []string{"preview-1", "default"}
+
+	require.NoError(t, r.learnFromWake(context.Background(), postgres))
+
+	assert.Equal(t, []string{"default/postgres "}, learnedNames(fetch(t, r, "api")))
+}

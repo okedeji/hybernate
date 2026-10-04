@@ -50,61 +50,8 @@ const metricsServiceName = "hybernate-controller-manager-metrics-service"
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "hybernate-metrics-binding"
 
-var _ = Describe("Manager", Ordered, func() {
+var _ = Describe("Manager", func() {
 	var controllerPodName string
-
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
-	BeforeAll(func() {
-		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
-
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
-
-		By("installing CRDs")
-		cmd = exec.Command("make", "install")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
-	})
-
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
-	AfterAll(func() {
-		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
-		_, _ = utils.Run(cmd)
-
-		// The specs delete their namespaces without waiting, so their
-		// ManagedWorkloads can still hold the cleanup finalizer. Once the
-		// operator is gone nothing releases it, and deleting the CRD hangs.
-		By("deleting every ManagedWorkload while the operator can still release its finalizer")
-		cmd = exec.Command("kubectl", "delete", "managedworkloads", "--all", "--all-namespaces", "--timeout=2m")
-		_, _ = utils.Run(cmd)
-
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
-		_, _ = utils.Run(cmd)
-
-		By("uninstalling CRDs")
-		cmd = exec.Command("make", "uninstall")
-		_, _ = utils.Run(cmd)
-
-		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
-		_, _ = utils.Run(cmd)
-	})
 
 	// After each test, check for failures and collect logs, events,
 	// and pod descriptions for debugging.
@@ -112,7 +59,8 @@ var _ = Describe("Manager", Ordered, func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {
 			By("Fetching controller manager pod logs")
-			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+			cmd := exec.Command("kubectl", "logs", "-l", "control-plane=controller-manager", "-n", namespace,
+				"--tail=500")
 			controllerLogs, err := utils.Run(cmd)
 			if err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
@@ -149,7 +97,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 
 			By("Fetching controller manager pod description")
-			cmd = exec.Command("kubectl", "describe", "pod", controllerPodName, "-n", namespace)
+			cmd = exec.Command("kubectl", "describe", "pod", "-l", "control-plane=controller-manager", "-n", namespace)
 			podDescription, err := utils.Run(cmd)
 			if err == nil {
 				fmt.Println("Pod description:\n", podDescription)
@@ -162,7 +110,7 @@ var _ = Describe("Manager", Ordered, func() {
 	SetDefaultEventuallyTimeout(2 * time.Minute)
 	SetDefaultEventuallyPollingInterval(time.Second)
 
-	Context("Manager", func() {
+	Context("Manager", Ordered, func() {
 		It("should run successfully", func() {
 			By("validating that the controller-manager pod is running as expected")
 			verifyControllerUp := func(g Gomega) {
@@ -294,7 +242,7 @@ var _ = Describe("Manager", Ordered, func() {
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 	})
 
-	Context("ManagedWorkload lifecycle", func() {
+	Context("ManagedWorkload lifecycle", Ordered, func() {
 		const (
 			appNamespace = "hybernate-e2e-apps"
 			appName      = "e2e-app"
@@ -360,26 +308,15 @@ spec:
 		})
 	})
 
-	Context("Idle clock", func() {
+	Context("Idle clock", Ordered, func() {
 		const (
 			idleNamespace = "hybernate-e2e-idle"
 			idleName      = "e2e-idle-app"
 		)
 
 		BeforeAll(func() {
-			By("installing metrics-server, which the clock needs to read CPU activity")
-			_, err := utils.Run(exec.Command("kubectl", "apply", "-f", metricsServerManifest))
-			Expect(err).NotTo(HaveOccurred())
-			// kind's kubelets serve self-signed certificates.
-			_, err = utils.Run(exec.Command("kubectl", "patch", "deployment", "metrics-server", "-n", "kube-system",
-				"--type=json", "-p", `[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]`))
-			Expect(err).NotTo(HaveOccurred())
-			_, err = utils.Run(exec.Command("kubectl", "wait", "--for=condition=Available",
-				"apiservice/v1beta1.metrics.k8s.io", "--timeout=3m"))
-			Expect(err).NotTo(HaveOccurred())
-
 			By("creating an idle Deployment")
-			_, err = utils.Run(exec.Command("kubectl", "create", "ns", idleNamespace))
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", idleNamespace))
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() {
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", idleNamespace, "--wait=false"))
@@ -425,8 +362,7 @@ spec:
 		})
 	})
 
-	// Runs after "Idle clock", which installs metrics-server.
-	Context("Dependencies", func() {
+	Context("Dependencies", Ordered, func() {
 		const depsNamespace = "hybernate-e2e-deps"
 
 		BeforeAll(func() {
@@ -491,8 +427,7 @@ spec:
 		})
 	})
 
-	// Runs after "Idle clock", which installs metrics-server.
-	Context("Wake on request", func() {
+	Context("Wake on request", Ordered, func() {
 		const (
 			wakeNamespace = "hybernate-e2e-wake"
 			webName       = "e2e-web"
@@ -689,8 +624,7 @@ spec:
 		})
 	})
 
-	// Runs after "Idle clock", which installs metrics-server.
-	Context("Scan", func() {
+	Context("Scan", Ordered, func() {
 		const scanNamespace = "hybernate-e2e-scan"
 
 		BeforeAll(func() {
@@ -778,8 +712,7 @@ spec:
 		})
 	})
 
-	// Runs after "Idle clock", which installs metrics-server.
-	Context("Scan with history", func() {
+	Context("Scan with history", Ordered, func() {
 		const (
 			historyNamespace = "hybernate-e2e-history"
 			promNamespace    = "hybernate-e2e-monitoring"
@@ -918,7 +851,7 @@ spec:
 		})
 	})
 
-	Context("Scan dependencies", func() {
+	Context("Scan dependencies", Ordered, func() {
 		const depsScanNamespace = "hybernate-e2e-deps-scan"
 
 		BeforeAll(func() {
@@ -1046,8 +979,7 @@ spec:
 		})
 	})
 
-	// Runs after "Idle clock", which installs metrics-server.
-	Context("Label opt-in", func() {
+	Context("Label opt-in", Ordered, func() {
 		const (
 			optInNamespace = "hybernate-e2e-optin"
 			optInName      = "e2e-labelled"
@@ -1126,8 +1058,7 @@ spec:
 		})
 	})
 
-	// Runs after "Idle clock", which installs metrics-server.
-	Context("GitOps", func() {
+	Context("GitOps", Ordered, func() {
 		const (
 			gitOpsNamespace = "hybernate-e2e-gitops"
 			gitOpsName      = "e2e-synced"
@@ -1203,8 +1134,7 @@ spec:
 		})
 	})
 
-	// Runs after "Idle clock", which installs metrics-server.
-	Context("Autoscalers", func() {
+	Context("Autoscalers", Ordered, func() {
 		const autoscaleNamespace = "hybernate-e2e-autoscale"
 		manage := func(name string) {
 			Expect(kubectlApply(fmt.Sprintf(`
@@ -1322,6 +1252,57 @@ spec:
 			Expect(jsonpath("scaledobject", "e2e-keda", autoscaleNamespace,
 				`{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}`)).To(BeEmpty())
 			Expect(replicas("e2e-keda")()).NotTo(Equal("0"))
+		})
+	})
+
+	Context("Protected namespaces", Ordered, func() {
+		const protectedNamespace = "hybernate-e2e-protected"
+
+		BeforeAll(func() {
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", protectedNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", protectedNamespace, "--wait=false"))
+			})
+			Expect(kubectlApply(deploymentManifest("e2e-guarded", protectedNamespace, 2))).To(Succeed())
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: e2e-guarded, namespace: %s}
+spec:
+  target: {kind: Deployment, name: e2e-guarded}
+  idlePolicy: {idleAfter: 1m}
+  prediction: {confidence: 85}
+`, protectedNamespace))).To(Succeed())
+		})
+
+		It("wakes what it had paused once the namespace is protected, and opts nothing in there", func() {
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", "e2e-guarded", protectedNamespace, "{.status.phase}")
+			}, 4*time.Minute, 5*time.Second).Should(Equal("Paused"))
+
+			By("protecting the namespace")
+			_, err := utils.Run(exec.Command("kubectl", "label", "namespace", protectedNamespace,
+				"hybernate.io/protected=true"))
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", "e2e-guarded", protectedNamespace, "{.status.phase}")).
+					To(Equal("Running"))
+				g.Expect(jsonpath("managedworkload", "e2e-guarded", protectedNamespace,
+					`{.status.conditions[?(@.type=="Protected")].status}`)).To(Equal("True"))
+				g.Expect(jsonpath("deployment", "e2e-guarded", protectedNamespace, "{.spec.replicas}")).To(Equal("2"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("labelling a new workload there for Hybernate, which must not opt it in")
+			Expect(kubectlApply(deploymentManifest("e2e-labelled", protectedNamespace, 1))).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "label", "deployment", "e2e-labelled", "-n", protectedNamespace,
+				"hybernate.io/managed=true"))
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(func() error {
+				_, err := jsonpath("managedworkload", "e2e-labelled", protectedNamespace, "{.metadata.name}")
+				return err
+			}, 30*time.Second, 5*time.Second).Should(HaveOccurred(), "no ManagedWorkload is created")
 		})
 	})
 })

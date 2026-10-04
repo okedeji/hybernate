@@ -61,6 +61,10 @@ type OptInReconciler struct {
 	Recorder events.EventRecorder
 	Kind     v1alpha1.TargetKind
 	Defaults OptInDefaults
+	// ProtectedNamespaces are name patterns of namespaces whose workloads
+	// aren't opted in, whatever their labels, unless the namespace is
+	// labelled to allow it.
+	ProtectedNamespaces []string
 }
 
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
@@ -110,11 +114,19 @@ func (r *OptInReconciler) newWorkload() client.Object {
 }
 
 // optedIn reports whether the workload is managed through the label: its
-// own, or its namespace's, unless it's marked to be ignored. A label value
+// own, or its namespace's, unless it's marked to be ignored or its
+// namespace is protected. A label value
 // other than "true" doesn't opt in, and is pointed out, since it's most
 // likely a setting meant for an annotation.
 func (r *OptInReconciler) optedIn(obj client.Object, ns *corev1.Namespace) bool {
 	if obj.GetLabels()[v1alpha1.LabelIgnore] == v1alpha1.True {
+		return false
+	}
+	if v1alpha1.Protected(ns.Name, ns.Labels, r.ProtectedNamespaces) {
+		if obj.GetLabels()[v1alpha1.LabelManaged] == v1alpha1.True || ns.Labels[v1alpha1.LabelManaged] == v1alpha1.True {
+			r.Recorder.Eventf(obj, nil, "Warning", ReasonProtected, actionOptIn,
+				"namespace %s is protected, so the %s label doesn't opt the workload in", ns.Name, v1alpha1.LabelManaged)
+		}
 		return false
 	}
 	if v, ok := obj.GetLabels()[v1alpha1.LabelManaged]; ok {

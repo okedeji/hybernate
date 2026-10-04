@@ -290,14 +290,23 @@ func (r *Reconciler) podAt(ctx context.Context, ip string) (*corev1.Pod, bool, e
 	if reader == nil {
 		reader = r.Client
 	}
-	var pods corev1.PodList
-	if err := reader.List(ctx, &pods, client.MatchingFields{podIPField: ip}); err != nil {
-		return nil, false, fmt.Errorf("finding the pod at %s: %w", ip, err)
+	// Listing pods across namespaces needs a ClusterRole, which a
+	// namespaced install doesn't have; the watched namespaces are searched
+	// one by one instead.
+	namespaces := r.WatchNamespaces
+	if len(namespaces) == 0 {
+		namespaces = []string{metav1.NamespaceAll}
 	}
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		if !p.Spec.HostNetwork && p.DeletionTimestamp == nil {
-			return p, true, nil
+	for _, ns := range namespaces {
+		var pods corev1.PodList
+		if err := reader.List(ctx, &pods, client.InNamespace(ns), client.MatchingFields{podIPField: ip}); err != nil {
+			return nil, false, fmt.Errorf("finding the pod at %s: %w", ip, err)
+		}
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			if !p.Spec.HostNetwork && p.DeletionTimestamp == nil {
+				return p, true, nil
+			}
 		}
 	}
 	return nil, false, nil

@@ -136,7 +136,7 @@ The file goes to your temporary directory unless you pass `--html FILE`. It open
 
 **Cluster names:** EKS and GKE contexts are shortened to the cluster with its provider and region, such as `staging (EKS us-east-1)` for `arn:aws:eks:us-east-1:123456789012:cluster/staging`. Any other context is shown as named. JSON and YAML keep the full context name.
 
-**STATE** is what the workload is doing right now, and the bracket how Hybernate is involved: **unmanaged**, not at all; **dry-run**, it measures but never pauses; **live**, it pauses the workload while idle. A workload someone scaled to zero shows as `paused (unmanaged)`: it costs nothing now, but nothing will wake it on a request, and the headline counts it apart from what Hybernate has paused. Workloads labelled `hybernate.io/ignore=true` aren't listed.
+**STATE** is what the workload is doing right now, and the bracket how Hybernate is involved: **unmanaged**, not at all; **dry-run**, it measures but never pauses; **live**, it pauses the workload while idle; **protected**, its namespace is labelled `hybernate.io/protected`, so Hybernate won't manage it, and it's left out of what pausing could save and of the next steps. The operator's `protectedNamespaces` patterns aren't visible to the scan, which only sees the label. A workload someone scaled to zero shows as `paused (unmanaged)`: it costs nothing now, but nothing will wake it on a request, and the headline counts it apart from what Hybernate has paused. Workloads labelled `hybernate.io/ignore=true` aren't listed.
 
 ```bash
 # Another cluster in your kubeconfig

@@ -84,6 +84,7 @@ nav:
       - Helm Values: reference/helm-values.md
       - Metrics: reference/metrics.md
       - Labels & Annotations: reference/labels-annotations.md
+      - Data and Access: reference/data-and-access.md
       - Configuration: reference/configuration.md
       - Compatibility: reference/compatibility.md
   - Operations:

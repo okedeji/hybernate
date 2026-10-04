@@ -1,0 +1,29 @@
+name: Helm Smoke Test
+
+on:
+  pull_request:
+
+jobs:
+  helm-smoke:
+    name: Helm (watchNamespaces)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install the chart with watchNamespaces and pause and resume a workload
+        run: make test-helm-smoke

@@ -78,6 +78,18 @@ kubectl hybernate enable --all -n preview-42     # every workload in the namespa
 
 If Argo CD or Flux applies the workload, `enable` doesn't change the cluster, since the tool would put the annotation back. It names the tool and prints the change to make in Git instead.
 
+## Protected namespaces
+
+Label a namespace `hybernate.io/protected: "true"`, such as production, and Hybernate never manages anything in it, whatever labels its workloads or the namespace carry. Nothing there is opted in, a ManagedWorkload written for one reports `Protected=True` and is never paused, and a workload Hybernate had paused before the namespace was protected is woken, so protecting a namespace never leaves anything off. A warning event says why on each.
+
+```bash
+kubectl label namespace payments hybernate.io/protected=true
+```
+
+To protect namespaces by name instead, such as every `prod-*`, set the Helm value `protectedNamespaces`. A protected namespace is managed again only when labelled `hybernate.io/allow-protected: "true"` on purpose; Hybernate never sets either label.
+
+To keep Hybernate out of namespaces altogether, not by its own rule but by Kubernetes RBAC, install it with `watchNamespaces`; see [Helm values](../reference/helm-values.md#namespaces).
+
 ## With GitOps
 
 The decision to manage a workload lives in Git, as the label. The ManagedWorkload Hybernate creates from it is owned by the workload, like the ReplicaSets a Deployment creates, so Argo CD and Flux leave it alone and Argo CD shows it under the workload. Hybernate never copies the workload's labels onto it, so a GitOps tool's tracking label can't make the tool claim and prune it.
