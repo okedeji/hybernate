@@ -27,7 +27,6 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -314,16 +313,12 @@ func hasPrometheusActivity(workload *v1alpha1.ManagedWorkload) bool {
 // spec.replicas and bumps metadata.generation, so the generation can't tell
 // a deploy from Hybernate's own pause and resume; the template can.
 func podTemplateHash(target client.Object) string {
-	var template corev1.PodTemplateSpec
-	switch t := target.(type) {
-	case *appsv1.Deployment:
-		template = t.Spec.Template
-	case *appsv1.StatefulSet:
-		template = t.Spec.Template
+	switch target.(type) {
+	case *appsv1.Deployment, *appsv1.StatefulSet:
 	default:
 		return ""
 	}
-	data, err := json.Marshal(template)
+	data, err := json.Marshal(podTemplateOf(target))
 	if err != nil {
 		return ""
 	}

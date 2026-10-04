@@ -1,6 +1,6 @@
 # Dependencies
 
-Some workloads never see outside traffic: databases, message brokers, caches, workers. Their own [activity clock](idle-detection.md) can run out while the workloads that use them are still busy. `dependsOn` tells Hybernate who needs what.
+Some workloads never see outside traffic: databases, message brokers, caches, workers. Their own [activity clock](idle-detection.md) can run out while the workloads that use them are still busy. Hybernate [learns](#learned-dependencies) who needs what from each workload's environment, and `dependsOn` declares it by hand.
 
 ```yaml title="managedworkload.yaml" linenums="1"
 kind: ManagedWorkload
@@ -64,12 +64,39 @@ There's no timeout, because a slow start is exactly why you'd set it. If the wai
 
 Dependencies can point into other namespaces, so preview environments can share a database or broker that lives elsewhere. A dependency can only be kept awake or woken by its dependents, never paused, scaled down, or deleted, so the most a dependent in another namespace can do is keep it running. `HeldByDependents` always names the holders by namespace.
 
+## Learned dependencies
+
+Hybernate reads the environment of every workload it manages, the way [`kubectl hybernate scan`](../getting-started/kubectl-plugin.md#scan-a-cluster) does: each variable, literal or from a ConfigMap, holding an address that names a Service, in any form cluster DNS gives it (`postgres`, `postgres.preview-42.svc.cluster.local`, or a headless Service's pod, `postgres-0.postgres-hl`), followed to the workload the Service selects. Each one it finds is held awake and woken exactly like a `dependsOn`, with no YAML to write:
+
+```yaml title="status.learnedDependencies"
+learnedDependencies:
+  from: 3f9c2a71d0e4b815
+  at: "2026-10-04T09:12:00Z"
+  dependencies:
+    - {namespace: preview-42, kind: StatefulSet, name: postgres, source: environment, via: PGHOST, address: postgres-0.postgres-hl}
+    - {namespace: preview-42, kind: StatefulSet, name: redis, source: wake}
+```
+
+with a `DependenciesLearned` event when the set changes. They're learned again when the pod template changes, and hourly for ConfigMaps changed since. Secrets are never read, so an address set only in a Secret isn't learned from the environment.
+
+**From wakes, too.** When a request wakes a paused workload, the [doorman](wake-on-request.md) records where it came from, and the operator finds the pod that sent it. If that pod belongs to a workload Hybernate manages, that workload depends on the one it woke, and the link is learned with `source: wake`. That covers addresses in Secrets, built in code, or read from files, the first time they're used. A request from a workload Hybernate doesn't manage, such as an ingress controller, or from a pod on the node's network, teaches nothing. Links learned from wakes are kept when the environment is read again.
+
+A learned link is safe to apply on its own: a wrong one can only keep a workload awake longer, or wake it, never pause it. To drop one, name it in `hybernate.io/ignore-dependencies` on the workload or its ManagedWorkload, comma-separated, as `namespace/name` or a name in its own namespace:
+
+```yaml
+metadata:
+  annotations:
+    hybernate.io/ignore-dependencies: "redis, messaging/nats"
+```
+
+`dependsOn` still applies alongside, and is the only way to set `waitForReady`. [`kubectl hybernate deps`](../getting-started/kubectl-plugin.md#show-a-workloads-dependencies) shows a workload's links in both directions, and where each came from.
+
 ## When you need dependsOn
 
-A request through a normal Service wakes a paused workload by itself, through [wake on request](wake-on-request.md): an app's connection to a paused database's Service is held by the doorman and wakes the database, costing that one connection a wait. `dependsOn` is what you need when that can't happen or isn't enough:
+A request through a normal Service wakes a paused workload by itself, through [wake on request](wake-on-request.md), and learned dependencies cover what's in the environment, headless addresses included. `dependsOn` is what you need for the rest:
 
-- **Headless addresses.** Apps that connect to a pod or a headless Service (`postgres-0.postgres-hl`) go straight to pods, so the doorman never sees the connection. Only `dependsOn` wakes the dependency first.
-- **No slow first request.** Waking dependencies with the workload, and `waitForReady`, means the first request doesn't wait for the database too.
-- **Holding a dependency awake** while its dependents are, so it doesn't pause under them.
+- **`waitForReady`**, so the first request doesn't wait for the database too, or the app doesn't fail starting before it.
+- **Addresses Hybernate hasn't seen used yet**: set in Secrets, built in code, or read from files, before a request to a paused dependency teaches it.
+- **A dependency on a workload behind no Service**, which no address names.
 
-[`kubectl hybernate scan`](../getting-started/kubectl-plugin.md#scan-a-cluster) reads workloads' environment variables and lists the dependencies it finds there, with whether each is declared.
+[`kubectl hybernate scan`](../getting-started/kubectl-plugin.md#scan-a-cluster) lists the dependencies it finds in each workload's environment, and whether each is declared, connected by Hybernate, or will be once Hybernate manages the workload.

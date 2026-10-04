@@ -603,6 +603,67 @@ spec:
                   phases.
                 format: date-time
                 type: string
+              learnedDependencies:
+                description: |-
+                  LearnedDependencies are the workloads Hybernate found this one depends
+                  on without a dependsOn: from addresses in its environment that name
+                  their Services, and from requests it sent that woke them. They're held
+                  awake and woken like dependsOn, less the ones the
+                  hybernate.io/ignore-dependencies annotation names.
+                properties:
+                  at:
+                    description: |-
+                      At is when they were last learned. They're also learned again
+                      hourly, for ConfigMaps changed since.
+                    format: date-time
+                    type: string
+                  dependencies:
+                    items:
+                      description: LearnedDependency is one workload this one was
+                        found to depend on.
+                      properties:
+                        address:
+                          type: string
+                        kind:
+                          enum:
+                          - Deployment
+                          - StatefulSet
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        source:
+                          description: |-
+                            Source is how it was found: in the workload's environment, or from a
+                            request it sent that woke the dependency.
+                          enum:
+                          - environment
+                          - wake
+                          type: string
+                        via:
+                          description: |-
+                            Via is the environment variable that holds its address, and Address
+                            the address, with any password hidden, for one found in the
+                            environment.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      - source
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  from:
+                    description: |-
+                      From identifies what they were learned from, the pod template and the
+                      ignore annotation, so they're learned again when either changes.
+                    type: string
+                required:
+                - at
+                - from
+                type: object
               pause:
                 description: Pause holds state while the workload is paused.
                 properties:

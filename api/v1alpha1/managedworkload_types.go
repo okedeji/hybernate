@@ -283,6 +283,14 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	Pause *PauseStatus `json:"pause,omitempty"`
 
+	// LearnedDependencies are the workloads Hybernate found this one depends
+	// on without a dependsOn: from addresses in its environment that name
+	// their Services, and from requests it sent that woke them. They're held
+	// awake and woken like dependsOn, less the ones the
+	// hybernate.io/ignore-dependencies annotation names.
+	// +optional
+	LearnedDependencies *LearnedDependencies `json:"learnedDependencies,omitempty"`
+
 	// LastScaledUp is the last time something other than Hybernate scaled
 	// the workload up while it was paused, which wakes it.
 	// +optional
@@ -354,6 +362,48 @@ const (
 	// ActivitySourceScaledUp is a paused workload scaled up by something
 	// other than Hybernate, such as a person or a GitOps tool.
 	ActivitySourceScaledUp ActivitySource = "scaled-up"
+)
+
+// LearnedDependencies are dependencies Hybernate found, and what from.
+type LearnedDependencies struct {
+	// From identifies what they were learned from, the pod template and the
+	// ignore annotation, so they're learned again when either changes.
+	From string `json:"from"`
+
+	// At is when they were last learned. They're also learned again
+	// hourly, for ConfigMaps changed since.
+	At metav1.Time `json:"at"`
+
+	// +listType=atomic
+	// +optional
+	Dependencies []LearnedDependency `json:"dependencies,omitempty"`
+}
+
+// LearnedDependency is one workload this one was found to depend on.
+type LearnedDependency struct {
+	Namespace string     `json:"namespace"`
+	Kind      TargetKind `json:"kind"`
+	Name      string     `json:"name"`
+
+	// Source is how it was found: in the workload's environment, or from a
+	// request it sent that woke the dependency.
+	Source LearnedSource `json:"source"`
+
+	// Via is the environment variable that holds its address, and Address
+	// the address, with any password hidden, for one found in the
+	// environment.
+	// +optional
+	Via string `json:"via,omitempty"`
+	// +optional
+	Address string `json:"address,omitempty"`
+}
+
+// +kubebuilder:validation:Enum=environment;wake
+type LearnedSource string
+
+const (
+	LearnedFromEnvironment LearnedSource = "environment"
+	LearnedFromWake        LearnedSource = "wake"
 )
 
 // ScaledUp is a paused workload scaled up outside Hybernate.

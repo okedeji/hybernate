@@ -39,6 +39,9 @@ spec:
           args:
             - --doorman
             - --health-probe-bind-address=:8081
+            {{- with .Values.watchNamespaces }}
+            - --watch-namespaces={{ join "," . }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             {{- if .Values.metrics.secure }}
@@ -106,6 +109,7 @@ metadata:
 The doorman reads its routes from ManagedWorkload status, reads the woken
 workload's endpoints, and wakes it by patching an annotation. Nothing else.
 */}}
+{{- if not .Values.watchNamespaces }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -113,15 +117,7 @@ metadata:
   labels:
     {{- include "hybernate.doormanLabels" . | nindent 4 }}
 rules:
-  - apiGroups: [hybernate.io]
-    resources: [managedworkloads]
-    verbs: [get, list, watch, patch]
-  - apiGroups: [discovery.k8s.io]
-    resources: [endpointslices]
-    verbs: [get, list, watch]
-  - apiGroups: ["", events.k8s.io]
-    resources: [events]
-    verbs: [create, patch]
+  {{- include "hybernate.doormanRules" . | nindent 2 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -137,6 +133,35 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "hybernate.doormanName" . }}
     namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- range .Values.watchNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "hybernate.doormanName" $ }}
+  namespace: {{ . }}
+  labels:
+    {{- include "hybernate.doormanLabels" $ | nindent 4 }}
+rules:
+  {{- include "hybernate.doormanRules" $ | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "hybernate.doormanName" $ }}
+  namespace: {{ . }}
+  labels:
+    {{- include "hybernate.doormanLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "hybernate.doormanName" $ }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hybernate.doormanName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- if .Values.metrics.secure }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -68,7 +68,7 @@ func (a Autoscaler) Clamp(n int32) int32 {
 	return min(max(n, a.Min), a.Max)
 }
 
-// kedaRecheck is how long a Finder remembers that KEDA isn't installed. The
+// kedaRecheck is how long Find remembers that KEDA isn't installed. The
 // client asks the API server for all its API groups each time it looks up a
 // kind it doesn't know, which on every reconcile of every workload adds up.
 const kedaRecheck = 10 * time.Minute
@@ -87,12 +87,25 @@ func NewFinder(c client.Reader) *Finder {
 	return &Finder{c: c, now: time.Now}
 }
 
-// Find is what scales the workload, and false when nothing does. A KEDA
-// ScaledObject also creates an HPA for its target, so it's looked for
-// first.
+// Find is what scales the workload, and false when nothing does, relying
+// on what it last learned of whether KEDA is installed. A KEDA ScaledObject
+// also creates an HPA for its target, so it's looked for first.
 func (f *Finder) Find(ctx context.Context, namespace string, kind v1alpha1.TargetKind, name string) (
 	Autoscaler, bool, error) {
-	so, found, err := f.findScaledObject(ctx, namespace, kind, name)
+	return f.find(ctx, namespace, kind, name, false)
+}
+
+// FindNow is Find, but looks for KEDA whatever Find learned: for a pause or
+// a resume, which mustn't miss a KEDA installed since. It's rare enough
+// that asking the API server again costs nothing.
+func (f *Finder) FindNow(ctx context.Context, namespace string, kind v1alpha1.TargetKind, name string) (
+	Autoscaler, bool, error) {
+	return f.find(ctx, namespace, kind, name, true)
+}
+
+func (f *Finder) find(ctx context.Context, namespace string, kind v1alpha1.TargetKind, name string, now bool) (
+	Autoscaler, bool, error) {
+	so, found, err := f.findScaledObject(ctx, namespace, kind, name, now)
 	if err != nil || found {
 		return so, found, err
 	}
@@ -116,9 +129,9 @@ func (f *Finder) Find(ctx context.Context, namespace string, kind v1alpha1.Targe
 }
 
 func (f *Finder) findScaledObject(ctx context.Context, namespace string, kind v1alpha1.TargetKind,
-	name string) (Autoscaler, bool, error) {
+	name string, now bool) (Autoscaler, bool, error) {
 	f.mu.Lock()
-	skip := f.now().Before(f.noKEDAUntil)
+	skip := !now && f.now().Before(f.noKEDAUntil)
 	f.mu.Unlock()
 	if skip {
 		return Autoscaler{}, false, nil
@@ -134,6 +147,9 @@ func (f *Finder) findScaledObject(ctx context.Context, namespace string, kind v1
 		}
 		return Autoscaler{}, false, fmt.Errorf("listing KEDA ScaledObjects in %s: %w", namespace, err)
 	}
+	f.mu.Lock()
+	f.noKEDAUntil = time.Time{}
+	f.mu.Unlock()
 	for _, so := range list.Items {
 		targetName, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "name")
 		targetKind, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "kind")

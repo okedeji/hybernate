@@ -70,6 +70,14 @@ type Reconciler struct {
 	// PodReader reads pods without caching them. Defaults to Client.
 	PodReader client.Reader
 
+	// ProtectedNamespaces are name patterns, such as prod-*, of namespaces
+	// Hybernate doesn't manage unless they're labelled to allow it.
+	ProtectedNamespaces []string
+
+	// WatchNamespaces are the namespaces Hybernate works in, with a Role in
+	// each, or every namespace when empty.
+	WatchNamespaces []string
+
 	pauser        lifecyclePauser
 	metrics       metricsReader
 	prices        listPricer
@@ -156,7 +164,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if err := r.wakeOnScaleUp(ctx, &workload, target); err != nil {
 		return ctrl.Result{}, err
 	}
+	if protected, err := r.inProtectedNamespace(ctx, &workload); err != nil {
+		return ctrl.Result{}, err
+	} else if protected {
+		return r.reconcileProtected(ctx, &workload)
+	}
+	r.clearCondition(&workload, conditionProtected, "NotProtected")
 	if err := r.reportAutoscaler(ctx, &workload); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.learnDependencies(ctx, &workload, target); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -302,6 +319,11 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 	}
 
 	if phase != v1alpha1.PhaseResuming {
+		// Learning never holds up a wake.
+		if err := r.learnFromWake(ctx, workload); err != nil {
+			log.FromContext(ctx).Info("couldn't learn what sent the request that woke the workload",
+				"workload", workload.Name, "namespace", workload.Namespace, "error", err.Error())
+		}
 		if _, err := r.transition(ctx, workload, v1alpha1.PhaseResuming, "ResumeRequested"); err != nil {
 			return nil, err
 		}
@@ -546,7 +568,7 @@ func (r *Reconciler) findRelatedWorkloads(ctx context.Context, obj client.Object
 	}
 
 	dependsOn := map[workloadID]bool{}
-	for _, ref := range changed.Spec.DependsOn {
+	for _, ref := range dependencyRefs(changed) {
 		dependsOn[dependencyID(changed, ref)] = true
 	}
 	changedTarget := targetID(changed)
@@ -610,7 +632,7 @@ func (r *Reconciler) findWorkloadsForTarget(ctx context.Context, obj client.Obje
 }
 
 func dependsOnTarget(workload *v1alpha1.ManagedWorkload, id workloadID) bool {
-	for _, ref := range workload.Spec.DependsOn {
+	for _, ref := range dependencyRefs(workload) {
 		if dependencyID(workload, ref) == id {
 			return true
 		}
@@ -694,6 +716,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&appsv1.StatefulSet{}, targetHandler).
 		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForDoorman)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.findPausedWorkloadsInNamespace)).
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsInNamespace)).
 		Named("managedworkload").
 		Complete(r)
 }

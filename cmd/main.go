@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
+	"strings"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -30,6 +32,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -95,6 +98,13 @@ func main() {
 		"CPU threshold, as a percentage of requests, for workloads opted in with the label, unless annotated otherwise.")
 	flag.BoolVar(&optIn.DryRun, "default-dry-run", optIn.DryRun,
 		"Measure workloads opted in with the label without pausing them, unless annotated otherwise.")
+	var watched stringList
+	flag.Var(&watched, "watch-namespaces",
+		"Comma-separated namespaces to work in, with a Role in each. Empty means every namespace.")
+	var protected stringList
+	flag.Var(&protected, "protected-namespaces",
+		"Comma-separated name patterns, such as prod-*, of namespaces Hybernate never manages, as if labelled "+
+			v1alpha1.LabelProtected+", unless labelled "+v1alpha1.LabelAllowProtected+".")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -102,6 +112,10 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	if err := validatePatterns(protected); err != nil {
+		setupLog.Error(err, "invalid --protected-namespaces")
+		os.Exit(1)
+	}
 	if err := validatePrometheusURL(prometheusURL); err != nil {
 		setupLog.Error(err, "invalid --prometheus-url")
 		os.Exit(1)
@@ -147,6 +161,7 @@ func main() {
 				DisableFor: []client.Object{&metricsv1beta1.PodMetrics{}},
 			},
 		},
+		Cache: cache.Options{DefaultNamespaces: namespaceCaches(watched)},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -166,24 +181,27 @@ func main() {
 		readyz = server.Ready
 	} else {
 		if err := (&controller.Reconciler{
-			Client:           c,
-			Scheme:           mgr.GetScheme(),
-			Recorder:         mgr.GetEventRecorder("hybernate"),
-			PrometheusURL:    prometheusURL,
-			DoormanService:   doormanService,
-			DoormanNamespace: doormanNamespace,
-			PodReader:        mgr.GetAPIReader(),
+			Client:              c,
+			Scheme:              mgr.GetScheme(),
+			Recorder:            mgr.GetEventRecorder("hybernate"),
+			PrometheusURL:       prometheusURL,
+			DoormanService:      doormanService,
+			DoormanNamespace:    doormanNamespace,
+			PodReader:           mgr.GetAPIReader(),
+			ProtectedNamespaces: protected,
+			WatchNamespaces:     watched,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ManagedWorkload")
 			os.Exit(1)
 		}
 		for _, kind := range []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment, v1alpha1.TargetKindStatefulSet} {
 			if err := (&controller.OptInReconciler{
-				Client:   c,
-				Scheme:   mgr.GetScheme(),
-				Recorder: mgr.GetEventRecorder("hybernate"),
-				Kind:     kind,
-				Defaults: optIn,
+				Client:              c,
+				Scheme:              mgr.GetScheme(),
+				Recorder:            mgr.GetEventRecorder("hybernate"),
+				Kind:                kind,
+				Defaults:            optIn,
+				ProtectedNamespaces: protected,
 			}).SetupWithManager(mgr); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "OptIn", "kind", kind)
 				os.Exit(1)
@@ -231,6 +249,45 @@ func validatePrometheusURL(raw string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("%q has no host", raw)
+	}
+	return nil
+}
+
+// namespaceCaches limits the cache to the watched namespaces, or leaves it
+// cluster-wide when there are none. Cluster-scoped objects, such as nodes,
+// are cached either way.
+func namespaceCaches(namespaces []string) map[string]cache.Config {
+	if len(namespaces) == 0 {
+		return nil
+	}
+	out := make(map[string]cache.Config, len(namespaces))
+	for _, ns := range namespaces {
+		out[ns] = cache.Config{}
+	}
+	return out
+}
+
+// stringList is a flag of comma-separated values.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(value string) error {
+	for v := range strings.SplitSeq(value, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			*l = append(*l, v)
+		}
+	}
+	return nil
+}
+
+// validatePatterns rejects a namespace pattern that isn't a valid glob,
+// which would otherwise match nothing and protect nothing.
+func validatePatterns(patterns []string) error {
+	for _, p := range patterns {
+		if _, err := path.Match(p, ""); err != nil {
+			return fmt.Errorf("%q: %w", p, err)
+		}
 	}
 	return nil
 }

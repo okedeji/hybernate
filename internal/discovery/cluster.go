@@ -124,6 +124,9 @@ type Workload struct {
 	// it went live if later. Hybernate doesn't record these yet, so they
 	// stay unset until it does.
 	Slept *Slept `json:"slept,omitempty"`
+	// Protected means its namespace is labelled protected, so Hybernate
+	// won't manage it whatever its labels.
+	Protected bool `json:"protected,omitempty"`
 	// ReplicasFromGit is the GitOps tool that last set its replicas from
 	// Git, which would undo every pause until it's told to leave them.
 	ReplicasFromGit string `json:"replicasFromGit,omitempty"`
@@ -345,6 +348,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 	history []containerCPU, historySince time.Time, sources map[workloadKey]workloadSource, pricing nodePricing,
 	opts ClusterOptions) ([]Workload, error) {
 	managed := s.managedInNamespace(ctx, namespace)
+	protected := s.protectedNamespace(ctx, namespace)
 	rollouts, err := s.rollouts(ctx, namespace)
 	if err != nil {
 		return nil, err
@@ -376,6 +380,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 				State:     StateUnknown,
 				Managed:   mw != nil,
 				DryRun:    mw != nil && mw.Spec.DryRun,
+				Protected: protected,
 			}
 			writer, _ := gitops.ReplicasWriter(obj.GetManagedFields())
 			w.ReplicasFromGit = string(writer.Tool)
@@ -431,6 +436,17 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 		}
 	}
 	return out, nil
+}
+
+// protectedNamespace says the namespace is labelled protected. The
+// operator's own protected name patterns aren't visible to the scan, so
+// only the label counts here, and a namespace it can't read isn't.
+func (s *Scanner) protectedNamespace(ctx context.Context, namespace string) bool {
+	var ns corev1.Namespace
+	if err := s.client.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil {
+		return false
+	}
+	return v1alpha1.Protected(ns.Name, ns.Labels, nil)
 }
 
 func pausedByHybernate(mw *v1alpha1.ManagedWorkload) bool {
@@ -702,7 +718,7 @@ func totals(workloads []Workload) Totals {
 			t.Live++
 			t.SavedThisMonth += w.SavedThisMonth
 		}
-		if h := w.History; h != nil && !w.Managed {
+		if h := w.History; h != nil && !w.Managed && !w.Protected {
 			t.Replayed.Workloads++
 			if h.SleepHours > 0 {
 				t.Replayed.Sleepers++

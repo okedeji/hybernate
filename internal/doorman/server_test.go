@@ -409,12 +409,15 @@ func TestServer_ReplicasReportOneWake(t *testing.T) {
 	}{{c, first}, {stale, second}} {
 		s := NewServer(replica.c, replica.r, "127.0.0.1")
 		s.now = func() time.Time { return now }
-		require.NoError(t, s.wake(context.Background(), rt))
+		require.NoError(t, s.wake(context.Background(), rt, caller))
 	}
 
 	assert.Equal(t, 1, eventCount(first, "WokenByRequest"))
 	assert.Equal(t, 0, eventCount(second, "WokenByRequest"))
 }
+
+// caller is the pod a held request comes from.
+var caller = &net.TCPAddr{IP: net.ParseIP("10.244.0.17"), Port: 51234}
 
 // A conflict from some other change must not lose the wake.
 func TestServer_StampsDespiteAConflict(t *testing.T) {
@@ -430,10 +433,11 @@ func TestServer_StampsDespiteAConflict(t *testing.T) {
 	require.NoError(t, c.Update(context.Background(), &w))
 
 	s := NewServer(stale, nil, "127.0.0.1")
-	require.NoError(t, s.wake(context.Background(), route{workload: key, service: "api"}))
+	require.NoError(t, s.wake(context.Background(), route{workload: key, service: "api"}, caller))
 
 	require.NoError(t, c.Get(context.Background(), key, &w))
 	assert.NotEmpty(t, w.Annotations[v1alpha1.AnnotationLastRequest], "the workload is still woken")
+	assert.Equal(t, "10.244.0.17", w.Annotations[v1alpha1.AnnotationLastRequestFrom], "and where the request came from")
 	assert.Equal(t, "payments", w.Labels["team"], "the other change is kept")
 }
 
@@ -451,7 +455,7 @@ func TestServer_LeavesARecentStampAlone(t *testing.T) {
 	s.now = func() time.Time { return now }
 	key := types.NamespacedName{Namespace: "dev", Name: "api"}
 
-	require.NoError(t, s.wake(context.Background(), route{workload: key, service: "api"}))
+	require.NoError(t, s.wake(context.Background(), route{workload: key, service: "api"}, caller))
 
 	require.NoError(t, c.Get(context.Background(), key, w))
 	assert.Equal(t, recent, w.Annotations[v1alpha1.AnnotationLastRequest])

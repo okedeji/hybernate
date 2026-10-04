@@ -106,7 +106,7 @@ func (g *dependencyGraph) dependents(workload *v1alpha1.ManagedWorkload) []*v1al
 		if w.UID == workload.UID {
 			continue
 		}
-		for _, ref := range w.Spec.DependsOn {
+		for _, ref := range dependencyRefs(w) {
 			if dependencyID(w, ref) == id {
 				out = append(out, w)
 				break
@@ -123,7 +123,7 @@ func (g *dependencyGraph) inCycle(workload *v1alpha1.ManagedWorkload) bool {
 	visited := map[workloadID]bool{}
 	var walk func(w *v1alpha1.ManagedWorkload) bool
 	walk = func(w *v1alpha1.ManagedWorkload) bool {
-		for _, ref := range w.Spec.DependsOn {
+		for _, ref := range dependencyRefs(w) {
 			id := dependencyID(w, ref)
 			if id == start {
 				return true
@@ -204,7 +204,8 @@ func (r *Reconciler) clearCondition(workload *v1alpha1.ManagedWorkload, condType
 // dependency that's already awake gets its clock reset, since this workload
 // is about to use it.
 func (r *Reconciler) wakeDependencies(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	if len(workload.Spec.DependsOn) == 0 {
+	refs := dependencyRefs(workload)
+	if len(refs) == 0 {
 		return nil
 	}
 	g, err := r.loadDependencyGraph(ctx)
@@ -212,7 +213,7 @@ func (r *Reconciler) wakeDependencies(ctx context.Context, workload *v1alpha1.Ma
 		return err
 	}
 	stamp := r.now().UTC().Format(time.RFC3339)
-	for _, ref := range workload.Spec.DependsOn {
+	for _, ref := range refs {
 		dep, ok := g.byTarget[dependencyID(workload, ref)]
 		if !ok || dep.UID == workload.UID {
 			continue
