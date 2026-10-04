@@ -111,27 +111,20 @@ func (s *Scanner) findDependencies(ctx context.Context, workloads []Workload, so
 	var fromSecrets []string
 	for i := range workloads {
 		w := &workloads[i]
-		source, ok := sources[workloadKey{w.Namespace, w.Kind, w.Name}]
+		self := workloadKey{w.Namespace, w.Kind, w.Name}
+		source, ok := sources[self]
 		if !ok {
 			continue
 		}
-		vars, usesSecrets := environment(source.template.Spec, configMaps[w.Namespace])
+		deps, usesSecrets := dependenciesOf(self, source.template.Spec, configMaps[w.Namespace], services, sources)
 		if usesSecrets {
 			fromSecrets = append(fromSecrets, w.Namespace+"/"+w.Name)
 		}
-		for _, v := range vars {
-			for _, addr := range addresses(v.value) {
-				for _, target := range resolve(addr, w.Namespace, services, sources) {
-					if target.key == (workloadKey{w.Namespace, w.Kind, w.Name}) {
-						continue
-					}
-					w.Dependencies = addDependency(w.Dependencies, Dependency{
-						Namespace: target.key.namespace, Kind: target.key.kind, Name: target.key.name,
-						Via: v.name, Address: shown(addr.raw), Headless: target.headless, Source: SourceEnvironment,
-						Declared: declares(source.managed, w.Namespace, target.key),
-					})
-				}
-			}
+		for _, d := range deps {
+			target := workloadKey{d.Namespace, d.Kind, d.Name}
+			d.Declared = declares(source.managed, w.Namespace, target)
+			d.Connected = learned(source.managed, target)
+			w.Dependencies = append(w.Dependencies, d)
 		}
 	}
 	if len(fromSecrets) == 0 {
@@ -140,6 +133,70 @@ func (s *Scanner) findDependencies(ctx context.Context, workloads []Workload, so
 	return []string{fmt.Sprintf("%s environment variables from Secrets, which the scan doesn't read, "+
 		"so dependencies set there aren't found: %s",
 		plural(len(fromSecrets), "workload takes", "workloads take"), listSome(fromSecrets))}
+}
+
+// Target is a workload a dependency can resolve to, by the labels on its
+// pod template that a Service selects.
+type Target struct {
+	Namespace string
+	Kind      v1alpha1.TargetKind
+	Name      string
+	Template  corev1.PodTemplateSpec
+}
+
+// DependenciesOf finds the workloads a workload's environment points at:
+// the addresses in its variables, literal and from configMaps, that name a
+// Service in services (by namespace, then name), followed to the targets
+// it selects. It also says whether the workload takes variables from
+// Secrets, which aren't read.
+func DependenciesOf(namespace string, kind v1alpha1.TargetKind, name string, spec corev1.PodSpec,
+	configMaps map[string]map[string]string, services map[string]map[string]corev1.Service, targets []Target) (
+	[]Dependency, bool) {
+	sources := make(map[workloadKey]workloadSource, len(targets))
+	for _, t := range targets {
+		sources[workloadKey{t.Namespace, t.Kind, t.Name}] = workloadSource{template: t.Template}
+	}
+	return dependenciesOf(workloadKey{namespace, kind, name}, spec, configMaps, services, sources)
+}
+
+func dependenciesOf(self workloadKey, spec corev1.PodSpec, configMaps map[string]map[string]string,
+	services map[string]map[string]corev1.Service, sources map[workloadKey]workloadSource) ([]Dependency, bool) {
+	vars, usesSecrets := environment(spec, configMaps)
+	var deps []Dependency
+	for _, v := range vars {
+		for _, addr := range addresses(v.value) {
+			for _, target := range resolve(addr, self.namespace, services, sources) {
+				if target.key == self {
+					continue
+				}
+				deps = addDependency(deps, Dependency{
+					Namespace: target.key.namespace, Kind: target.key.kind, Name: target.key.name,
+					Via: v.name, Address: shown(addr.raw), Headless: target.headless, Source: SourceEnvironment,
+				})
+			}
+		}
+	}
+	return deps, usesSecrets
+}
+
+// ConfigMapsReferenced are the ConfigMaps a pod's containers take variables
+// from, so they can be read before DependenciesOf.
+func ConfigMapsReferenced(spec corev1.PodSpec) []string {
+	var names []string
+	for _, c := range append(slices.Clone(spec.InitContainers), spec.Containers...) {
+		for _, from := range c.EnvFrom {
+			if from.ConfigMapRef != nil {
+				names = append(names, from.ConfigMapRef.Name)
+			}
+		}
+		for _, env := range c.Env {
+			if env.ValueFrom != nil && env.ValueFrom.ConfigMapKeyRef != nil {
+				names = append(names, env.ValueFrom.ConfigMapKeyRef.Name)
+			}
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 // environment returns the variables a pod's containers get from literal
@@ -291,6 +348,20 @@ func addDependency(deps []Dependency, d Dependency) []Dependency {
 		}
 	}
 	return append(deps, d)
+}
+
+// learned says Hybernate learned the dependency for the workload, so it
+// holds and wakes it.
+func learned(mw *v1alpha1.ManagedWorkload, target workloadKey) bool {
+	if mw == nil || mw.Status.LearnedDependencies == nil {
+		return false
+	}
+	for _, d := range mw.Status.LearnedDependencies.Dependencies {
+		if d.Namespace == target.namespace && d.Kind == target.kind && d.Name == target.name {
+			return true
+		}
+	}
+	return false
 }
 
 func declares(mw *v1alpha1.ManagedWorkload, namespace string, target workloadKey) bool {

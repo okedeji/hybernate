@@ -213,3 +213,26 @@ func TestScanCluster_FindsDependencies(t *testing.T) {
 	assert.Contains(t, strings.Join(report.Notes, "\n"),
 		"1 workload takes environment variables from Secrets, which the scan doesn't read")
 }
+
+// A dependency Hybernate learned for a workload it manages is connected:
+// it's held and woken with the workload.
+func TestScanCluster_LearnedDependenciesAreConnected(t *testing.T) {
+	objs := []runtime.Object{
+		database("postgres", testNamespace),
+		depService(testNamespace, "postgres", false, map[string]string{"app": "postgres"}),
+		database("redis", testNamespace),
+		depService(testNamespace, "redis", false, map[string]string{"app": "redis"}),
+		appWithEnv("api", []corev1.EnvVar{{Name: "PGHOST", Value: "postgres:5432"}, {Name: "REDIS", Value: "redis:6379"}}, nil),
+		&v1alpha1.ManagedWorkload{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: testNamespace},
+			Spec: v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}},
+			Status: v1alpha1.ManagedWorkloadStatus{LearnedDependencies: &v1alpha1.LearnedDependencies{
+				Dependencies: []v1alpha1.LearnedDependency{
+					{Namespace: testNamespace, Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Via: "PGHOST"}}}}},
+	}
+
+	got := byName(scanWorkloads(t, objs...))["api"].Dependencies
+
+	require.Len(t, got, 2)
+	assert.True(t, got[0].Connected, "learned")
+	assert.False(t, got[1].Connected, "ignored, so not connected")
+}
