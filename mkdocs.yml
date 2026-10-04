@@ -78,6 +78,7 @@ nav:
       - Dry Run: guides/dry-run.md
       - Prometheus Activity: guides/prometheus-signals.md
       - Argo CD and Flux: guides/gitops.md
+      - HPA and KEDA: guides/autoscalers.md
   - Reference:
       - API: reference/api.md
       - Helm Values: reference/helm-values.md

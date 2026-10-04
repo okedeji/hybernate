@@ -160,6 +160,7 @@ The chart creates a ClusterRole with permissions to:
 - Read Namespaces, for the `hybernate.io/managed` label and settings annotations on them
 - Read Deployments and StatefulSets, and scale them through the scale subresource. Hybernate can't delete or otherwise change them
 - Read PersistentVolumeClaims, to price the storage a paused workload keeps
+- Read HorizontalPodAutoscalers, and read and annotate KEDA ScaledObjects, to pause a KEDA workload through KEDA
 - Read pod metrics from metrics-server
 - Read pods, to price what pausing a workload frees, sidecars included. Pods are read when needed rather than watched, so they aren't cached
 - Read Nodes' metadata, to price workloads at the list price of the instance types they run on. Only names and labels are cached

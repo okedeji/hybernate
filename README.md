@@ -75,6 +75,7 @@ kubectl hybernate enable my-api -n staging
 
 - **Activity-based idle detection**: any sign of use (CPU, a deploy, a Prometheus query such as request rate, an activity annotation) keeps a workload awake; it pauses after `idleAfter` with none
 - **Demand forecasting** via a Holt-Winters double seasonal model that learns daily and weekly patterns per workload, with confidence scoring and anomaly detection
+- **Works with HPA, KEDA, Argo CD, and Flux**: an HPA leaves a paused workload at zero, a KEDA one is held there through KEDA, and a GitOps tool undoing a pause is reported with the fix rather than fought
 - **Wake on request**: a request to a paused workload's Service wakes it and is held until the workload is Ready, so callers see a slow response instead of an error. Browsers get a waking-up page that reloads until the app is up
 - **Pause and resume** with scale to zero and forecast-driven resume. Hybernate never deletes a workload or its storage
 

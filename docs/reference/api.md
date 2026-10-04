@@ -65,6 +65,7 @@
 | `doorman[].doormanPort` | int32 | Doorman port standing in for it |
 | `pause.previousReplicas` | int32 | Replicas before pause |
 | `pause.pausedAt` | time | When paused |
+| `pause.scaledObject` | string | The KEDA ScaledObject held at zero while paused; see [HPA and KEDA](../guides/autoscalers.md) |
 | `pause.resources` | `ResourceSnapshot` | Resource profile at pause |
 | `prediction` | `PredictionStatus` | Forecast engine state |
 | `prediction.dailyPhase` | string | Daily season phase |
