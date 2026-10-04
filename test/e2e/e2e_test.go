@@ -20,11 +20,15 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -515,8 +519,9 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 
 			By("installing ingress-nginx")
-			_, err = utils.Run(exec.Command("kubectl", "apply", "-f", ingressNginxManifest))
+			manifest, err := preloadedIngressNginx()
 			Expect(err).NotTo(HaveOccurred())
+			Expect(kubectlApply(manifest)).To(Succeed())
 			DeferCleanup(func() {
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "-f", ingressNginxManifest, "--wait=false"))
 			})
@@ -1131,6 +1136,35 @@ func kubectlApply(manifest string) error {
 	cmd.Stdin = strings.NewReader(manifest)
 	_, err := utils.Run(cmd)
 	return err
+}
+
+var imageDigest = regexp.MustCompile(`@sha256:[0-9a-f]{64}`)
+
+// preloadedIngressNginx is the ingress-nginx manifest with its images by tag
+// alone. The manifest pins them by the digest of their multi-platform index,
+// which the single-platform images the Makefile preloads don't carry, so
+// with the digest kind would pull them again, and that pull is what timed
+// the spec out.
+func preloadedIngressNginx() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ingressNginxManifest, nil)
+	if err != nil {
+		return "", fmt.Errorf("building the ingress-nginx manifest request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("downloading the ingress-nginx manifest: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }() // read-only, nothing to do if closing fails
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("downloading the ingress-nginx manifest: %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading the ingress-nginx manifest: %w", err)
+	}
+	return imageDigest.ReplaceAllString(string(body), ""), nil
 }
 
 // jsonpath reads a single field from a namespaced object.
