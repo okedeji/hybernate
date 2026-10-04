@@ -645,7 +645,7 @@ func writeNextSteps(p *printer, result scanResult) {
 	for i := range result.Workloads {
 		wl := &result.Workloads[i]
 		installed = installed || wl.Managed
-		if idle == nil && result.Totals.Idle > 0 && wl.State == discovery.StateIdle && !wl.Managed {
+		if idle == nil && result.Totals.Idle > 0 && wl.State == discovery.StateIdle && !wl.Managed && !wl.Protected {
 			idle = wl
 		}
 		if measuring == nil && wl.Measured != nil {
@@ -853,6 +853,8 @@ func shortClusterName(contextName string) string {
 // measuring it in dry-run, or pausing it live.
 func management(wl Workload) string {
 	switch {
+	case wl.Protected && !wl.Managed:
+		return "protected"
 	case !wl.Managed:
 		return "unmanaged"
 	case wl.DryRun:

@@ -274,7 +274,7 @@ func CouldSave(w Workload) float64 {
 	switch {
 	case w.Measured != nil:
 		return w.Measured.MonthlyFreed
-	case !w.Managed && w.History != nil:
+	case !w.Managed && !w.Protected && w.History != nil:
 		return w.History.MonthlyFreed
 	}
 	return 0

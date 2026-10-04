@@ -487,3 +487,28 @@ func TestScanCluster_ReplicasFromGit(t *testing.T) {
 		"https://okedeji.io/hybernate/guides/gitops/")
 	assert.Contains(t, notes, "1 workload has its replicas set from Git by Flux")
 }
+
+// A workload in a protected namespace is shown, but never counted as what
+// pausing could save.
+func TestScanCluster_ProtectedNamespace(t *testing.T) {
+	quiet := func(time.Time) float64 { return 0.002 }
+	f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{testNamespace: {
+		{pod: "idle-api-7d9f8c6b5-abcde", container: "main", cores: quiet},
+	}}}
+	objs := deploymentWithRollout("idle-api", testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, makePodMetrics("idle-api", testNamespace, "1m", "20Mi"),
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace,
+			Labels: map[string]string{v1alpha1.LabelProtected: v1alpha1.True}}})
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	w := byName(report)["idle-api"]
+	assert.True(t, w.Protected)
+	require.NotNil(t, w.History, "replayed, to show what it does")
+	assert.Zero(t, CouldSave(w))
+	assert.Zero(t, report.Totals.Replayed.Workloads, "not counted")
+}
