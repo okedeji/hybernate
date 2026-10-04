@@ -88,11 +88,14 @@ estimatedSavings: $12.48
 
 The summary starts when dry-run does, and is removed when dry-run ends: once Hybernate is pausing, `status.cost` records what it actually frees.
 
-`kubectl hybernate scan` shows the same summary for every workload in dry-run, with the command to start pausing it:
+`kubectl hybernate scan` shows the same summary in each dry-run workload's COULD SLEEP, WAKES, and COULD SAVE/MO columns, with a total in the headline and the command to start pausing:
 
 ```
-  Measured in dry-run, had Hybernate been pausing them:
-  sandbox-7   deployment/api   since Oct 1: would have paused 4 times, slept 96h, freeing $12.48
+  2 workloads are in dry-run: measured by Hybernate since starting, they would have slept 140 hours, freeing $18.20,
+  about $134 a month.
+
+  NAMESPACE   WORKLOAD         STATE            BECAUSE                                     COST/MO   COULD SLEEP   WAKES   COULD SAVE/MO
+  preview-7   deployment/api   idle (dry-run)   no activity for 5h; measuring since Oct 1   $96       96h           4       $91
 ```
 
 The scan prices the hours at its own prices, so `--cpu-price` and `--memory-price` apply.
