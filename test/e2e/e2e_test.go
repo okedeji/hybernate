@@ -963,6 +963,45 @@ data:
 			Expect(string(page)).To(ContainSubstring("PGHOST"), "the variable is named")
 			Expect(string(page)).NotTo(ContainSubstring("e2e-db-0.e2e-db-hl"), "its address isn't")
 		})
+
+		It("learns the dependency once Hybernate manages the app, and holds the database awake for it", func() {
+			for name, kind := range map[string]string{"e2e-app": "Deployment", "e2e-db": "StatefulSet"} {
+				idleAfter := "1h"
+				if name == "e2e-db" {
+					idleAfter = "1m"
+				}
+				Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: %[1]s, namespace: %[2]s}
+spec:
+  target: {kind: %[3]s, name: %[1]s}
+  idlePolicy: {idleAfter: %[4]s}
+  prediction: {confidence: 85}
+`, name, depsScanNamespace, kind, idleAfter))).To(Succeed())
+			}
+
+			By("learning it from the app's environment, with no dependsOn")
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", "e2e-app", depsScanNamespace,
+					"{.status.learnedDependencies.dependencies[*].name}")
+			}, time.Minute, 5*time.Second).Should(Equal("e2e-db"))
+
+			By("holding the database awake past its own idle clock, for the app")
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", "e2e-db", depsScanNamespace,
+					`{.status.conditions[?(@.type=="HeldByDependents")].status}`)
+			}, 4*time.Minute, 10*time.Second).Should(Equal("True"))
+			Expect(jsonpath("statefulset", "e2e-db", depsScanNamespace, "{.spec.replicas}")).To(Equal("1"))
+
+			table, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(table).To(MatchRegexp(`deployment/e2e-app\s+->\s+statefulset/e2e-db\s+PGHOST\s+connected by Hybernate`))
+
+			out, err := utils.Run(exec.Command(pluginBinary, "deps", "e2e-db", "-n", depsScanNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(MatchRegexp(`Depended on by:\n\s+` + depsScanNamespace + `/e2e-app\s+learned from PGHOST\s+Running`))
+		})
 	})
 
 	// Runs after "Idle clock", which installs metrics-server.
