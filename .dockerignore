@@ -8,6 +8,7 @@
 
 # Re-include files embedded in the binary
 !internal/doorman/page.html
+!internal/cost/prices.csv.gz
 
 # Re-include Go module files
 !go.mod
