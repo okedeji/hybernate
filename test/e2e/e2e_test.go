@@ -1073,7 +1073,7 @@ spec:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 2
           resources:
-            requests: {cpu: 10m, memory: 16Mi}
+            requests: {cpu: 100m, memory: 16Mi}
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
