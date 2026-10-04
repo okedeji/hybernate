@@ -413,3 +413,18 @@ func (r *Reconciler) findPausedWorkloadsInNamespace(ctx context.Context, obj cli
 	}
 	return requests
 }
+
+// findWorkloadsInNamespace requeues every ManagedWorkload in a namespace
+// whose labels changed, such as being protected.
+func (r *Reconciler) findWorkloadsInNamespace(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list v1alpha1.ManagedWorkloadList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetName())); err != nil {
+		log.FromContext(ctx).Error(err, "listing managed workloads for namespace change", "namespace", obj.GetName())
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for _, w := range list.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&w)})
+	}
+	return requests
+}

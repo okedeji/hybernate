@@ -6,6 +6,8 @@
 |-------|-------|-----------|-------------|
 | `hybernate.io/managed` | `"true"` | Deployments, StatefulSets, Namespaces | Opts the workload, or every Deployment and StatefulSet in the namespace, in. Hybernate creates a ManagedWorkload for it from its annotations. Any other value doesn't opt in, and is pointed out in an event. See [Opting In](../guides/opt-in.md). |
 | `hybernate.io/ignore` | `"true"` | Deployments, StatefulSets | Leaves the workload out, even in a managed namespace. |
+| `hybernate.io/protected` | `"true"` | Namespaces | Hybernate never manages anything in the namespace, whatever its workloads' labels, and wakes what it had paused there. See [Protected namespaces](../guides/opt-in.md#protected-namespaces). |
+| `hybernate.io/allow-protected` | `"true"` | Namespaces | Lets Hybernate manage a namespace that's labelled protected or matches `protectedNamespaces`. Set on purpose; Hybernate never sets it. |
 | `hybernate.io/from-label` | `"true"` | ManagedWorkloads | Set on ManagedWorkloads Hybernate created from the `managed` label. Hybernate updates and deletes only these; ManagedWorkloads without it are yours. |
 | `hybernate.io/managed-workload` | ManagedWorkload name | EndpointSlices | Set on the EndpointSlices that route a paused workload's Services to the doorman, along with `endpointslice.kubernetes.io/managed-by: doorman.hybernate.io`. They're removed when the workload is Running. |
 
@@ -55,6 +57,7 @@ A value that can't be read is reported in an `InvalidSetting` warning event on t
 | `hybernate.io/ignore-dependencies` | comma-separated names | Deployments, StatefulSets, ManagedWorkloads | Dependencies Hybernate shouldn't learn for this workload, comma-separated, as `namespace/name` or a name in its own namespace. See [Learned dependencies](../concepts/dependencies.md#learned-dependencies). |
 | `hybernate.io/active-until` | RFC 3339 time | ManagedWorkloads, Deployments, StatefulSets | Keeps the workload awake until that time, and wakes it if paused. |
 | `hybernate.io/last-request` | RFC 3339 time | ManagedWorkloads | Set by the doorman when it holds a request for a paused workload. Wakes it like `last-activity`, and the clock records the wake as `request`. See [Wake on Request](../concepts/wake-on-request.md). |
+| `hybernate.io/last-request-from` | IP address | ManagedWorkloads | Set by the doorman with `last-request`: where the request that woke the workload came from, so the operator can [learn](../concepts/dependencies.md#learned-dependencies) which workload depends on it. |
 
 ## Finalizers
 

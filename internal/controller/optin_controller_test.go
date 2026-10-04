@@ -230,3 +230,19 @@ func TestOptIn_NameTakenByAnotherWorkloadsManagedWorkload(t *testing.T) {
 	assert.Equal(t, "legacy", mw.Spec.Target.Name, "someone else's ManagedWorkload is never overwritten")
 	assert.Len(t, recorded(recorder, "already exists for another workload"), 1)
 }
+
+// A protected namespace's workloads aren't opted in, whatever their
+// labels, and one opted in before it was protected is released.
+func TestOptIn_ProtectedNamespace(t *testing.T) {
+	ns := optInNamespace(map[string]string{v1alpha1.LabelManaged: "true", v1alpha1.LabelProtected: "true"}, nil)
+	r, recorder := optInReconciler(t, ns, optInDeployment("api", managedLabel, nil),
+		&v1alpha1.ManagedWorkload{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev",
+			Labels: map[string]string{v1alpha1.LabelFromLabel: "true"}},
+			Spec: v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}}})
+
+	reconcileOptIn(t, r, "api")
+
+	_, ok := managedWorkload(t, r, "api")
+	assert.False(t, ok)
+	assert.Len(t, recorded(recorder, ReasonProtected), 1)
+}

@@ -86,3 +86,81 @@ Controller image.
 {{- $tag := default .Chart.AppVersion .Values.image.tag }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
+
+{{/*
+The operator's rules on namespaced resources: a ClusterRole's, or with
+watchNamespaces, a Role's in each of them.
+*/}}
+{{- define "hybernate.managerRules" -}}
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [get, list, watch, create, update, patch]
+- apiGroups: [""]
+  resources: [events]
+  verbs: [create, patch]
+- apiGroups: [events.k8s.io]
+  resources: [events]
+  verbs: [create, patch]
+- apiGroups: [""]
+  resources: [services]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list]
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [create, delete, get, list, patch, update, watch]
+- apiGroups: [""]
+  resources: [persistentvolumeclaims]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [deployments, statefulsets]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [deployments/scale, statefulsets/scale]
+  verbs: [get, update]
+- apiGroups: [autoscaling]
+  resources: [horizontalpodautoscalers]
+  verbs: [get, list, watch]
+- apiGroups: [keda.sh]
+  resources: [scaledobjects]
+  verbs: [get, list, patch, watch]
+- apiGroups: [hybernate.io]
+  resources: [managedworkloads]
+  verbs: [create, delete, get, list, patch, update, watch]
+- apiGroups: [hybernate.io]
+  resources: [managedworkloads/finalizers]
+  verbs: [update]
+- apiGroups: [hybernate.io]
+  resources: [managedworkloads/status]
+  verbs: [get, patch, update]
+- apiGroups: [metrics.k8s.io]
+  resources: [pods]
+  verbs: [get, list]
+{{- end }}
+
+{{/*
+The operator's rules on cluster-scoped resources, which only a ClusterRole
+can grant: reading namespaces, for their labels, and nodes, for their
+instance types.
+*/}}
+{{- define "hybernate.managerClusterRules" -}}
+- apiGroups: [""]
+  resources: [namespaces, nodes]
+  verbs: [get, list, watch]
+{{- end }}
+
+{{/*
+The doorman's rules, all on namespaced resources.
+*/}}
+{{- define "hybernate.doormanRules" -}}
+- apiGroups: [hybernate.io]
+  resources: [managedworkloads]
+  verbs: [get, list, watch, patch]
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [get, list, watch]
+- apiGroups: ["", events.k8s.io]
+  resources: [events]
+  verbs: [create, patch]
+{{- end }}

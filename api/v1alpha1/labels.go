@@ -16,6 +16,8 @@ limitations under the License.
 
 package v1alpha1
 
+import "path"
+
 // True is the value that turns a Hybernate label or boolean annotation on.
 // Any other value, "True" and "yes" included, leaves it off.
 const True = "true"
@@ -29,6 +31,15 @@ const (
 	// LabelManaged opts a Deployment or StatefulSet, or every one in a
 	// namespace, in to Hybernate: "true" gets it a ManagedWorkload.
 	LabelManaged = "hybernate.io/managed"
+
+	// LabelProtected marks a namespace Hybernate must never manage, such as
+	// production: nothing in it is opted in or paused, whatever its labels.
+	LabelProtected = "hybernate.io/protected"
+
+	// LabelAllowProtected lets Hybernate manage a protected namespace, one
+	// marked with LabelProtected or matching the operator's protected
+	// namespace patterns. It's set on purpose, never by Hybernate.
+	LabelAllowProtected = "hybernate.io/allow-protected"
 
 	// LabelIgnore excludes a workload from management, even in a managed
 	// namespace.
@@ -53,6 +64,12 @@ const (
 	// AnnotationLastActivity, and the clock records the wake as a request.
 	AnnotationLastRequest = "hybernate.io/last-request"
 
+	// AnnotationLastRequestFrom is the address the request that woke a
+	// paused workload came from, stamped by the doorman with
+	// AnnotationLastRequest, so the operator can learn which workload sent
+	// it.
+	AnnotationLastRequestFrom = "hybernate.io/last-request-from"
+
 	// Settings for a workload opted in with LabelManaged, set on the
 	// workload or its namespace; the workload's own wins.
 	AnnotationDryRun        = "hybernate.io/dry-run"
@@ -73,3 +90,21 @@ const (
 	// one scales its paused workload back up first.
 	FinalizerCleanup = "hybernate.io/cleanup"
 )
+
+// Protected says Hybernate must not manage the namespace: it's labelled
+// protected, or its name matches one of patterns (shell globs, such as
+// prod-*), and it isn't labelled to allow it anyway.
+func Protected(name string, labels map[string]string, patterns []string) bool {
+	if labels[LabelAllowProtected] == True {
+		return false
+	}
+	if labels[LabelProtected] == True {
+		return true
+	}
+	for _, pattern := range patterns {
+		if ok, err := path.Match(pattern, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}

@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
@@ -189,4 +190,130 @@ func TestLearnedDependencies_HoldAndWake(t *testing.T) {
 		assert.Equal(t, fixedTime.UTC().Format(time.RFC3339),
 			fetch(t, r, "postgres").Annotations[v1alpha1.AnnotationLastActivity])
 	})
+}
+
+// wakeReconciler is a cluster where a request from senderIP woke postgres.
+func wakeReconciler(t *testing.T, objs ...client.Object) *Reconciler {
+	t.Helper()
+	r := depReconciler(t, &stubPauser{})
+	r.Client = fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1alpha1.ManagedWorkload{}).WithObjects(objs...).
+		WithIndex(&corev1.Pod{}, podIPField, func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Status.PodIP}
+		}).Build()
+	return r
+}
+
+const senderIP = "10.244.1.7"
+
+// podOf is a pod of app at senderIP.
+func podOf(app string, hostNetwork bool) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: app + "-7d9f-x2", Namespace: "default", Labels: map[string]string{"app": app}},
+		Spec:       corev1.PodSpec{HostNetwork: hostNetwork},
+		Status:     corev1.PodStatus{PodIP: senderIP},
+	}
+}
+
+func selecting(kind v1alpha1.TargetKind, name string, annotations map[string]string) client.Object {
+	selector := &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}}
+	objectMeta := metav1.ObjectMeta{Name: name, Namespace: "default", Annotations: annotations}
+	if kind == v1alpha1.TargetKindStatefulSet {
+		return &appsv1.StatefulSet{ObjectMeta: objectMeta, Spec: appsv1.StatefulSetSpec{Selector: selector}}
+	}
+	return &appsv1.Deployment{ObjectMeta: objectMeta, Spec: appsv1.DeploymentSpec{Selector: selector}}
+}
+
+// wokenPostgres is postgres, paused an hour ago and just woken by a request
+// from senderIP.
+func wokenPostgres() *v1alpha1.ManagedWorkload {
+	pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
+	w := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
+	w.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1, PausedAt: &pausedAt}
+	w.Annotations = map[string]string{
+		v1alpha1.AnnotationLastRequest:     fixedTime.Add(-time.Second).UTC().Format(time.RFC3339),
+		v1alpha1.AnnotationLastRequestFrom: senderIP,
+	}
+	return w
+}
+
+func TestLearnFromWake(t *testing.T) {
+	learnedPostgres := []string{"default/postgres "}
+	tests := []struct {
+		name     string
+		postgres *v1alpha1.ManagedWorkload
+		objs     []client.Object
+		api      func(*v1alpha1.ManagedWorkload)
+		want     []string
+	}{
+		{name: "a request from a workload Hybernate manages", postgres: wokenPostgres(),
+			objs: []client.Object{podOf("api", false), selecting(v1alpha1.TargetKindDeployment, "api", nil)},
+			want: learnedPostgres},
+		{name: "already learned", postgres: wokenPostgres(),
+			objs: []client.Object{podOf("api", false), selecting(v1alpha1.TargetKindDeployment, "api", nil)},
+			api: func(w *v1alpha1.ManagedWorkload) {
+				w.Status.LearnedDependencies = &v1alpha1.LearnedDependencies{Dependencies: []v1alpha1.LearnedDependency{
+					{Namespace: "default", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres",
+						Source: v1alpha1.LearnedFromEnvironment, Via: "PGHOST"}}}
+			},
+			want: []string{"default/postgres PGHOST"}},
+		{name: "ignored", postgres: wokenPostgres(), objs: []client.Object{podOf("api", false),
+			selecting(v1alpha1.TargetKindDeployment, "api", map[string]string{v1alpha1.AnnotationIgnoreDependencies: "postgres"})}},
+		{name: "from a pod Hybernate doesn't manage, such as an ingress controller", postgres: wokenPostgres(),
+			objs: []client.Object{podOf("ingress-nginx", false), selecting(v1alpha1.TargetKindDeployment, "api", nil)}},
+		{name: "from its own pod", postgres: wokenPostgres(),
+			objs: []client.Object{podOf("postgres", false), selecting(v1alpha1.TargetKindDeployment, "api", nil)}},
+		{name: "from the node's network", postgres: wokenPostgres(),
+			objs: []client.Object{podOf("api", true), selecting(v1alpha1.TargetKindDeployment, "api", nil)}},
+		{name: "not woken by a request", postgres: func() *v1alpha1.ManagedWorkload {
+			w := wokenPostgres()
+			w.Annotations[v1alpha1.AnnotationLastRequest] = fixedTime.Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+			return w
+		}(), objs: []client.Object{podOf("api", false), selecting(v1alpha1.TargetKindDeployment, "api", nil)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
+			if tt.api != nil {
+				tt.api(api)
+			}
+			r := wakeReconciler(t, append(tt.objs, api, tt.postgres, selecting(v1alpha1.TargetKindStatefulSet, "postgres", nil))...)
+
+			require.NoError(t, r.learnFromWake(context.Background(), tt.postgres))
+
+			got := fetch(t, r, "api")
+			assert.Equal(t, tt.want, learnedNames(got))
+			assert.Empty(t, learnedNames(fetch(t, r, "postgres")), "a workload never depends on itself")
+			if tt.want != nil && tt.api == nil {
+				assert.Equal(t, v1alpha1.LearnedFromWake, got.Status.LearnedDependencies.Dependencies[0].Source)
+			}
+		})
+	}
+}
+
+// Learning from the environment again keeps what wakes taught.
+func TestLearnDependencies_KeepsWhatWakesTaught(t *testing.T) {
+	target := apiWith(nil, corev1.EnvVar{Name: "DATABASE_URL", Value: "postgres:5432"})
+	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
+	api.Status.LearnedDependencies = &v1alpha1.LearnedDependencies{Dependencies: []v1alpha1.LearnedDependency{
+		{Namespace: "default", Kind: v1alpha1.TargetKindStatefulSet, Name: "redis", Source: v1alpha1.LearnedFromWake}}}
+	r := depReconciler(t, &stubPauser{}, append(databases(), api, target)...)
+
+	require.NoError(t, r.learnDependencies(context.Background(), api, target))
+
+	assert.Equal(t, []string{"default/postgres DATABASE_URL", "default/redis "}, learnedNames(api))
+}
+
+// Installed for some namespaces only, Hybernate can't list pods across the
+// cluster, so it looks for the sender in each namespace it watches.
+func TestLearnFromWake_WatchedNamespaces(t *testing.T) {
+	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
+	postgres := wokenPostgres()
+	r := wakeReconciler(t, podOf("api", false), selecting(v1alpha1.TargetKindDeployment, "api", nil), api, postgres,
+		selecting(v1alpha1.TargetKindStatefulSet, "postgres", nil))
+	r.WatchNamespaces = []string{"preview-1", "default"}
+
+	require.NoError(t, r.learnFromWake(context.Background(), postgres))
+
+	assert.Equal(t, []string{"default/postgres "}, learnedNames(fetch(t, r, "api")))
 }

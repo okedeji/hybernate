@@ -278,7 +278,7 @@ func (s *Server) handle(ctx context.Context, port int32, conn net.Conn) {
 	defer cancel()
 
 	if !draining {
-		if err := s.wake(waitCtx, rt); err != nil {
+		if err := s.wake(waitCtx, rt, conn.RemoteAddr()); err != nil {
 			logger.Error(err, "waking workload")
 		}
 	}
@@ -380,8 +380,10 @@ func (s *Server) servePage(ctx context.Context, conn net.Conn, rt route, req *ht
 }
 
 // wake stamps the workload's last-request annotation, at most once per
-// wakeStampInterval, which wakes it through the operator's annotation path.
-func (s *Server) wake(ctx context.Context, rt route) error {
+// wakeStampInterval, which wakes it through the operator's annotation path,
+// and where the request came from, so the operator can learn what depends
+// on the workload.
+func (s *Server) wake(ctx context.Context, rt route, from net.Addr) error {
 	now := s.now()
 	s.mu.Lock()
 	if last, ok := s.lastWake[rt.workload]; ok && now.Sub(last) < wakeStampInterval {
@@ -406,6 +408,9 @@ func (s *Server) wake(ctx context.Context, rt route) error {
 		w.Annotations = map[string]string{}
 	}
 	w.Annotations[v1alpha1.AnnotationLastRequest] = now.UTC().Format(time.RFC3339)
+	if host, _, err := net.SplitHostPort(from.String()); err == nil {
+		w.Annotations[v1alpha1.AnnotationLastRequestFrom] = host
+	}
 	// The stamp is locked to the version this replica read, so when two
 	// stamp at once, only the first to land reports the wake. A conflict
 	// means the workload changed a moment ago, most likely the other

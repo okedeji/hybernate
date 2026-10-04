@@ -284,9 +284,10 @@ type ManagedWorkloadStatus struct {
 	Pause *PauseStatus `json:"pause,omitempty"`
 
 	// LearnedDependencies are the workloads Hybernate found this one depends
-	// on without a dependsOn, from addresses in its environment that name
-	// their Services. They're held awake and woken like dependsOn, less the
-	// ones the hybernate.io/ignore-dependencies annotation names.
+	// on without a dependsOn: from addresses in its environment that name
+	// their Services, and from requests it sent that woke them. They're held
+	// awake and woken like dependsOn, less the ones the
+	// hybernate.io/ignore-dependencies annotation names.
 	// +optional
 	LearnedDependencies *LearnedDependencies `json:"learnedDependencies,omitempty"`
 
@@ -384,11 +385,26 @@ type LearnedDependency struct {
 	Kind      TargetKind `json:"kind"`
 	Name      string     `json:"name"`
 
+	// Source is how it was found: in the workload's environment, or from a
+	// request it sent that woke the dependency.
+	Source LearnedSource `json:"source"`
+
 	// Via is the environment variable that holds its address, and Address
-	// the address, with any password hidden.
-	Via     string `json:"via"`
-	Address string `json:"address"`
+	// the address, with any password hidden, for one found in the
+	// environment.
+	// +optional
+	Via string `json:"via,omitempty"`
+	// +optional
+	Address string `json:"address,omitempty"`
 }
+
+// +kubebuilder:validation:Enum=environment;wake
+type LearnedSource string
+
+const (
+	LearnedFromEnvironment LearnedSource = "environment"
+	LearnedFromWake        LearnedSource = "wake"
+)
 
 // ScaledUp is a paused workload scaled up outside Hybernate.
 type ScaledUp struct {
