@@ -64,7 +64,6 @@ spec:
       memoryPerHour: "0.004"
       storagePerMonth: "0.08"
 
-  conflictAction: warn
   dryRun: false
 ```
 
@@ -158,15 +157,9 @@ Cost tracking is always enabled with AWS on-demand defaults. Set `costTracking.r
 | `rates.memoryPerHour` | quantity | `0.004` | $/GiB-hour |
 | `rates.storagePerMonth` | quantity | `0.08` | $/GiB-month |
 
-### `conflictAction`
+### Scaled up outside Hybernate
 
-Controls behavior when a paused workload is scaled up outside Hybernate (e.g., by a human or a deploy). While a workload is running, Hybernate doesn't manage its replica count, so changes by the team or an HPA are never treated as drift.
-
-| Value | Behavior |
-|-------|----------|
-| `enforce` | Scale the workload back to zero |
-| `warn` | Emit an event but leave the external change |
-| `defer` | Accept the change and treat the workload as running |
+A paused workload scaled up by anything else, such as `kubectl scale` or a deploy, wakes: whoever did it wants it running. `status.lastScaledUp` records when and what did it. When that was Argo CD or Flux setting replicas from Git, see [Argo CD and Flux](gitops.md). While a workload is running, Hybernate doesn't manage its replica count, so changes by its team or an HPA are left alone.
 
 ### `dryRun`
 
