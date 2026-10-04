@@ -112,14 +112,6 @@ type ManagedWorkloadSpec struct {
 	// +optional
 	CostTracking *CostTrackingSpec `json:"costTracking,omitempty"`
 
-	// ConflictAction controls how the operator reacts when someone scales up
-	// a paused target outside of Hybernate. "enforce" scales it back to zero,
-	// "warn" emits an event but leaves the change, "defer" accepts the change
-	// and treats the workload as running.
-	// +kubebuilder:default=warn
-	// +optional
-	ConflictAction ConflictAction `json:"conflictAction,omitempty"`
-
 	// DryRun makes the operator evaluate all policies and emit events but
 	// take no action. Useful for validating configuration before going live.
 	// +optional
@@ -199,15 +191,6 @@ type PredictionSpec struct {
 	// +kubebuilder:default=85
 	Confidence int `json:"confidence"`
 }
-
-// +kubebuilder:validation:Enum=enforce;warn;defer
-type ConflictAction string
-
-const (
-	ConflictActionEnforce ConflictAction = "enforce"
-	ConflictActionWarn    ConflictAction = "warn"
-	ConflictActionDefer   ConflictAction = "defer"
-)
 
 // +kubebuilder:validation:Enum=pause;destroy
 type IdleAction string
@@ -366,6 +349,11 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	Pause *PauseStatus `json:"pause,omitempty"`
 
+	// LastScaledUp is the last time something other than Hybernate scaled
+	// the workload up while it was paused, which wakes it.
+	// +optional
+	LastScaledUp *ScaledUp `json:"lastScaledUp,omitempty"`
+
 	// Destroy holds state after the workload is destroyed.
 	// +optional
 	Destroy *DestroyStatus `json:"destroy,omitempty"`
@@ -418,7 +406,7 @@ type DoormanRoute struct {
 	DoormanPort int32 `json:"doormanPort"`
 }
 
-// +kubebuilder:validation:Enum=created;woke;request;cpu;rollout;annotation;prometheus;unobserved
+// +kubebuilder:validation:Enum=created;woke;request;cpu;rollout;annotation;prometheus;unobserved;scaled-up
 type ActivitySource string
 
 const (
@@ -433,7 +421,24 @@ const (
 	// ActivitySourceUnobserved restarts the clock after the operator could
 	// not watch the workload, so a gap in observation never causes a pause.
 	ActivitySourceUnobserved ActivitySource = "unobserved"
+	// ActivitySourceScaledUp is a paused workload scaled up by something
+	// other than Hybernate, such as a person or a GitOps tool.
+	ActivitySourceScaledUp ActivitySource = "scaled-up"
 )
+
+// ScaledUp is a paused workload scaled up outside Hybernate.
+type ScaledUp struct {
+	At metav1.Time `json:"at"`
+	// By is the field manager that set the replicas, such as kubectl-scale
+	// or argocd-controller.
+	By string `json:"by"`
+	// GitOps is the GitOps tool behind By, such as Argo CD or Flux, which
+	// will set the replicas again each time Hybernate pauses the workload
+	// until it's told to leave them.
+	// +optional
+	GitOps   string `json:"gitOps,omitempty"`
+	Replicas int32  `json:"replicas"`
+}
 
 // ActivityStatus records the state of the activity clock.
 type ActivityStatus struct {

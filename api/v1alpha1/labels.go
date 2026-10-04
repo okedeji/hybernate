@@ -20,6 +20,11 @@ package v1alpha1
 // Any other value, "True" and "yes" included, leaves it off.
 const True = "true"
 
+// FieldManager is the name the API server records Hybernate's writes under,
+// such as the replica count it pauses, so a GitOps tool can be told to
+// leave them alone.
+const FieldManager = "hybernate"
+
 const (
 	// LabelManaged opts a Deployment or StatefulSet, or every one in a
 	// namespace, in to Hybernate: "true" gets it a ManagedWorkload.
