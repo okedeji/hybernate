@@ -54,13 +54,13 @@ too. By default it waits until the workload is Running.
 
 Examples:
   # Wake a workload and wait for it
-  kubectl hybernate wake api -n sandbox-42
+  kubectl hybernate wake api -n preview-42
 
   # Keep it awake for the next two hours, for a demo
-  kubectl hybernate wake api -n sandbox-42 --for 2h
+  kubectl hybernate wake api -n preview-42 --for 2h
 
   # Return as soon as the wake is requested
-  kubectl hybernate wake api -n sandbox-42 --wait=false`,
+  kubectl hybernate wake api -n preview-42 --wait=false`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			k8s, defaultNamespace, err := buildClient()

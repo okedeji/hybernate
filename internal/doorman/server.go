@@ -94,7 +94,7 @@ type route struct {
 
 // Server listens on every allocated doorman port. It reads routes and the
 // workloads' real endpoints from the cache, and wakes a workload by stamping
-// its last-activity annotation, the same path a sandbox UI uses.
+// its last-activity annotation, the same path a developer portal uses.
 type Server struct {
 	client   client.Client
 	recorder events.EventRecorder

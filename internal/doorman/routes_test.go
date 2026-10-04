@@ -26,16 +26,16 @@ import (
 )
 
 func TestAllocatePort(t *testing.T) {
-	first, err := AllocatePort("sandbox", "api", "http", nil)
+	first, err := AllocatePort("dev", "api", "http", nil)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, first, int32(minPort))
 	assert.LessOrEqual(t, first, int32(maxPort))
 
-	again, err := AllocatePort("sandbox", "api", "http", nil)
+	again, err := AllocatePort("dev", "api", "http", nil)
 	require.NoError(t, err)
 	assert.Equal(t, first, again, "the same Service port gets the same doorman port when it's free")
 
-	next, err := AllocatePort("sandbox", "api", "http", map[int32]bool{first: true})
+	next, err := AllocatePort("dev", "api", "http", map[int32]bool{first: true})
 	require.NoError(t, err)
 	assert.NotEqual(t, first, next, "a port in use is skipped")
 }
@@ -46,7 +46,7 @@ func TestAllocatePort_Exhausted(t *testing.T) {
 		used[p] = true
 	}
 
-	_, err := AllocatePort("sandbox", "api", "http", used)
+	_, err := AllocatePort("dev", "api", "http", used)
 
 	assert.ErrorIs(t, err, ErrNoFreePort)
 }

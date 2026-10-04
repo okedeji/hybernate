@@ -38,12 +38,12 @@ import (
 )
 
 func optInNamespace(labels, annotations map[string]string) *corev1.Namespace {
-	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Labels: labels, Annotations: annotations}}
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "dev", Labels: labels, Annotations: annotations}}
 }
 
 func optInDeployment(name string, labels, annotations map[string]string) *appsv1.Deployment {
 	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
-		Name: name, Namespace: "sandbox", UID: types.UID("uid-" + name), Labels: labels, Annotations: annotations,
+		Name: name, Namespace: "dev", UID: types.UID("uid-" + name), Labels: labels, Annotations: annotations,
 	}}
 }
 
@@ -57,14 +57,14 @@ func optInReconciler(t *testing.T, objs ...client.Object) (*OptInReconciler, *ev
 
 func reconcileOptIn(t *testing.T, r *OptInReconciler, name string) {
 	t.Helper()
-	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "sandbox", Name: name}})
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "dev", Name: name}})
 	require.NoError(t, err)
 }
 
 func managedWorkload(t *testing.T, r *OptInReconciler, name string) (*v1alpha1.ManagedWorkload, bool) {
 	t.Helper()
 	var mw v1alpha1.ManagedWorkload
-	err := r.Get(context.Background(), types.NamespacedName{Namespace: "sandbox", Name: name}, &mw)
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: "dev", Name: name}, &mw)
 	if apierrors.IsNotFound(err) {
 		return nil, false
 	}
@@ -200,11 +200,11 @@ func TestOptIn_RemovingTheLabelReleasesIt(t *testing.T) {
 // A ManagedWorkload someone writes always wins over the label.
 func TestOptIn_AWrittenManagedWorkloadWins(t *testing.T) {
 	written := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api-by-hand", Namespace: "sandbox"},
+		ObjectMeta: metav1.ObjectMeta{Name: "api-by-hand", Namespace: "dev"},
 		Spec:       v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}},
 	}
 	ours := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "sandbox", Labels: map[string]string{v1alpha1.LabelFromLabel: "true"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev", Labels: map[string]string{v1alpha1.LabelFromLabel: "true"}},
 		Spec:       v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}},
 	}
 	r, _ := optInReconciler(t, optInNamespace(nil, nil), optInDeployment("api", managedLabel, nil), written, ours)
@@ -219,7 +219,7 @@ func TestOptIn_AWrittenManagedWorkloadWins(t *testing.T) {
 
 func TestOptIn_NameTakenByAnotherWorkloadsManagedWorkload(t *testing.T) {
 	other := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "sandbox"},
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev"},
 		Spec:       v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "legacy"}},
 	}
 	r, recorder := optInReconciler(t, optInNamespace(nil, nil), optInDeployment("api", managedLabel, nil), other)
