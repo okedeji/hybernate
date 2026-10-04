@@ -159,6 +159,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if err := r.reportAutoscaler(ctx, &workload); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.learnDependencies(ctx, &workload, target); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// --- Wake on request ---
 
@@ -546,7 +549,7 @@ func (r *Reconciler) findRelatedWorkloads(ctx context.Context, obj client.Object
 	}
 
 	dependsOn := map[workloadID]bool{}
-	for _, ref := range changed.Spec.DependsOn {
+	for _, ref := range dependencyRefs(changed) {
 		dependsOn[dependencyID(changed, ref)] = true
 	}
 	changedTarget := targetID(changed)
@@ -610,7 +613,7 @@ func (r *Reconciler) findWorkloadsForTarget(ctx context.Context, obj client.Obje
 }
 
 func dependsOnTarget(workload *v1alpha1.ManagedWorkload, id workloadID) bool {
-	for _, ref := range workload.Spec.DependsOn {
+	for _, ref := range dependencyRefs(workload) {
 		if dependencyID(workload, ref) == id {
 			return true
 		}

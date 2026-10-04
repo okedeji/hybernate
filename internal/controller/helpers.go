@@ -42,6 +42,7 @@ const (
 	ReasonPaused                 = "Paused"
 	ReasonResumed                = "Resumed"
 	ReasonAutoResume             = "AutoResume"
+	ReasonDependenciesLearned    = "DependenciesLearned"
 	ReasonScaledUp               = "ScaledUp"
 	ReasonGitOpsConflict         = "GitOpsConflict"
 	ReasonGitOpsConflictResolved = "GitOpsConflictResolved"
@@ -52,16 +53,17 @@ const (
 // Actions populate the events.k8s.io/v1 Action field, which the API server
 // requires: what the operator did or tried to do when the event fired.
 const (
-	actionForecast       = "Forecast"
-	actionEvaluate       = "EvaluateAutomation"
-	actionEvaluateIdle   = "EvaluateIdle"
-	actionPause          = "Pause"
-	actionResume         = "Resume"
-	actionCheckTarget    = "CheckTarget"
-	actionCheckReplicas  = "CheckReplicas"
-	actionCheckDuplicate = "CheckDuplicate"
-	actionAutoManage     = "AutoManage"
-	actionScan           = "Scan"
+	actionForecast          = "Forecast"
+	actionEvaluate          = "EvaluateAutomation"
+	actionEvaluateIdle      = "EvaluateIdle"
+	actionPause             = "Pause"
+	actionResume            = "Resume"
+	actionCheckTarget       = "CheckTarget"
+	actionCheckReplicas     = "CheckReplicas"
+	actionLearnDependencies = "LearnDependencies"
+	actionCheckDuplicate    = "CheckDuplicate"
+	actionAutoManage        = "AutoManage"
+	actionScan              = "Scan"
 )
 
 func (r *Reconciler) emitEvent(workload *v1alpha1.ManagedWorkload, dryRun bool, eventType, reason, action, msgFmt string, args ...any) {

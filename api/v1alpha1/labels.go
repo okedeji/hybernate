@@ -64,6 +64,11 @@ const (
 	AnnotationWakeMaxWait   = "hybernate.io/wake-max-wait"
 	AnnotationWakePage      = "hybernate.io/wake-page"
 
+	// AnnotationIgnoreDependencies lists dependencies Hybernate shouldn't
+	// learn for a workload, comma-separated, as namespace/name or a name in
+	// its own namespace. Set on the workload or its ManagedWorkload.
+	AnnotationIgnoreDependencies = "hybernate.io/ignore-dependencies"
+
 	// FinalizerCleanup is the finalizer added to ManagedWorkloads, so deleting
 	// one scales its paused workload back up first.
 	FinalizerCleanup = "hybernate.io/cleanup"
