@@ -102,7 +102,11 @@ func links(w *v1alpha1.ManagedWorkload) []link {
 			if slices.ContainsFunc(out, func(have link) bool { return have.ref == ref }) {
 				continue
 			}
-			out = append(out, link{ref: ref, from: "learned from " + d.Via, learned: true})
+			from := "learned from " + d.Via
+			if d.Source == v1alpha1.LearnedFromWake {
+				from = "learned from a wake"
+			}
+			out = append(out, link{ref: ref, from: from, learned: true})
 		}
 	}
 	return out
@@ -188,8 +192,8 @@ func deps(ctx context.Context, c client.Client, key client.ObjectKey, out io.Wri
 			"namespace, so dependents elsewhere aren't shown.\n", key.Namespace)
 	}
 	if anyLearned {
-		_, _ = fmt.Fprintln(out, "Learned links come from the dependent's environment; "+
-			"hybernate.io/ignore-dependencies on it drops one.")
+		_, _ = fmt.Fprintln(out, "Learned links come from the dependent's environment or its requests; "+
+			"hybernate.io/ignore-dependencies drops one.")
 	}
 	return nil
 }

@@ -75,7 +75,7 @@ Depends on:
 Depended on by:
   preview-42/api      learned from PGHOST                   Running
   preview-42/worker   declared in dependsOn, waitForReady   Paused
-Learned links come from the dependent's environment; hybernate.io/ignore-dependencies on it drops one.
+Learned links come from the dependent's environment or its requests; hybernate.io/ignore-dependencies drops one.
 `},
 		{name: "what it depends on", key: client.ObjectKey{Namespace: "preview-42", Name: "api"},
 			want: `preview-42/api (Deployment, Running)
@@ -85,7 +85,7 @@ Depends on:
   preview-42/redis      learned from REDIS_URL   not managed
 Depended on by:
   nothing
-Learned links come from the dependent's environment; hybernate.io/ignore-dependencies on it drops one.
+Learned links come from the dependent's environment or its requests; hybernate.io/ignore-dependencies drops one.
 `},
 		{name: "a dependency in another namespace", key: client.ObjectKey{Namespace: "messaging", Name: "nats"},
 			want: `messaging/nats (StatefulSet, Running)
@@ -136,4 +136,16 @@ func TestDeps_OneNamespace(t *testing.T) {
 	assert.Contains(t, out.String(), "Depended on by:\n  nothing\n")
 	assert.Contains(t, out.String(), "Only messaging was read: your access doesn't allow listing ManagedWorkloads "+
 		"in every namespace, so dependents elsewhere aren't shown.")
+}
+
+func TestDeps_LearnedFromAWake(t *testing.T) {
+	api := depsWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, nil,
+		v1alpha1.LearnedDependency{Namespace: "preview-42", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres",
+			Source: v1alpha1.LearnedFromWake})
+	var out bytes.Buffer
+
+	require.NoError(t, deps(context.Background(), newClient(t, interceptor.Funcs{}, api),
+		client.ObjectKey{Namespace: "preview-42", Name: "api"}, &out))
+
+	assert.Contains(t, out.String(), "preview-42/postgres   learned from a wake   not managed")
 }

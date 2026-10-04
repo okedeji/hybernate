@@ -236,3 +236,22 @@ func TestScanCluster_LearnedDependenciesAreConnected(t *testing.T) {
 	assert.True(t, got[0].Connected, "learned")
 	assert.False(t, got[1].Connected, "ignored, so not connected")
 }
+
+// A dependency learned from a wake, which no address in the environment
+// shows, is listed too, as connected.
+func TestScanCluster_DependenciesLearnedFromWakes(t *testing.T) {
+	objs := []runtime.Object{
+		database("postgres", testNamespace),
+		appWithEnv("api", nil, nil),
+		&v1alpha1.ManagedWorkload{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: testNamespace},
+			Spec: v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}},
+			Status: v1alpha1.ManagedWorkloadStatus{LearnedDependencies: &v1alpha1.LearnedDependencies{
+				Dependencies: []v1alpha1.LearnedDependency{{Namespace: testNamespace, Kind: v1alpha1.TargetKindStatefulSet,
+					Name: "postgres", Source: v1alpha1.LearnedFromWake}}}}},
+	}
+
+	got := byName(scanWorkloads(t, objs...))["api"].Dependencies
+
+	assert.Equal(t, []Dependency{{Namespace: testNamespace, Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres",
+		Source: SourceWake, Connected: true}}, got)
+}

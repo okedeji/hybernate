@@ -126,6 +126,7 @@ func (s *Scanner) findDependencies(ctx context.Context, workloads []Workload, so
 			d.Connected = learned(source.managed, target)
 			w.Dependencies = append(w.Dependencies, d)
 		}
+		w.Dependencies = append(w.Dependencies, learnedFromWakes(source.managed, w.Dependencies)...)
 	}
 	if len(fromSecrets) == 0 {
 		return nil
@@ -348,6 +349,25 @@ func addDependency(deps []Dependency, d Dependency) []Dependency {
 		}
 	}
 	return append(deps, d)
+}
+
+// learnedFromWakes are the dependencies Hybernate learned from requests the
+// workload sent that woke them, which its environment doesn't show.
+func learnedFromWakes(mw *v1alpha1.ManagedWorkload, found []Dependency) []Dependency {
+	if mw == nil || mw.Status.LearnedDependencies == nil {
+		return nil
+	}
+	var out []Dependency
+	for _, d := range mw.Status.LearnedDependencies.Dependencies {
+		if d.Source != v1alpha1.LearnedFromWake || slices.ContainsFunc(found, func(f Dependency) bool {
+			return f.Namespace == d.Namespace && f.Kind == d.Kind && f.Name == d.Name
+		}) {
+			continue
+		}
+		out = append(out, Dependency{Namespace: d.Namespace, Kind: d.Kind, Name: d.Name, Source: SourceWake,
+			Declared: declares(mw, mw.Namespace, workloadKey{d.Namespace, d.Kind, d.Name}), Connected: true})
+	}
+	return out
 }
 
 // learned says Hybernate learned the dependency for the workload, so it
