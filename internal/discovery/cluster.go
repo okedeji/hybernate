@@ -79,6 +79,8 @@ type ClusterReport struct {
 	// History says what the replay read, in ModeHistory.
 	History   *HistorySource `json:"history,omitempty"`
 	Workloads []Workload     `json:"workloads"`
+	// NodePrices are the node types the workloads were priced at.
+	NodePrices Prices `json:"nodePrices"`
 	// Notes say what the scan couldn't see and how that limits it.
 	Notes  []string `json:"notes,omitempty"`
 	Totals Totals   `json:"totals"`
@@ -120,6 +122,11 @@ type Workload struct {
 	// it went live if later. Hybernate doesn't record these yet, so they
 	// stay unset until it does.
 	Slept *Slept `json:"slept,omitempty"`
+	// OnSpot means a pod of it is on a spot node, priced at on-demand, so it
+	// costs less than shown.
+	OnSpot bool `json:"onSpot,omitempty"`
+	// rates are what it's priced at.
+	rates cost.Rates
 	// History is what replaying the activity clock over its recorded CPU
 	// found, in ModeHistory.
 	History *History `json:"history,omitempty"`
@@ -204,8 +211,13 @@ type ClusterOptions struct {
 	// workload Hybernate doesn't manage counts as active; managed ones use
 	// their own. Zero means the activity clock's default.
 	CPUThreshold int
-	Rates        cost.Rates
-	Now          func() time.Time
+	// Rates price what node prices can't: pods on nodes the price table
+	// doesn't have, or every workload when nodes can't be read.
+	Rates cost.Rates
+	// OwnCPUPrice and OwnMemoryPrice say the user gave Rates' CPU or memory
+	// price, which then prices every workload, in place of node prices.
+	OwnCPUPrice, OwnMemoryPrice bool
+	Now                         func() time.Time
 	// IdleAfter is how long without activity makes a workload idle, for
 	// workloads Hybernate doesn't manage; managed ones use their own.
 	// Zero means the activity clock's default.
@@ -233,6 +245,9 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 			"the Metrics API isn't available, so CPU couldn't be measured; is metrics-server installed?")
 	}
 
+	pricing, nodePrices := s.readNodePrices(ctx)
+	report.NodePrices = nodePrices
+
 	var noHistory []string
 	sources := map[workloadKey]workloadSource{}
 	for _, namespace := range opts.Namespaces {
@@ -243,7 +258,7 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 		if history != nil && (since.IsZero() || historySince.Before(since)) {
 			since = historySince
 		}
-		workloads, err := s.scanNamespace(ctx, namespace, haveMetrics, history, historySince, sources, opts)
+		workloads, err := s.scanNamespace(ctx, namespace, haveMetrics, history, historySince, sources, pricing, opts)
 		if err != nil {
 			report.Notes = append(report.Notes, fmt.Sprintf("skipped namespace %s: %v", namespace, err))
 			continue
@@ -299,8 +314,8 @@ func (s *Scanner) metricsAvailable(ctx context.Context, namespaces []string) boo
 }
 
 func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetrics bool,
-	history []containerCPU, historySince time.Time, sources map[workloadKey]workloadSource, opts ClusterOptions) (
-	[]Workload, error) {
+	history []containerCPU, historySince time.Time, sources map[workloadKey]workloadSource, pricing nodePricing,
+	opts ClusterOptions) ([]Workload, error) {
 	managed := s.managedInNamespace(ctx, namespace)
 	rollouts, err := s.rollouts(ctx, namespace)
 	if err != nil {
@@ -341,6 +356,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 			ownCPU, ownMemory := metrics.Requests(metrics.WorkloadContainers(spec))
 			w.PodCPURequestMillis, w.PodMemoryRequestBytes = ownCPU, ownMemory
 
+			var pods []corev1.Pod
 			if n == 0 {
 				if pausedByHybernate(mw) {
 					judgePaused(&w, mw, now)
@@ -350,7 +366,8 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 			} else {
 				if len(matchLabels) > 0 {
 					sel := labels.SelectorFromSet(matchLabels)
-					w.PodCPURequestMillis, w.PodMemoryRequestBytes = s.podRequests(ctx, namespace, sel, spec)
+					pods = s.workloadPods(ctx, namespace, sel)
+					w.PodCPURequestMillis, w.PodMemoryRequestBytes = metrics.PodRequests(pods, spec)
 					used, measured := s.cpuUsed(ctx, namespace, sel, spec)
 					switch {
 					case !haveMetrics:
@@ -371,7 +388,8 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 				}
 			}
 			w.Clues = clues(w, now)
-			w.HourlyCost = hourlyCost(w, opts.Rates)
+			w.rates, w.OnSpot = pricing.ratesFor(pods, mw, opts)
+			w.HourlyCost = hourlyCost(w, w.rates)
 			w.MonthlyCost = w.HourlyCost * hoursPerMonth
 			w.Measured = measured(mw, w.HourlyCost, now)
 			w.SavedThisMonth = savedThisMonth(mw)

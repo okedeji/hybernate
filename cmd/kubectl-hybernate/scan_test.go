@@ -477,7 +477,9 @@ func TestPricesFor(t *testing.T) {
 			memory, err := cmd.Flags().GetFloat64("memory-price")
 			require.NoError(t, err)
 
-			got := pricesFor(cmd, scanOptions{cpuPrice: cpu, memoryPrice: memory})
+			ownCPU, ownMemory := ownPrices(cmd)
+
+			got := pricesFor(scanOptions{cpuPrice: cpu, memoryPrice: memory, ownCPUPrice: ownCPU, ownMemoryPrice: ownMemory})
 
 			assert.InDelta(t, tt.wantCPU, got.CPUPerHour, 1e-9)
 			assert.Equal(t, tt.wantCPUAssumed, got.CPUAssumed)

@@ -259,7 +259,7 @@ func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, sin
 		rollouts:     rollouts,
 		requestCores: float64(ownCPU) / 1000,
 		podHourly: cost.ComputeHourly(float64(w.PodCPURequestMillis)/1000,
-			float64(w.PodMemoryRequestBytes)/(1<<30), opts.Rates),
+			float64(w.PodMemoryRequestBytes)/(1<<30), w.rates),
 		threshold: threshold,
 		idleAfter: idleAfter,
 	}.run()

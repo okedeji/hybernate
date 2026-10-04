@@ -54,37 +54,15 @@ type scanOptions struct {
 	cpuThreshold int
 	cpuPrice     float64
 	memoryPrice  float64
-	window       string
-	idleAfter    time.Duration
-	promURL      string
-	html         string
-	open         bool
-}
-
-// prices are what costs were calculated with, and whether they're the
-// built-in assumption rather than the user's own.
-type prices struct {
-	CPUPerHour    float64 `json:"cpuPerHour"`
-	MemoryPerHour float64 `json:"memoryPerHour"`
-	CPUAssumed    bool    `json:"cpuAssumed"`
-	MemoryAssumed bool    `json:"memoryAssumed"`
-}
-
-// sentence says what costs were priced at, and which prices are the
-// built-in assumption rather than the user's own.
-func (p prices) sentence() string {
-	cpu := fmt.Sprintf("$%.3f per vCPU-hour", p.CPUPerHour)
-	memory := fmt.Sprintf("$%.3f per GiB-hour of memory", p.MemoryPerHour)
-	switch {
-	case p.CPUAssumed && p.MemoryAssumed:
-		return "Assumed list prices: " + cpu + " and " + memory + ", from AWS on-demand in us-east-1."
-	case p.CPUAssumed:
-		return "Your memory price, " + memory + ", and the assumed CPU price, " + cpu + " (AWS on-demand, us-east-1)."
-	case p.MemoryAssumed:
-		return "Your CPU price, " + cpu + ", and the assumed memory price, " + memory + " (AWS on-demand, us-east-1)."
-	default:
-		return "Your prices: " + cpu + " and " + memory + "."
-	}
+	// ownCPUPrice and ownMemoryPrice say the user gave the price, which
+	// then prices every workload in place of its nodes' list prices.
+	ownCPUPrice    bool
+	ownMemoryPrice bool
+	window         string
+	idleAfter      time.Duration
+	promURL        string
+	html           string
+	open           bool
 }
 
 // scanResult is a scan of one cluster, with the rules and prices it was
@@ -163,13 +141,14 @@ Examples:
 			if opts.idleAfter <= 0 {
 				return errors.New("--idle-after must be more than zero")
 			}
+			opts.ownCPUPrice, opts.ownMemoryPrice = ownPrices(cmd)
 			result, err := scanCluster(cmd.Context(), window, opts)
 			if err != nil {
 				return err
 			}
 			result.ScannedAt = time.Now().UTC().Truncate(time.Second)
 			result.Settings = settings{CPUThreshold: opts.cpuThreshold, IdleAfter: opts.idleAfter.String(), Window: opts.window}
-			result.Prices = pricesFor(cmd, opts)
+			result.Prices = pricesFor(opts)
 			if err := writeScan(cmd.OutOrStdout(), result, opts); err != nil {
 				return err
 			}
@@ -200,17 +179,6 @@ Examples:
 	cmd.Flags().BoolVar(&opts.open, "open", opts.open,
 		"Open the HTML report in your browser, when the table is shown in a terminal")
 	return cmd
-}
-
-// pricesFor says what costs are calculated with, and whether those are the
-// built-in assumption because the user gave no prices of their own.
-func pricesFor(cmd *cobra.Command, opts scanOptions) prices {
-	return prices{
-		CPUPerHour:    opts.cpuPrice,
-		MemoryPerHour: opts.memoryPrice,
-		CPUAssumed:    !cmd.Flags().Changed("cpu-price"),
-		MemoryAssumed: !cmd.Flags().Changed("memory-price"),
-	}
 }
 
 // parseWindow reads a duration that may be in days, which
@@ -266,11 +234,14 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	report, err := scanner.ScanCluster(ctx, discovery.ClusterOptions{
 		Namespaces:   namespaces,
 		CPUThreshold: opts.cpuThreshold,
-		Rates:        cost.Rates{CPUPerHour: opts.cpuPrice, MemoryPerHour: opts.memoryPrice},
-		Now:          time.Now,
-		History:      history,
-		Window:       window,
-		IdleAfter:    opts.idleAfter,
+		Rates: cost.Rates{CPUPerHour: opts.cpuPrice, MemoryPerHour: opts.memoryPrice,
+			StoragePerMonth: cost.DefaultRates.StoragePerMonth},
+		OwnCPUPrice:    opts.ownCPUPrice,
+		OwnMemoryPrice: opts.ownMemoryPrice,
+		Now:            time.Now,
+		History:        history,
+		Window:         window,
+		IdleAfter:      opts.idleAfter,
 	})
 	if err != nil {
 		return scanResult{}, fmt.Errorf("scanning %s: %w", scan.Cluster, err)
@@ -394,7 +365,7 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 		p.line("")
 	}
 	if result.Prices.CPUAssumed || result.Prices.MemoryAssumed {
-		p.line("Costs use %s", lowerFirst(result.Prices.sentence()))
+		p.line("Costs use %s", lowerFirst(result.pricesSentence()))
 		p.line("Pass --cpu-price and --memory-price for yours.")
 		p.line("")
 	}
