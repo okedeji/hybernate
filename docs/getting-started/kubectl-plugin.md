@@ -72,6 +72,9 @@ staging (EKS us-east-1): 214 workloads in 38 namespaces
 Notes:
   - the history replay sees CPU and rollouts only; requests and activity annotations aren't in Prometheus, so a workload used with little CPU can look like it would sleep more than it would
   - 2 workloads set no CPU requests, so their use can't be measured: kube-tools/agent, ops/exporter
+
+Costs use on-demand list prices for its 4 node types, m6i.xlarge, m6i.2xlarge, r6i.xlarge and 1 more, in AWS us-east-1. 6 workloads run on spot nodes, priced at on-demand, so they cost less than shown.
+Pass --cpu-price and --memory-price for yours.
 ```
 
 `scan` only reads, with your own kubeconfig, and needs nothing installed in the cluster. It works before you install Hybernate, and after: once Hybernate manages a workload, the scan shows what it has paused and reads its activity clock.
@@ -112,7 +115,9 @@ Notes:
 
 **What the numbers mean:**
 
-- Costs are what the workloads' requests cost while running, sidecars included. Without `--cpu-price` and `--memory-price`, they use assumed list prices from AWS on-demand in us-east-1, and the report says so.
+- Costs are what the workloads' requests cost while running, sidecars included, at the on-demand list price of the nodes each one's pods run on, from their instance type and region; see [Prices](../concepts/cost-tracking.md#prices). A workload with no pod on a node is priced where Hybernate last saw it run, or at the cluster's most common node type. Nodes Hybernate has no list price for, and every workload when your access doesn't allow listing nodes, use assumed prices from AWS on-demand in us-east-1, and the report says which.
+- `--cpu-price` and `--memory-price` set your own prices, which price every workload in place of list prices: use them for discounts, savings plans, or negotiated rates.
+- Spot nodes are priced at on-demand, and the report says how many workloads run on them, since they cost less than shown.
 - Without history, the scan shows what idle workloads cost and what each hour asleep frees, not a monthly saving: from one moment it can't tell how often a workload would be woken. To measure savings once Hybernate is installed, label workloads `hybernate.io/managed=true` and annotate them `hybernate.io/dry-run=true`: Hybernate measures how often it would have paused them, for how long, and what that would have freed, without ever pausing them. The scan then shows it in each one's COULD SLEEP, WAKES, and COULD SAVE/MO, with BECAUSE saying since when, a total in the headline, and the `kubectl hybernate enable` command to start pausing. It's from Hybernate's own activity clock, which sees more than the history replay, so it's what to judge going live by.
 - An hour asleep frees capacity; it becomes money when your cluster autoscaler removes it.
 - BECAUSE gives the evidence for the state, then facts such as when a workload was last deployed, if a week or more ago.

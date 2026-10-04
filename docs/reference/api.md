@@ -89,6 +89,7 @@
 | `cost.estimatedMonthlyCost` | string | Projected monthly cost |
 | `cost.estimatedMonthlySavings` | string | Estimated savings this month (requires autoscaler for realization) |
 | `cost.estimatedCostWithoutManagement` | string | Estimated cost without Hybernate |
+| `cost.listRates` | `CostRates` | On-demand list rates of the nodes its pods last ran on, which it's priced at unless `costTracking.rates` sets its own. Unset when its nodes have no list price |
 | `cost.resourceReduction` | `ResourceReduction` | Concrete resources freed by Hybernate actions |
 | `cost.resourceReduction.cpuMillis` | int64 | CPU millicores freed |
 | `cost.resourceReduction.memoryBytes` | int64 | Memory bytes freed |
