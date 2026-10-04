@@ -51,7 +51,7 @@ func main() {
 		SilenceUsage: true,
 	}
 
-	root.AddCommand(depsCmd(), enableCmd(), scanCmd(), wakeCmd())
+	root.AddCommand(depsCmd(), enableCmd(), scanCmd(), statusCmd(), wakeCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}

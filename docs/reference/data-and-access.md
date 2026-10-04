@@ -46,4 +46,4 @@ No telemetry, no usage reporting, no update checks. The doorman answers requests
 
 ## The plugin
 
-`kubectl hybernate` runs with your own kubeconfig and permissions, reads the same kinds of resources, and changes nothing except for `wake` (an annotation on a ManagedWorkload) and `enable` (the `hybernate.io/dry-run` annotation, on a workload or its namespace). `scan` reads Prometheus through the API server's service proxy, or at `--prometheus-url`, and writes its report only to your machine.
+`kubectl hybernate` runs with your own kubeconfig and permissions, reads the same kinds of resources and their events, and changes nothing except for `wake` (an annotation on a ManagedWorkload) and `enable` (the `hybernate.io/dry-run` annotation, on a workload or its namespace). `scan` reads Prometheus through the API server's service proxy, or at `--prometheus-url`, and writes its report only to your machine.
