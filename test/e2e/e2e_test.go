@@ -1324,6 +1324,58 @@ spec:
 			Expect(replicas("e2e-keda")()).NotTo(Equal("0"))
 		})
 	})
+
+	// Runs after "Idle clock", which installs metrics-server.
+	Context("Protected namespaces", func() {
+		const protectedNamespace = "hybernate-e2e-protected"
+
+		BeforeAll(func() {
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", protectedNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", protectedNamespace, "--wait=false"))
+			})
+			Expect(kubectlApply(deploymentManifest("e2e-guarded", protectedNamespace, 2))).To(Succeed())
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: e2e-guarded, namespace: %s}
+spec:
+  target: {kind: Deployment, name: e2e-guarded}
+  idlePolicy: {idleAfter: 1m}
+  prediction: {confidence: 85}
+`, protectedNamespace))).To(Succeed())
+		})
+
+		It("wakes what it had paused once the namespace is protected, and opts nothing in there", func() {
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", "e2e-guarded", protectedNamespace, "{.status.phase}")
+			}, 4*time.Minute, 5*time.Second).Should(Equal("Paused"))
+
+			By("protecting the namespace")
+			_, err := utils.Run(exec.Command("kubectl", "label", "namespace", protectedNamespace,
+				"hybernate.io/protected=true"))
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", "e2e-guarded", protectedNamespace, "{.status.phase}")).
+					To(Equal("Running"))
+				g.Expect(jsonpath("managedworkload", "e2e-guarded", protectedNamespace,
+					`{.status.conditions[?(@.type=="Protected")].status}`)).To(Equal("True"))
+				g.Expect(jsonpath("deployment", "e2e-guarded", protectedNamespace, "{.spec.replicas}")).To(Equal("2"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("labelling a new workload there for Hybernate, which must not opt it in")
+			Expect(kubectlApply(deploymentManifest("e2e-labelled", protectedNamespace, 1))).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "label", "deployment", "e2e-labelled", "-n", protectedNamespace,
+				"hybernate.io/managed=true"))
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(func() error {
+				_, err := jsonpath("managedworkload", "e2e-labelled", protectedNamespace, "{.metadata.name}")
+				return err
+			}, 30*time.Second, 5*time.Second).Should(HaveOccurred(), "no ManagedWorkload is created")
+		})
+	})
 })
 
 // deploymentManifest is a Deployment of the pause container, which uses no
