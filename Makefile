@@ -89,7 +89,8 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 E2E_IMAGES ?= curlimages/curl:8.7.1 registry.k8s.io/pause:3.10 registry.k8s.io/metrics-server/metrics-server:v0.7.2 \
 	registry.k8s.io/e2e-test-images/agnhost:2.52 registry.k8s.io/ingress-nginx/controller:v1.15.1 \
-	registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.9
+	registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.9 ghcr.io/kedacore/keda:2.20.2 \
+	ghcr.io/kedacore/keda-metrics-apiserver:2.20.2 ghcr.io/kedacore/keda-admission-webhooks:2.20.2
 E2E_PLATFORM ?= linux/$(shell go env GOARCH)
 
 # Streams each image into the Kind node's containerd for one platform only.
@@ -111,7 +112,7 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	$(MAKE) load-test-e2e-images
 	@# The idle clock and dependency specs wait on real clocks, so the suite
 	@# runs well past go test's default 10-minute limit on CI runners.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 40m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

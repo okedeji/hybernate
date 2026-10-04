@@ -519,7 +519,7 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 
 			By("installing ingress-nginx")
-			manifest, err := preloadedIngressNginx()
+			manifest, err := preloaded(ingressNginxManifest)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(kubectlApply(manifest)).To(Succeed())
 			DeferCleanup(func() {
@@ -1121,6 +1121,126 @@ spec:
 			}, 2*time.Minute, 10*time.Second).Should(Equal("2"))
 		})
 	})
+
+	// Runs after "Idle clock", which installs metrics-server.
+	Context("Autoscalers", func() {
+		const autoscaleNamespace = "hybernate-e2e-autoscale"
+		manage := func(name string) {
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: %[1]s, namespace: %[2]s}
+spec:
+  target: {kind: Deployment, name: %[1]s}
+  idlePolicy: {idleAfter: 1m}
+  prediction: {confidence: 85}
+`, name, autoscaleNamespace))).To(Succeed())
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", name, autoscaleNamespace, "{.status.phase}")
+			}, 4*time.Minute, 5*time.Second).Should(Equal("Paused"))
+		}
+		replicas := func(name string) func() (string, error) {
+			return func() (string, error) {
+				return jsonpath("deployment", name, autoscaleNamespace, "{.spec.replicas}")
+			}
+		}
+		wake := func(name string) {
+			out, err := utils.Run(exec.Command(pluginBinary, "wake", name, "-n", autoscaleNamespace, "--timeout", "3m"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("is Running after"))
+		}
+
+		BeforeAll(func() {
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", autoscaleNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", autoscaleNamespace, "--wait=false"))
+			})
+
+			By("installing KEDA")
+			manifest, err := preloaded(kedaManifest)
+			Expect(err).NotTo(HaveOccurred())
+			// KEDA's CRDs are too large for a client-side apply's annotation.
+			cmd := exec.Command("kubectl", "apply", "--server-side", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "--wait=false", "-f", "-")
+				cmd.Stdin = strings.NewReader(manifest)
+				_, _ = utils.Run(cmd)
+			})
+			for _, d := range []string{"keda-operator", "keda-operator-metrics-apiserver", "keda-admission-webhooks"} {
+				_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+d, "-n", "keda",
+					"--timeout=3m"))
+				Expect(err).NotTo(HaveOccurred())
+			}
+		})
+
+		It("pauses an HPA's workload, which the HPA leaves at zero, and resumes it within the HPA's range", func() {
+			Expect(kubectlApply(deploymentManifest("e2e-hpa", autoscaleNamespace, 1))).To(Succeed())
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: e2e-hpa, namespace: %s}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: e2e-hpa}
+  minReplicas: 2
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 80}}
+`, autoscaleNamespace))).To(Succeed())
+			Eventually(replicas("e2e-hpa"), 2*time.Minute, 5*time.Second).Should(Equal("2"), "the HPA scales to its minimum")
+
+			By("managing it, and waiting for it to pause")
+			manage("e2e-hpa")
+			Expect(jsonpath("managedworkload", "e2e-hpa", autoscaleNamespace,
+				`{.status.conditions[?(@.type=="Autoscaled")].reason}`)).To(Equal("HPA"))
+			Consistently(replicas("e2e-hpa"), time.Minute, 10*time.Second).Should(Equal("0"),
+				"an HPA doesn't scale a workload up from zero")
+
+			By("waking it")
+			wake("e2e-hpa")
+			Expect(replicas("e2e-hpa")()).To(Equal("2"), "within the HPA's range")
+		})
+
+		It("holds a KEDA workload at zero through KEDA, and releases it on wake", func() {
+			Expect(kubectlApply(deploymentManifest("e2e-keda", autoscaleNamespace, 1))).To(Succeed())
+			// A cron trigger that's always active, so KEDA keeps the workload
+			// up unless it's held.
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: e2e-keda, namespace: %s}
+spec:
+  scaleTargetRef: {name: e2e-keda}
+  minReplicaCount: 0
+  maxReplicaCount: 2
+  triggers:
+    - type: cron
+      metadata: {timezone: UTC, start: "0 * * * *", end: "59 * * * *", desiredReplicas: "1"}
+`, autoscaleNamespace))).To(Succeed())
+			Eventually(func() (string, error) {
+				return jsonpath("scaledobject", "e2e-keda", autoscaleNamespace, `{.status.conditions[?(@.type=="Ready")].status}`)
+			}, 2*time.Minute, 5*time.Second).Should(Equal("True"))
+
+			By("managing it, and waiting for it to pause")
+			manage("e2e-keda")
+			Expect(jsonpath("scaledobject", "e2e-keda", autoscaleNamespace,
+				`{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}`)).To(Equal("0"))
+			Expect(jsonpath("managedworkload", "e2e-keda", autoscaleNamespace,
+				`{.status.conditions[?(@.type=="Autoscaled")].reason}`)).To(Equal("KEDA"))
+			Consistently(replicas("e2e-keda"), time.Minute, 10*time.Second).Should(Equal("0"),
+				"KEDA holds it, though its trigger is active")
+
+			By("waking it, which releases KEDA")
+			wake("e2e-keda")
+			Expect(jsonpath("scaledobject", "e2e-keda", autoscaleNamespace,
+				`{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}`)).To(BeEmpty())
+			Expect(replicas("e2e-keda")()).NotTo(Equal("0"))
+		})
+	})
 })
 
 // deploymentManifest is a Deployment of the pause container, which uses no
@@ -1248,31 +1368,32 @@ func kubectlApply(manifest string) error {
 
 var imageDigest = regexp.MustCompile(`@sha256:[0-9a-f]{64}`)
 
-// preloadedIngressNginx is the ingress-nginx manifest with its images by tag
-// alone. The manifest pins them by the digest of their multi-platform index,
-// which the single-platform images the Makefile preloads don't carry, so
-// with the digest kind would pull them again, and that pull is what timed
-// the spec out.
-func preloadedIngressNginx() (string, error) {
+// preloaded is a manifest that uses the images the Makefile preloads into
+// kind. Manifests pin images by the digest of their multi-platform index,
+// which the single-platform images preloaded don't carry, or pull them
+// Always; either way kind would pull them again, and that pull is what
+// timed specs out.
+func preloaded(url string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ingressNginxManifest, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", fmt.Errorf("building the ingress-nginx manifest request: %w", err)
+		return "", fmt.Errorf("building the request for %s: %w", url, err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("downloading the ingress-nginx manifest: %w", err)
+		return "", fmt.Errorf("downloading %s: %w", url, err)
 	}
 	defer func() { _ = resp.Body.Close() }() // read-only, nothing to do if closing fails
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("downloading the ingress-nginx manifest: %s", resp.Status)
+		return "", fmt.Errorf("downloading %s: %s", url, resp.Status)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("reading the ingress-nginx manifest: %w", err)
+		return "", fmt.Errorf("reading %s: %w", url, err)
 	}
-	return imageDigest.ReplaceAllString(string(body), ""), nil
+	manifest := imageDigest.ReplaceAllString(string(body), "")
+	return strings.ReplaceAll(manifest, "imagePullPolicy: Always", "imagePullPolicy: IfNotPresent"), nil
 }
 
 // jsonpath reads a single field from a namespaced object.
