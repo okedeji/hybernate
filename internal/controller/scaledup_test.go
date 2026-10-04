@@ -25,11 +25,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/autoscaler"
 )
 
 // scaledBy is the target as the API server returns it after manager last
@@ -188,4 +193,42 @@ func TestGitOpsConflict_ClearsWhenAPauseHolds(t *testing.T) {
 
 		assert.Nil(t, meta.FindStatusCondition(getWorkload(t, r, "api").Status.Conditions, conditionGitOpsConflict))
 	})
+}
+
+// A workload an autoscaler scales says so, and how Hybernate pauses it
+// alongside.
+func TestReportAutoscaler(t *testing.T) {
+	scheme := testScheme(t)
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-hpa", Namespace: "default"},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.To[int32](2), MaxReplicas: 6,
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: "Deployment", Name: "api"}},
+	}
+	for _, tt := range []struct {
+		name string
+		objs []client.Object
+		want string
+	}{
+		{name: "an HPA", objs: []client.Object{hpa},
+			want: "HPA api-hpa scales it between 2 and 6 replicas; Hybernate pauses it at zero, where the HPA stops scaling"},
+		{name: "nothing"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objs...).Build()
+			r := &Reconciler{Client: c, autoscalers: autoscaler.NewFinder(c)}
+			w := pausedWorkload(v1alpha1.PhaseRunning)
+			meta.SetStatusCondition(&w.Status.Conditions, metav1.Condition{Type: conditionAutoscaled,
+				Status: metav1.ConditionTrue, Reason: "HPA"})
+
+			require.NoError(t, r.reportAutoscaler(context.Background(), w))
+
+			cond := meta.FindStatusCondition(w.Status.Conditions, conditionAutoscaled)
+			if tt.want == "" {
+				assert.Nil(t, cond, "removed once nothing scales it")
+				return
+			}
+			require.NotNil(t, cond)
+			assert.Contains(t, cond.Message, tt.want)
+		})
+	}
 }

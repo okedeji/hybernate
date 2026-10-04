@@ -444,6 +444,11 @@ type PauseStatus struct {
 	// PausedAt is when the workload was paused.
 	PausedAt *metav1.Time `json:"pausedAt,omitempty"`
 
+	// ScaledObject is the KEDA ScaledObject held at zero while the workload
+	// is paused, so KEDA doesn't scale it up. Resuming releases it.
+	// +optional
+	ScaledObject string `json:"scaledObject,omitempty"`
+
 	// Resources captures the workload's resource profile at pause time
 	// for cost savings calculation.
 	// +optional

@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/autoscaler"
 	"github.com/okedeji/hybernate/internal/gitops"
 	"github.com/okedeji/hybernate/internal/metrics"
 )
@@ -134,4 +135,30 @@ func (r *Reconciler) clearGitOpsConflict(workload *v1alpha1.ManagedWorkload) boo
 	r.emitEvent(workload, false, "Normal", ReasonGitOpsConflictResolved, actionCheckReplicas,
 		"a pause held, so %s leaves the replicas to Hybernate now", s.GitOps)
 	return true
+}
+
+const conditionAutoscaled = "Autoscaled"
+
+// reportAutoscaler says what scales the workload while it runs, and how
+// Hybernate pauses it alongside: an HPA stops at zero replicas, and KEDA is
+// held at zero through its own annotation.
+func (r *Reconciler) reportAutoscaler(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
+	if r.autoscalers == nil {
+		return nil
+	}
+	a, found, err := r.autoscalers.Find(ctx, workload.Namespace, workload.Spec.Target.Kind, workload.Spec.Target.Name)
+	if err != nil {
+		return fmt.Errorf("finding the workload's autoscaler: %w", err)
+	}
+	if !found {
+		meta.RemoveStatusCondition(&workload.Status.Conditions, conditionAutoscaled)
+		return nil
+	}
+	how := "Hybernate pauses it at zero, where the HPA stops scaling, and resumes it within that range"
+	if a.Kind == autoscaler.KEDA {
+		how = "Hybernate pauses it by having KEDA hold it at zero, and resumes it within that range"
+	}
+	r.setCondition(workload, conditionAutoscaled, metav1.ConditionTrue, string(a.Kind),
+		fmt.Sprintf("%s %s scales it between %d and %d replicas; %s", a.Kind, a.Name, a.Min, a.Max, how))
+	return nil
 }

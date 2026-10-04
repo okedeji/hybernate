@@ -31,13 +31,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/autoscaler"
 )
 
 func newTestPauser(c client.Client, scaler *fakeScaler) *Pauser {
 	return &Pauser{
-		client: c,
-		scaler: scaler,
-		clock:  func() metav1.Time { return metav1.NewTime(time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)) },
+		client:      c,
+		scaler:      scaler,
+		autoscalers: autoscaler.NewFinder(c),
+		clock:       func() metav1.Time { return metav1.NewTime(time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)) },
 	}
 }
 

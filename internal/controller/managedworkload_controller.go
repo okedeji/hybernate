@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/autoscaler"
 	"github.com/okedeji/hybernate/internal/forecast"
 	"github.com/okedeji/hybernate/internal/lifecycle"
 	"github.com/okedeji/hybernate/internal/metrics"
@@ -72,6 +73,7 @@ type Reconciler struct {
 	pauser        lifecyclePauser
 	metrics       metricsReader
 	prices        listPricer
+	autoscalers   *autoscaler.Finder
 	engines       *engineRegistry
 	activityMemo  activityMemo
 	prometheusURL string
@@ -94,6 +96,8 @@ type lifecyclePauser interface {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
@@ -150,6 +154,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 	if err := r.wakeOnScaleUp(ctx, &workload, target); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reportAutoscaler(ctx, &workload); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -651,8 +658,11 @@ func (r *Reconciler) observeActionDuration(workload *v1alpha1.ManagedWorkload, a
 }
 
 func (r *Reconciler) initDefaults() {
+	if r.autoscalers == nil {
+		r.autoscalers = autoscaler.NewFinder(r.Client)
+	}
 	if r.pauser == nil {
-		r.pauser = lifecycle.NewPauser(r.Client)
+		r.pauser = lifecycle.NewPauser(r.Client, r.autoscalers)
 	}
 	if r.metrics == nil {
 		pods := r.PodReader
