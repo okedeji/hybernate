@@ -53,6 +53,12 @@ const (
 	// AnnotationLastActivity, and the clock records the wake as a request.
 	AnnotationLastRequest = "hybernate.io/last-request"
 
+	// AnnotationLastRequestFrom is the address the request that woke a
+	// paused workload came from, stamped by the doorman with
+	// AnnotationLastRequest, so the operator can learn which workload sent
+	// it.
+	AnnotationLastRequestFrom = "hybernate.io/last-request-from"
+
 	// Settings for a workload opted in with LabelManaged, set on the
 	// workload or its namespace; the workload's own wins.
 	AnnotationDryRun        = "hybernate.io/dry-run"

@@ -305,6 +305,11 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 	}
 
 	if phase != v1alpha1.PhaseResuming {
+		// Learning never holds up a wake.
+		if err := r.learnFromWake(ctx, workload); err != nil {
+			log.FromContext(ctx).Info("couldn't learn what sent the request that woke the workload",
+				"workload", workload.Name, "namespace", workload.Namespace, "error", err.Error())
+		}
 		if _, err := r.transition(ctx, workload, v1alpha1.PhaseResuming, "ResumeRequested"); err != nil {
 			return nil, err
 		}

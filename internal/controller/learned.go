@@ -28,6 +28,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -81,10 +83,19 @@ func (r *Reconciler) learnDependencies(ctx context.Context, workload *v1alpha1.M
 			continue
 		}
 		learned = append(learned, v1alpha1.LearnedDependency{Namespace: d.Namespace, Kind: d.Kind, Name: d.Name,
-			Via: d.Via, Address: d.Address})
+			Source: v1alpha1.LearnedFromEnvironment, Via: d.Via, Address: d.Address})
+	}
+	before := workload.Status.LearnedDependencies
+	// What wakes taught stays: the environment can't confirm or deny it.
+	if before != nil {
+		for _, d := range before.Dependencies {
+			if d.Source == v1alpha1.LearnedFromWake && !ignored[d.Namespace+"/"+d.Name] &&
+				!slices.ContainsFunc(learned, sameTarget(d)) {
+				learned = append(learned, d)
+			}
+		}
 	}
 
-	before := workload.Status.LearnedDependencies
 	if before == nil || !sameDependencies(before.Dependencies, learned) {
 		r.emitEvent(workload, false, "Normal", ReasonDependenciesLearned, actionLearnDependencies,
 			"%s", learnedMessage(learned))
@@ -182,6 +193,12 @@ func learnedFrom(target client.Object, ignored map[string]bool) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+func sameTarget(d v1alpha1.LearnedDependency) func(v1alpha1.LearnedDependency) bool {
+	return func(other v1alpha1.LearnedDependency) bool {
+		return other.Namespace == d.Namespace && other.Kind == d.Kind && other.Name == d.Name
+	}
+}
+
 func sameDependencies(a, b []v1alpha1.LearnedDependency) bool {
 	return slices.EqualFunc(a, b, func(x, y v1alpha1.LearnedDependency) bool {
 		return x.Namespace == y.Namespace && x.Kind == y.Kind && x.Name == y.Name
@@ -194,9 +211,13 @@ func learnedMessage(learned []v1alpha1.LearnedDependency) string {
 	}
 	parts := make([]string, 0, len(learned))
 	for _, d := range learned {
-		parts = append(parts, fmt.Sprintf("%s/%s (%s)", d.Namespace, d.Name, d.Via))
+		how := d.Via
+		if d.Source == v1alpha1.LearnedFromWake {
+			how = "a request that woke it"
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s (%s)", d.Namespace, d.Name, how))
 	}
-	return "depends on " + strings.Join(parts, ", ") + ", found in its environment; held and woken with it"
+	return "depends on " + strings.Join(parts, ", ") + "; held and woken with it"
 }
 
 // dependencyRefs are the workloads a ManagedWorkload depends on: those its
@@ -216,4 +237,108 @@ func dependencyRefs(workload *v1alpha1.ManagedWorkload) []v1alpha1.DependencyRef
 		}
 	}
 	return refs
+}
+
+// podIPField finds pods by their IP, which the API server indexes.
+const podIPField = "status.podIP"
+
+// learnFromWake learns that the workload whose request woke this one
+// depends on it. Only a workload Hybernate manages counts: a request through
+// an ingress controller comes from the controller's pod, which depends on
+// nothing.
+func (r *Reconciler) learnFromWake(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
+	ip := workload.Annotations[v1alpha1.AnnotationLastRequestFrom]
+	if ip == "" || wakeSource(workload) != v1alpha1.ActivitySourceRequest {
+		return nil
+	}
+	pod, found, err := r.podAt(ctx, ip)
+	if err != nil || !found {
+		return err
+	}
+	dependent, target, found, err := r.managing(ctx, pod)
+	if err != nil || !found || dependent.UID == workload.UID {
+		return err
+	}
+	learned := v1alpha1.LearnedDependency{Namespace: workload.Namespace, Kind: workload.Spec.Target.Kind,
+		Name: workload.Spec.Target.Name, Source: v1alpha1.LearnedFromWake}
+	if ignoredDependencies(dependent, target)[learned.Namespace+"/"+learned.Name] {
+		return nil
+	}
+	l := dependent.Status.LearnedDependencies
+	if l != nil && slices.ContainsFunc(l.Dependencies, sameTarget(learned)) {
+		return nil
+	}
+	if l == nil {
+		l = &v1alpha1.LearnedDependencies{}
+		dependent.Status.LearnedDependencies = l
+	}
+	l.Dependencies = append(l.Dependencies, learned)
+	if err := r.Status().Update(ctx, dependent); err != nil {
+		return fmt.Errorf("recording that %s/%s depends on %s/%s: %w", dependent.Namespace, dependent.Name,
+			learned.Namespace, learned.Name, err)
+	}
+	r.emitEvent(dependent, false, "Normal", ReasonDependenciesLearned, actionLearnDependencies,
+		"depends on %s/%s, learned from a request it sent that woke it; held and woken with it",
+		learned.Namespace, learned.Name)
+	return nil
+}
+
+// podAt is the pod with the IP, and false for none, or for pods on the
+// node's network, which share the node's IP and so can't be told apart.
+func (r *Reconciler) podAt(ctx context.Context, ip string) (*corev1.Pod, bool, error) {
+	reader := r.PodReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var pods corev1.PodList
+	if err := reader.List(ctx, &pods, client.MatchingFields{podIPField: ip}); err != nil {
+		return nil, false, fmt.Errorf("finding the pod at %s: %w", ip, err)
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if !p.Spec.HostNetwork && p.DeletionTimestamp == nil {
+			return p, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// managing is the ManagedWorkload whose target the pod belongs to, and the
+// target.
+func (r *Reconciler) managing(ctx context.Context, pod *corev1.Pod) (*v1alpha1.ManagedWorkload, client.Object,
+	bool, error) {
+	var list v1alpha1.ManagedWorkloadList
+	if err := r.List(ctx, &list, client.InNamespace(pod.Namespace)); err != nil {
+		return nil, nil, false, fmt.Errorf("listing managed workloads in %s: %w", pod.Namespace, err)
+	}
+	for i := range list.Items {
+		mw := &list.Items[i]
+		target, err := r.getWorkload(ctx, targetID(mw))
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("getting the target of %s/%s: %w", mw.Namespace, mw.Name, err)
+		}
+		if selects(target, pod) {
+			return mw, target, true, nil
+		}
+	}
+	return nil, nil, false, nil
+}
+
+// selects says the workload's selector picks the pod.
+func selects(target client.Object, pod *corev1.Pod) bool {
+	var selector *metav1.LabelSelector
+	switch t := target.(type) {
+	case *appsv1.Deployment:
+		selector = t.Spec.Selector
+	case *appsv1.StatefulSet:
+		selector = t.Spec.Selector
+	}
+	if selector == nil {
+		return false
+	}
+	s, err := metav1.LabelSelectorAsSelector(selector)
+	return err == nil && !s.Empty() && s.Matches(labels.Set(pod.Labels))
 }
