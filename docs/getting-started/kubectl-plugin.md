@@ -228,7 +228,7 @@ Depends on:
 Depended on by:
   preview-42/api      learned from PGHOST                   Running
   preview-42/worker   declared in dependsOn, waitForReady   Paused
-Learned links come from the dependent's environment; hybernate.io/ignore-dependencies on it drops one.
+Learned links come from the dependent's environment or its requests; hybernate.io/ignore-dependencies drops one.
 ```
 
 `deps` shows what Hybernate holds awake and wakes with a ManagedWorkload, in both directions: what it depends on, and what depends on it, in any namespace. Each link says where it comes from, a `dependsOn` or what Hybernate [learned](../concepts/dependencies.md#learned-dependencies) from the dependent's environment, and what the other workload is doing now; one Hybernate doesn't manage shows as `not managed`. It only reads ManagedWorkloads. Without access to them in every namespace, it reads the workload's own and says that dependents elsewhere aren't shown.

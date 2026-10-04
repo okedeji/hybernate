@@ -55,6 +55,7 @@ A value that can't be read is reported in an `InvalidSetting` warning event on t
 | `hybernate.io/ignore-dependencies` | comma-separated names | Deployments, StatefulSets, ManagedWorkloads | Dependencies Hybernate shouldn't learn for this workload, comma-separated, as `namespace/name` or a name in its own namespace. See [Learned dependencies](../concepts/dependencies.md#learned-dependencies). |
 | `hybernate.io/active-until` | RFC 3339 time | ManagedWorkloads, Deployments, StatefulSets | Keeps the workload awake until that time, and wakes it if paused. |
 | `hybernate.io/last-request` | RFC 3339 time | ManagedWorkloads | Set by the doorman when it holds a request for a paused workload. Wakes it like `last-activity`, and the clock records the wake as `request`. See [Wake on Request](../concepts/wake-on-request.md). |
+| `hybernate.io/last-request-from` | IP address | ManagedWorkloads | Set by the doorman with `last-request`: where the request that woke the workload came from, so the operator can [learn](../concepts/dependencies.md#learned-dependencies) which workload depends on it. |
 
 ## Finalizers
 
