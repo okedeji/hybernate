@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `kubectl hybernate scan` no longer hangs when the API server stops answering: each request gives up after 30 seconds, and the scan after `--timeout` (5m), with an error rather than a partial report
 - Deleting the ManagedWorkload of a paused workload scales the workload back to the replicas it had first, instead of leaving it at zero
 - Workloads with an injected sidecar, such as an Istio or Linkerd proxy, can pause. CPU usage was counted for every container in the pod but measured against requests from the pod template, which doesn't include injected sidecars, so the proxy's background work alone could keep a workload above the CPU threshold. Usage and requests now both cover the template's containers and native sidecars; `kubectl hybernate scan` measures workloads the same way
 - Cost and savings include injected sidecars. Savings were priced on the pod template's requests, which leave out a sidecar injected at pod creation, often as large as the app itself; they're now priced on a running pod's requests, and running cost counts every container's usage. The operator's ClusterRole gains `get` and `list` on pods, which are read when a workload pauses and during discovery scans, not cached
