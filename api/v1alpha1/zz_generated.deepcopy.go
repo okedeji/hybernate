@@ -105,6 +105,11 @@ func (in *CostStatus) DeepCopyInto(out *CostStatus) {
 	out.CurrentMonthCPUHours = in.CurrentMonthCPUHours.DeepCopy()
 	out.CurrentMonthMemoryHours = in.CurrentMonthMemoryHours.DeepCopy()
 	out.CurrentMonthStorageHours = in.CurrentMonthStorageHours.DeepCopy()
+	if in.ListRates != nil {
+		in, out := &in.ListRates, &out.ListRates
+		*out = new(CostRates)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.ResourceReduction != nil {
 		in, out := &in.ResourceReduction, &out.ResourceReduction
 		*out = new(ResourceReduction)
