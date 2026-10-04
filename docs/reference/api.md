@@ -37,7 +37,6 @@
 | `prediction.confidence` | int (0-100) | No | `85` | Confidence threshold |
 | `costTracking` | `CostTrackingSpec` | No | | Custom cost rate overrides |
 | `costTracking.rates` | `CostRates` | No | AWS defaults | Custom cost rates |
-| `conflictAction` | `enforce` \| `warn` \| `defer` | No | `warn` | Handling of a paused workload scaled up externally |
 | `dryRun` | bool | No | `false` | Evaluate without acting |
 
 ### CostRates
@@ -55,8 +54,9 @@
 | `phase` | `WorkloadPhase` | Current lifecycle phase |
 | `conditions[]` | `Condition` | Standard K8s conditions |
 | `pause` | `PauseStatus` | State while paused |
+| `lastScaledUp` | `ScaledUp` | The last time the workload was scaled up outside Hybernate while paused, which wakes it: `at`, `replicas`, `by` (the field manager, such as `kubectl-scale`), and `gitOps` (`Argo CD` or `Flux`, when it was set from Git; see [Argo CD and Flux](../guides/gitops.md)) |
 | `activity.lastActivityTime` | time | Most recent activity from any source |
-| `activity.lastActivitySource` | string | `created`, `woke`, `request`, `cpu`, `rollout`, `annotation`, `prometheus`, or `unobserved` |
+| `activity.lastActivitySource` | string | `created`, `woke`, `request`, `cpu`, `rollout`, `annotation`, `prometheus`, `unobserved`, or `scaled-up` |
 | `activity.pauseAt` | time | When the idle action runs if no further activity is seen |
 | `activity.lastEvaluatedTime` | time | When activity was last checked |
 | `activity.templateHash` | string | Fingerprint of the target's pod template, used to detect deploys |

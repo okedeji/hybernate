@@ -90,6 +90,8 @@ The doorman's logs name the workload and Service for each held connection: `kube
 
 Something keeps waking it. Check the events for `WokeByActivity` (an activity annotation newer than the pause, or a held request: `WokenByRequest` names the Service) or `AutoResume` (the forecast expected demand). A health check or monitor that calls the Service on a timer wakes the workload each time; point it elsewhere or opt the workload out with `wake.onRequest: false`. A tool that refreshes `hybernate.io/last-activity` on a timer, rather than on real use, will keep waking the workload.
 
+`ScaledUp` means something scaled it up outside Hybernate, named in the event and `status.lastScaledUp`. If it's Argo CD or Flux, the workload also reports `GitOpsConflict=True`: it sets the replicas from Git and will undo every pause until it's told to leave them; see [Argo CD and Flux](../guides/gitops.md).
+
 ### Prediction confidence stays at 0
 
 The confidence scorer needs a full 24-hour window of data before reporting. Wait 24+ hours after creating the ManagedWorkload.

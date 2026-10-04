@@ -84,6 +84,7 @@ Pass --cpu-price and --memory-price for yours.
 - **Workloads Hybernate manages:** the activity clock it keeps for them, which already combines every source configured, including Prometheus queries. Idle means no activity for `idleAfter`; the scan says when Hybernate is holding one awake, for example for its dependents.
 - **Other workloads:** what the scan can see without Hybernate. Any of these makes a workload active: CPU at or above `--cpu-threshold` (10% by default) of what it requests, a rollout within `--idle-after` (1h by default), a `hybernate.io/last-activity` annotation within it, or a `hybernate.io/active-until` in the future. Otherwise, with CPU measured, it's idle.
 - **Workloads it can't judge**, because they set no CPU requests or have no metrics yet, are listed in the notes rather than the table.
+- **Replicas set from Git:** a workload whose replicas Argo CD or Flux last set, from the field managers the API server records, is listed in the notes by tool: its tool would undo every pause until it's told to leave the replicas to Hybernate, a one-time setting given in [Argo CD and Flux](../guides/gitops.md). JSON gives it in each workload's `replicasFromGit`.
 
 **History from Prometheus:** when the cluster has a Prometheus, the scan replays Hybernate's activity clock over the last week of each workload's CPU and rollouts, as if Hybernate had managed it with `--idle-after` and `--cpu-threshold`:
 

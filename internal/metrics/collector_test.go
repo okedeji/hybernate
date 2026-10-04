@@ -38,7 +38,7 @@ func TestAllMetricsRegistered(t *testing.T) {
 		"hybernate_prediction_anomalies_total",
 		"hybernate_idle_detections_total",
 		"hybernate_pause_expiry_actions_total",
-		"hybernate_drift_detections_total",
+		"hybernate_external_scale_ups_total",
 
 		// Tier 3
 		"hybernate_idle_seconds",
@@ -71,7 +71,7 @@ func TestAllMetricsRegistered(t *testing.T) {
 	PredictionAnomalies.WithLabelValues("ns", "w").Inc()
 	IdleDetections.WithLabelValues("pause", "ns", "w").Inc()
 	PauseExpiryActions.WithLabelValues("resume").Inc()
-	DriftDetections.WithLabelValues("adopt").Inc()
+	ExternalScaleUps.WithLabelValues("argo-cd").Inc()
 	IdleSeconds.WithLabelValues("ns", "w").Set(60)
 	PredictionRegimeChanges.WithLabelValues("ns", "w").Inc()
 	PVCRetentionRemaining.WithLabelValues("ns", "w").Set(3600)

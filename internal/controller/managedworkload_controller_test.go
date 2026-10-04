@@ -141,7 +141,13 @@ func newTestReconcilerWithTarget(t *testing.T, workload *v1alpha1.ManagedWorkloa
 	if workload != nil {
 		builder = builder.WithObjects(workload)
 		if createTarget {
-			builder = builder.WithObjects(targetDeployment(workload.Spec.Target.Name, workload.Namespace))
+			target := targetDeployment(workload.Spec.Target.Name, workload.Namespace)
+			// A workload Hybernate has paused is at zero; any more would be
+			// a scale-up outside it, which wakes it.
+			if workload.Status.Phase == v1alpha1.PhasePaused {
+				target = targetDeploymentWithReplicas(workload.Spec.Target.Name, workload.Namespace, 0)
+			}
+			builder = builder.WithObjects(target)
 		}
 	}
 
@@ -638,14 +644,13 @@ func TestReconcile_TargetNotFoundSetsConditionAndRequeues(t *testing.T) {
 	assert.True(t, found, "TargetAvailable condition should be set")
 }
 
-// --- Drift detection ---
+// --- Scaled up outside Hybernate ---
 
-func driftWorkload(phase v1alpha1.WorkloadPhase, action v1alpha1.ConflictAction) *v1alpha1.ManagedWorkload {
+func pausedWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
 	return &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:         v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			ConflictAction: action,
+			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
 		},
 		Status: v1alpha1.ManagedWorkloadStatus{
 			Phase: phase,
@@ -661,55 +666,10 @@ func targetReplicas(t *testing.T, r *Reconciler) int32 {
 	return *dep.Spec.Replicas
 }
 
-func TestReconcile_DriftWarnEmitsEventOnly(t *testing.T) {
-	r := newTestReconcilerWithReplicas(t, driftWorkload(v1alpha1.PhasePaused, v1alpha1.ConflictActionWarn),
-		&stubPauser{}, &stubDestroyer{}, 5)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-
-	assert.Equal(t, int32(5), targetReplicas(t, r))
-	assert.Equal(t, v1alpha1.PhasePaused, getWorkload(t, r, "api").Status.Phase)
-}
-
-func TestReconcile_DriftEnforceScalesPausedTargetBackToZero(t *testing.T) {
-	r := newTestReconcilerWithReplicas(t, driftWorkload(v1alpha1.PhasePaused, v1alpha1.ConflictActionEnforce),
-		&stubPauser{}, &stubDestroyer{}, 5)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-
-	assert.Equal(t, int32(0), targetReplicas(t, r))
-	assert.NotNil(t, getWorkload(t, r, "api").Status.LastActedAt)
-}
-
-func TestReconcile_DriftDeferAcceptsResume(t *testing.T) {
-	r := newTestReconcilerWithReplicas(t, driftWorkload(v1alpha1.PhasePaused, v1alpha1.ConflictActionDefer),
-		&stubPauser{}, &stubDestroyer{}, 5)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-
-	assert.Equal(t, int32(5), targetReplicas(t, r))
-	w := getWorkload(t, r, "api")
-	assert.Equal(t, v1alpha1.PhaseRunning, w.Status.Phase)
-	assert.Nil(t, w.Status.Pause)
-}
-
-func TestReconcile_NoDriftWhilePausedAtZero(t *testing.T) {
-	r := newTestReconcilerWithReplicas(t, driftWorkload(v1alpha1.PhasePaused, v1alpha1.ConflictActionEnforce),
-		&stubPauser{}, &stubDestroyer{}, 0)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-
-	assert.Nil(t, getWorkload(t, r, "api").Status.LastActedAt)
-}
-
-// Hybernate doesn't own the replica count of a running workload: its team or
-// an autoscaler does, so changes are never treated as drift.
-func TestReconcile_RunningReplicaChangesAreNotDrift(t *testing.T) {
-	workload := driftWorkload(v1alpha1.PhaseRunning, v1alpha1.ConflictActionEnforce)
+// Nothing pauses a running workload but Hybernate, so a running workload's
+// replica changes are its team's or an autoscaler's, and left alone.
+func TestReconcile_RunningReplicaChangesAreLeftAlone(t *testing.T) {
+	workload := pausedWorkload(v1alpha1.PhaseRunning)
 	workload.Status.Pause = nil
 	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 7)
 
@@ -717,7 +677,18 @@ func TestReconcile_RunningReplicaChangesAreNotDrift(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, int32(7), targetReplicas(t, r))
-	assert.Nil(t, getWorkload(t, r, "api").Status.LastActedAt)
+	assert.Nil(t, getWorkload(t, r, "api").Status.LastScaledUp)
+}
+
+func TestReconcile_PausedAtZeroStaysPaused(t *testing.T) {
+	r := newTestReconcilerWithReplicas(t, pausedWorkload(v1alpha1.PhasePaused), &stubPauser{}, &stubDestroyer{}, 0)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	w := getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhasePaused, w.Status.Phase)
+	assert.Nil(t, w.Status.LastScaledUp)
 }
 
 // --- No desiredState ---

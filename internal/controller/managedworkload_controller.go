@@ -146,7 +146,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return r.transition(ctx, &workload, v1alpha1.PhaseRunning, "Created")
 	}
 
-	// --- Target check + drift detection ---
+	// --- Target check, and a scale-up outside Hybernate ---
 
 	var target client.Object
 	if workload.Status.Phase != v1alpha1.PhaseDestroyed && workload.Status.Phase != v1alpha1.PhaseDestroying {
@@ -158,11 +158,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		if target == nil {
 			return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 		}
-		if result, err := r.checkDrift(ctx, &workload, target); result != nil || err != nil {
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			return *result, nil
+		if err := r.wakeOnScaleUp(ctx, &workload, target); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -276,6 +273,9 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 	}
 
 	if phase != v1alpha1.PhasePausing {
+		if until, held := gitOpsHold(workload, r.now()); held {
+			return &ctrl.Result{RequeueAfter: until.Sub(r.now())}, nil
+		}
 		if _, err := r.transition(ctx, workload, v1alpha1.PhasePausing, "PauseRequested"); err != nil {
 			return nil, err
 		}
@@ -344,6 +344,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 	r.stampLastActed(workload)
 	r.observeActionDuration(workload, "resume")
 	r.resetActivity(workload, source)
+	r.clearGitOpsConflict(workload)
 	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed")
 	if err != nil {
 		return nil, err
@@ -645,49 +646,6 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 	return obj, nil
 }
 
-// checkDrift handles a paused target that was scaled up outside Hybernate.
-// Paused is the only phase where Hybernate owns the replica count; while a
-// workload runs, its team or an autoscaler does.
-func (r *Reconciler) checkDrift(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) { //nolint:unparam
-	if workload.Status.Phase != v1alpha1.PhasePaused {
-		return nil, nil
-	}
-	actual := replicasFromTarget(target)
-	if actual == 0 {
-		return nil, nil
-	}
-
-	log.FromContext(ctx).Info("paused workload scaled externally",
-		"workload", workload.Name, "namespace", workload.Namespace, "replicas", actual)
-
-	action := resolveConflictAction(workload)
-	metrics.DriftDetections.WithLabelValues(string(action)).Inc()
-	r.emitEvent(workload, false, "Warning", ReasonDriftDetected, actionCheckDrift,
-		"paused workload scaled externally to %d replicas, policy: %s", actual, action)
-
-	switch action {
-	case v1alpha1.ConflictActionEnforce:
-		if err := r.enforceReplicas(ctx, target, 0); err != nil {
-			return nil, fmt.Errorf("enforcing pause: %w", err)
-		}
-		r.stampLastActed(workload)
-		if err := r.Status().Update(ctx, workload); err != nil {
-			return nil, fmt.Errorf("updating status after drift correction: %w", err)
-		}
-		r.emitEvent(workload, false, "Normal", ReasonDriftCorrected, actionCorrectDrift,
-			"replicas corrected from %d back to 0", actual)
-
-	case v1alpha1.ConflictActionDefer:
-		workload.Status.Pause = nil
-		workload.Status.Phase = v1alpha1.PhaseRunning
-		if err := r.Status().Update(ctx, workload); err != nil {
-			return nil, fmt.Errorf("updating status after accepting drift: %w", err)
-		}
-	}
-
-	return nil, nil
-}
-
 func replicasFromTarget(obj client.Object) int32 {
 	var replicas *int32
 	switch t := obj.(type) {
@@ -700,16 +658,6 @@ func replicasFromTarget(obj client.Object) int32 {
 		return 1
 	}
 	return *replicas
-}
-
-func (r *Reconciler) enforceReplicas(ctx context.Context, target client.Object, desired int32) error {
-	switch t := target.(type) {
-	case *appsv1.Deployment:
-		t.Spec.Replicas = &desired
-	case *appsv1.StatefulSet:
-		t.Spec.Replicas = &desired
-	}
-	return r.Update(ctx, target)
 }
 
 func (r *Reconciler) setCondition(workload *v1alpha1.ManagedWorkload, condType string, status metav1.ConditionStatus, reason, message string) {
