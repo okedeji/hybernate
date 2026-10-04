@@ -60,7 +60,7 @@ func drainEvents(t *testing.T, r *Reconciler) string {
 // Whoever scales up a paused workload wants it running, so it's woken.
 func TestWakeOnScaleUp_ByAPerson(t *testing.T) {
 	workload := pausedWorkload(v1alpha1.PhasePaused)
-	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 5)
+	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, 5)
 	w := getWorkload(t, r, "api")
 
 	require.NoError(t, r.wakeOnScaleUp(context.Background(), w, scaledBy("kubectl-scale", 5)))
@@ -89,7 +89,7 @@ func TestWakeOnScaleUp_ByGitOps(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool, func(t *testing.T) {
-			r := newTestReconcilerWithReplicas(t, pausedWorkload(v1alpha1.PhasePaused), &stubPauser{}, &stubDestroyer{}, 3)
+			r := newTestReconcilerWithReplicas(t, pausedWorkload(v1alpha1.PhasePaused), &stubPauser{}, 3)
 			w := getWorkload(t, r, "api")
 
 			require.NoError(t, r.wakeOnScaleUp(context.Background(), w, scaledBy(tt.manager, 3)))
@@ -132,7 +132,7 @@ func TestHandlePause_WaitsAfterAGitOpsConflict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pauser := &stubPauser{}
-			r := newTestReconcilerWithReplicas(t, conflicted(fixedTime.Add(-tt.scaledUp)), pauser, &stubDestroyer{}, 3)
+			r := newTestReconcilerWithReplicas(t, conflicted(fixedTime.Add(-tt.scaledUp)), pauser, 3)
 			w := getWorkload(t, r, "api")
 
 			result, err := r.handlePause(context.Background(), w)
@@ -155,7 +155,7 @@ func TestGitOpsConflict_ClearsWhenAPauseHolds(t *testing.T) {
 		workload.Status.Phase = v1alpha1.PhasePaused
 		workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3,
 			PausedAt: &metav1.Time{Time: fixedTime.Add(-61 * time.Minute)}}
-		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 0)
+		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, 0)
 
 		_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 		require.NoError(t, err)
@@ -168,7 +168,7 @@ func TestGitOpsConflict_ClearsWhenAPauseHolds(t *testing.T) {
 		workload.Status.Phase = v1alpha1.PhasePaused
 		workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3,
 			PausedAt: &metav1.Time{Time: fixedTime.Add(-10 * time.Minute)}}
-		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 0)
+		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, 0)
 
 		_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 		require.NoError(t, err)
@@ -180,7 +180,7 @@ func TestGitOpsConflict_ClearsWhenAPauseHolds(t *testing.T) {
 		workload.Status.Phase = v1alpha1.PhasePaused
 		workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3,
 			PausedAt: &metav1.Time{Time: fixedTime.Add(-10 * time.Minute)}}
-		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{resumeDone: true}, &stubDestroyer{}, 0)
+		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{resumeDone: true}, 0)
 		w := getWorkload(t, r, "api")
 
 		_, err := r.handleResume(context.Background(), w)

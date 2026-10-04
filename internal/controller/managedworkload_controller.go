@@ -70,7 +70,6 @@ type Reconciler struct {
 	PodReader client.Reader
 
 	pauser        lifecyclePauser
-	destroyer     lifecycleDestroyer
 	metrics       metricsReader
 	prices        listPricer
 	engines       *engineRegistry
@@ -84,17 +83,12 @@ type lifecyclePauser interface {
 	Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error)
 }
 
-type lifecycleDestroyer interface {
-	Destroy(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error)
-	CleanupPVCs(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error)
-}
-
 // +kubebuilder:rbac:groups=hybernate.io,resources=managedworkloads,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=hybernate.io,resources=managedworkloads/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=hybernate.io,resources=managedworkloads/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;update;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments/scale;statefulsets/scale,verbs=get;update
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
@@ -121,7 +115,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// Handle deletion with finalizer.
 	if !workload.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, &workload)
+		return ctrl.Result{}, r.reconcileDelete(ctx, &workload)
 	}
 
 	// Re-published every reconcile so the gauge is populated after an
@@ -148,19 +142,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// --- Target check, and a scale-up outside Hybernate ---
 
-	var target client.Object
-	if workload.Status.Phase != v1alpha1.PhaseDestroyed && workload.Status.Phase != v1alpha1.PhaseDestroying {
-		var err error
-		target, err = r.checkTarget(ctx, &workload)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if target == nil {
-			return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
-		}
-		if err := r.wakeOnScaleUp(ctx, &workload, target); err != nil {
-			return ctrl.Result{}, err
-		}
+	target, err := r.checkTarget(ctx, &workload)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if target == nil {
+		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+	}
+	if err := r.wakeOnScaleUp(ctx, &workload, target); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// --- Wake on request ---
@@ -182,16 +172,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	// --- Manual lifecycle ---
 
 	result, err = r.reconcileDesiredState(ctx, &workload)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if result != nil {
-		return *result, nil
-	}
-
-	// --- Housekeeping ---
-
-	result, err = r.reconcileHousekeeping(ctx, &workload)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -221,18 +201,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	return ctrl.Result{}, nil
 }
 
-// resumeTransition finishes a pause, resume, or destroy that an earlier
-// reconcile started but didn't complete. Without it, a transient failure
-// strands the workload in the intermediate phase, because neither the manual
-// nor the automated paths act on Pausing, Resuming, or Destroying.
+// resumeTransition finishes a pause or resume that an earlier reconcile
+// started but didn't complete. Without it, a transient failure strands the
+// workload in the intermediate phase, because neither the manual nor the
+// automated paths act on Pausing or Resuming.
 func (r *Reconciler) resumeTransition(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
 	switch workload.Status.Phase {
 	case v1alpha1.PhasePausing:
 		return r.handlePause(ctx, workload)
 	case v1alpha1.PhaseResuming:
 		return r.handleResume(ctx, workload)
-	case v1alpha1.PhaseDestroying:
-		return r.handleDestroy(ctx, workload)
 	default:
 		return nil, nil
 	}
@@ -244,8 +222,8 @@ func (r *Reconciler) reconcileDesiredState(ctx context.Context, workload *v1alph
 	}
 
 	desired := *workload.Spec.DesiredState
-	if desired != v1alpha1.DesiredStateRunning && isAwake(workload.Status.Phase) &&
-		workload.Status.Phase != v1alpha1.PhasePausing && workload.Status.Phase != v1alpha1.PhaseDestroying {
+	if desired == v1alpha1.DesiredStatePaused && isAwake(workload.Status.Phase) &&
+		workload.Status.Phase != v1alpha1.PhasePausing {
 		if err := r.warnIfDependentsAwake(ctx, workload); err != nil {
 			return nil, err
 		}
@@ -256,8 +234,6 @@ func (r *Reconciler) reconcileDesiredState(ctx context.Context, workload *v1alph
 		return r.handlePause(ctx, workload)
 	case v1alpha1.DesiredStateRunning:
 		return r.handleResume(ctx, workload)
-	case v1alpha1.DesiredStateDestroyed:
-		return r.handleDestroy(ctx, workload)
 	default:
 		return nil, nil
 	}
@@ -353,170 +329,6 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 	return &result, nil
 }
 
-func (r *Reconciler) handleDestroy(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
-	switch workload.Status.Phase {
-	case v1alpha1.PhaseDestroyed:
-		return nil, nil
-	case v1alpha1.PhaseDestroying:
-		// Retrying: the snapshot was persisted with the Destroying phase, and
-		// the target may already be gone, so don't capture it again.
-	default:
-		// Persist the snapshot with the phase so it survives a failed delete.
-		if workload.Status.Destroy == nil {
-			workload.Status.Destroy = &v1alpha1.DestroyStatus{}
-		}
-		workload.Status.Destroy.Resources = r.captureResourceSnapshot(ctx, workload)
-		if _, err := r.transition(ctx, workload, v1alpha1.PhaseDestroying, "DestroyRequested"); err != nil {
-			return nil, err
-		}
-	}
-
-	done, err := r.destroyer.Destroy(ctx, workload)
-	if err != nil {
-		return nil, fmt.Errorf("destroying workload: %w", err)
-	}
-	if !done {
-		result := ctrl.Result{RequeueAfter: 5 * time.Second}
-		return &result, nil
-	}
-
-	r.stampLastActed(workload)
-	r.observeActionDuration(workload, "destroy")
-	result, err := r.transition(ctx, workload, v1alpha1.PhaseDestroyed, "Destroyed")
-	if err != nil {
-		return nil, err
-	}
-	r.emitEvent(workload, false, "Normal", ReasonDestroyed, actionDestroy, "destroyed")
-	return &result, nil
-}
-
-// --- Housekeeping ---
-
-func (r *Reconciler) reconcileHousekeeping(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
-	if result, err := r.checkPauseExpiry(ctx, workload); result != nil || err != nil {
-		return result, err
-	}
-
-	if result, err := r.checkPVCRetention(ctx, workload); result != nil || err != nil {
-		return result, err
-	}
-
-	if result, err := r.checkPVCRetentionWarning(ctx, workload); result != nil || err != nil {
-		return result, err
-	}
-
-	return nil, nil
-}
-
-func (r *Reconciler) checkPauseExpiry(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
-	if workload.Status.Phase != v1alpha1.PhasePaused {
-		return nil, nil
-	}
-	if workload.Spec.Pause == nil || workload.Spec.Pause.ExpireAfter == nil {
-		return nil, nil
-	}
-	if workload.Status.Pause == nil || workload.Status.Pause.PausedAt == nil {
-		return nil, nil
-	}
-
-	expiry := workload.Status.Pause.PausedAt.Add(workload.Spec.Pause.ExpireAfter.Duration)
-	now := r.now()
-
-	if now.Before(expiry) {
-		remaining := expiry.Sub(now)
-		result := ctrl.Result{RequeueAfter: remaining}
-		return &result, nil
-	}
-
-	r.emitEvent(workload, false, "Normal", ReasonPauseExpired, actionExpirePause,
-		"pause expired after %s, executing %s", workload.Spec.Pause.ExpireAfter.Duration, workload.Spec.Pause.ExpireAction)
-
-	switch workload.Spec.Pause.ExpireAction {
-	case v1alpha1.ExpireActionResume:
-		metrics.PauseExpiryActions.WithLabelValues("resume").Inc()
-		return r.handleResume(ctx, workload)
-	default:
-		metrics.PauseExpiryActions.WithLabelValues("destroy").Inc()
-		return r.handleDestroy(ctx, workload)
-	}
-}
-
-func (r *Reconciler) checkPVCRetention(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
-	if workload.Status.Phase != v1alpha1.PhaseDestroyed {
-		return nil, nil
-	}
-	if workload.Status.Destroy == nil || workload.Status.Destroy.PVCRetentionExpiresAt == nil {
-		return nil, nil
-	}
-
-	// If the user removed pvcRetention from the spec after destroy,
-	// cancel the scheduled cleanup and preserve PVCs indefinitely.
-	if workload.Spec.Destroy == nil || workload.Spec.Destroy.PVCRetention == nil {
-		workload.Status.Destroy.PVCRetentionExpiresAt = nil
-		metrics.PVCRetentionRemaining.WithLabelValues(workload.Namespace, workload.Spec.Target.Name).Set(0)
-		if err := r.Status().Update(ctx, workload); err != nil {
-			return nil, fmt.Errorf("cancelling pvc retention: %w", err)
-		}
-		r.emitEvent(workload, false, "Normal", ReasonPVCRetentionExpiring, actionCleanupPVCs,
-			"PVC retention removed from spec, cleanup cancelled")
-		return nil, nil
-	}
-
-	now := r.now()
-	expiry := workload.Status.Destroy.PVCRetentionExpiresAt.Time
-	if now.Before(expiry) {
-		remaining := expiry.Sub(now)
-		metrics.PVCRetentionRemaining.WithLabelValues(workload.Namespace, workload.Spec.Target.Name).Set(remaining.Seconds())
-		result := ctrl.Result{RequeueAfter: remaining}
-		return &result, nil
-	}
-
-	metrics.PVCRetentionRemaining.WithLabelValues(workload.Namespace, workload.Spec.Target.Name).Set(0)
-	done, err := r.destroyer.CleanupPVCs(ctx, workload)
-	if err != nil {
-		return nil, fmt.Errorf("cleaning up pvcs: %w", err)
-	}
-	if !done {
-		result := ctrl.Result{RequeueAfter: 30 * time.Second}
-		return &result, nil
-	}
-
-	if err := r.Status().Update(ctx, workload); err != nil {
-		return nil, fmt.Errorf("updating status after pvc cleanup: %w", err)
-	}
-
-	r.emitEvent(workload, false, "Normal", ReasonPVCsCleaned, actionCleanupPVCs, "PVCs cleaned up after retention period")
-	result := ctrl.Result{}
-	return &result, nil
-}
-
-func (r *Reconciler) checkPVCRetentionWarning(_ context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) { //nolint:unparam
-	if workload.Status.Phase != v1alpha1.PhaseDestroyed {
-		return nil, nil
-	}
-	if workload.Spec.Destroy == nil || workload.Spec.Destroy.PVCRetentionWarning == nil {
-		return nil, nil
-	}
-	if workload.Status.Destroy == nil || workload.Status.Destroy.PVCRetentionExpiresAt == nil {
-		return nil, nil
-	}
-
-	expiry := workload.Status.Destroy.PVCRetentionExpiresAt.Time
-	warningWindow := workload.Spec.Destroy.PVCRetentionWarning.Duration
-	warningTime := expiry.Add(-warningWindow)
-	now := r.now()
-
-	if now.Before(warningTime) {
-		return nil, nil
-	}
-
-	remaining := expiry.Sub(now).Round(time.Minute)
-	r.emitEvent(workload, false, "Warning", ReasonPVCRetentionExpiring, actionCleanupPVCs,
-		"PVCs will be deleted in %s", remaining)
-
-	return nil, nil
-}
-
 // --- Finalizer ---
 
 func (r *Reconciler) ensureFinalizer(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
@@ -527,42 +339,24 @@ func (r *Reconciler) ensureFinalizer(ctx context.Context, workload *v1alpha1.Man
 	return r.Update(ctx, workload)
 }
 
-func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
+func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
 	if !controllerutil.ContainsFinalizer(workload, finalizerName) {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	if err := r.restoreBeforeDelete(ctx, workload); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// If destroyed with PVC retention pending, clean up.
-	if workload.Status.Destroy != nil && workload.Status.Destroy.PVCRetentionExpiresAt != nil {
-		now := r.now()
-		expiry := workload.Status.Destroy.PVCRetentionExpiresAt.Time
-		if now.Before(expiry) {
-			remaining := expiry.Sub(now)
-			return ctrl.Result{RequeueAfter: remaining}, nil
-		}
-
-		done, err := r.destroyer.CleanupPVCs(ctx, workload)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("cleaning up pvcs during deletion: %w", err)
-		}
-		if !done {
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
+		return err
 	}
 
 	controllerutil.RemoveFinalizer(workload, finalizerName)
 	if err := r.Update(ctx, workload); err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
+		return fmt.Errorf("removing finalizer: %w", err)
 	}
 	r.activityMemo.forget(workload.UID)
 	labels := prometheus.Labels{"namespace": workload.Namespace, "workload": workload.Name}
 	metrics.WorkloadPhase.DeletePartialMatch(labels)
 	metrics.IdleSeconds.DeletePartialMatch(labels)
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // restoreBeforeDelete scales a paused workload back to the replicas it had,
@@ -570,7 +364,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 // wait for the pods to be Ready, which would hold up the deletion; a
 // workload that's gone has nothing to restore.
 func (r *Reconciler) restoreBeforeDelete(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	if workload.Status.Pause == nil || workload.Status.Phase == v1alpha1.PhaseDestroyed {
+	if workload.Status.Pause == nil {
 		return nil
 	}
 	if _, err := r.pauser.Resume(ctx, workload); err != nil {
@@ -859,9 +653,6 @@ func (r *Reconciler) observeActionDuration(workload *v1alpha1.ManagedWorkload, a
 func (r *Reconciler) initDefaults() {
 	if r.pauser == nil {
 		r.pauser = lifecycle.NewPauser(r.Client)
-	}
-	if r.destroyer == nil {
-		r.destroyer = lifecycle.NewDestroyer(r.Client)
 	}
 	if r.metrics == nil {
 		pods := r.PodReader

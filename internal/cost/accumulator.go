@@ -65,12 +65,11 @@ func Accumulate(s Snapshot, cpuCores, memoryGiB, storageGiB float64, elapsed tim
 	return s
 }
 
-// AccumulateSavings adds estimated savings for a workload that Hybernate has acted on.
-// For paused workloads, storageGiB should be 0 since PVCs persist while paused.
-// For destroyed workloads with cleaned-up PVCs, include storageGiB.
-func AccumulateSavings(s Snapshot, cpuCores, memoryGiB, storageGiB float64, elapsed time.Duration, rates Rates) Snapshot {
+// AccumulateSavings adds what a paused workload's compute would have cost.
+// Its PVCs stay while it's paused, so storage isn't saved.
+func AccumulateSavings(s Snapshot, cpuCores, memoryGiB float64, elapsed time.Duration, rates Rates) Snapshot {
 	hours := clampElapsed(elapsed)
-	s.EstimatedSavedCost += (ComputeHourly(cpuCores, memoryGiB, rates) + storageGiB*storageHourlyRate(rates)) * hours
+	s.EstimatedSavedCost += ComputeHourly(cpuCores, memoryGiB, rates) * hours
 	return s
 }
 

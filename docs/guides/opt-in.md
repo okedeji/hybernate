@@ -54,7 +54,7 @@ Leaving an annotation out means its default. A value that can't be read, such as
 hybernate.io/depends-on: "statefulset/postgres, messaging/statefulset/nats"
 ```
 
-Settings that delete things or need more than one value aren't annotations: destroying idle workloads, Prometheus activity queries, `waitForReady` on a dependency, pause expiry, cost rates, and `conflictAction`. For those, write a [ManagedWorkload](managed-workload.md) yourself.
+Settings that need more than one value aren't annotations: Prometheus activity queries, `waitForReady` on a dependency, and cost rates. For those, write a [ManagedWorkload](managed-workload.md) yourself.
 
 ### Which setting wins
 

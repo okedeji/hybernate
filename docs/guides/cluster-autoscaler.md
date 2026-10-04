@@ -1,6 +1,6 @@
 # Cluster Autoscaler Configuration
 
-Hybernate manages workloads at the pod layer: it pauses, scales, and destroys idle Deployments and StatefulSets. But pods run on nodes, and nodes cost money. For Hybernate's cost savings to materialize, your cluster needs an autoscaler that removes underutilized nodes after Hybernate frees up capacity.
+Hybernate manages workloads at the pod layer: it pauses idle Deployments and StatefulSets, scaling them to zero. But pods run on nodes, and nodes cost money. For Hybernate's cost savings to materialize, your cluster needs an autoscaler that removes underutilized nodes after Hybernate frees up capacity.
 
 ```
 Hybernate scales down pods → Nodes become underutilized → Autoscaler removes empty nodes → Cost savings
@@ -49,9 +49,7 @@ extraArgs:
 | Hybernate Action | Autoscaler Response |
 |-----------------|-------------------|
 | Pause (scale to 0) | Pods removed, node becomes underutilized, removed after `scale-down-unneeded-time` |
-| Scale down (reduce replicas) | Freed capacity may make node underutilized, removed if below threshold |
 | Resume (scale back up) | Autoscaler provisions new nodes if no capacity exists |
-| Destroy (delete workload) | Same as pause, node removed if underutilized |
 
 ### Things to Watch
 
@@ -126,9 +124,7 @@ extraArgs:
 | Hybernate Action | Karpenter Response |
 |-----------------|-------------------|
 | Pause (scale to 0) | Node becomes empty, consolidated after `consolidateAfter` |
-| Scale down (reduce replicas) | Remaining pods may fit on fewer nodes, Karpenter consolidates |
 | Resume (scale back up) | Karpenter provisions a right-sized node for the pending pods |
-| Destroy (delete workload) | Same as pause, node consolidated if empty/underutilized |
 
 ### Why Karpenter Works Well With Hybernate
 

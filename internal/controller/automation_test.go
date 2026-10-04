@@ -132,13 +132,12 @@ func newAutomationReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, e
 	}
 
 	r := &Reconciler{
-		Client:    builder.Build(),
-		Scheme:    scheme,
-		Recorder:  events.NewFakeRecorder(10),
-		pauser:    opts.pauser,
-		destroyer: opts.destroyer,
-		engines:   reg,
-		clock:     func() time.Time { return fixedTime },
+		Client:   builder.Build(),
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		pauser:   opts.pauser,
+		engines:  reg,
+		clock:    func() time.Time { return fixedTime },
 	}
 	if opts.metrics != nil {
 		r.metrics = opts.metrics
@@ -146,15 +145,11 @@ func newAutomationReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, e
 	if r.pauser == nil {
 		r.pauser = &stubPauser{}
 	}
-	if r.destroyer == nil {
-		r.destroyer = &stubDestroyer{}
-	}
 	return r
 }
 
 type automationOpts struct {
 	pauser    *stubPauser
-	destroyer *stubDestroyer
 	metrics   *stubMetrics
 	needsFeed bool
 }
@@ -173,7 +168,7 @@ func automationWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload 
 // --- Tests ---
 
 func TestAutomation_SkipsNonRunningPhase(t *testing.T) {
-	for _, phase := range []v1alpha1.WorkloadPhase{v1alpha1.PhasePaused, v1alpha1.PhaseDestroyed, v1alpha1.PhasePausing} {
+	for _, phase := range []v1alpha1.WorkloadPhase{v1alpha1.PhasePaused, v1alpha1.PhasePausing} {
 		t.Run(string(phase), func(t *testing.T) {
 			workload := automationWorkload(phase)
 			engine := &stubForecaster{phase: forecast.DailyActive}

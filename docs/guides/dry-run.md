@@ -61,7 +61,6 @@ The operator runs its full evaluation pipeline:
 | Action | Dry Run Behavior |
 |--------|-----------------|
 | Idle detection | The activity clock runs and the phase becomes `Idle` when it runs out, but the workload is **not** paused |
-| Pause expiry | Expiry is detected, but the workload is **not** resumed or destroyed |
 | Cost tracking | Costs are accumulated normally (resource usage is real regardless of management) |
 | Prediction engine | Data points are observed and confidence builds normally |
 | Events | All events are emitted with a `[dry-run]` prefix |

@@ -57,7 +57,7 @@ api/v1alpha1/                  # CRD type definitions
 internal/controller/           # Reconcilers
 internal/forecast/             # Holt-Winters engine
 internal/signal/               # Signal interface and implementations
-internal/lifecycle/            # Pause, resume, scale, destroy
+internal/lifecycle/            # Pause and resume
 internal/discovery/            # Cluster scan for kubectl hybernate scan
 internal/doorman/              # Wake on request
 internal/cost/                 # Cost accumulation

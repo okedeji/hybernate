@@ -44,7 +44,7 @@ var (
 
 	LifecycleActionDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "hybernate_lifecycle_action_duration_seconds",
-		Help:    "Duration of lifecycle actions (pause, resume, destroy).",
+		Help:    "Duration of lifecycle actions (pause, resume).",
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 10),
 	}, []string{"action"})
 )
@@ -74,13 +74,8 @@ var (
 
 	IdleDetections = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_idle_detections_total",
-		Help: "Total idle detections by action taken.",
-	}, []string{"action", "namespace", "workload"})
-
-	PauseExpiryActions = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_pause_expiry_actions_total",
-		Help: "Total pause expiry events by action (resume or destroy).",
-	}, []string{"action"})
+		Help: "Times each workload's idle clock ran out.",
+	}, []string{"namespace", "workload"})
 
 	ExternalScaleUps = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_external_scale_ups_total",
@@ -99,11 +94,6 @@ var (
 	PredictionRegimeChanges = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_prediction_regime_changes_total",
 		Help: "Total regime changes detected by the prediction engine.",
-	}, []string{"namespace", "workload"})
-
-	PVCRetentionRemaining = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hybernate_pvc_retention_remaining_seconds",
-		Help: "Seconds until PVC retention expires and PVCs are deleted.",
 	}, []string{"namespace", "workload"})
 
 	AutomationSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -156,13 +146,11 @@ func init() {
 		PredictionDataPoints,
 		PredictionAnomalies,
 		IdleDetections,
-		PauseExpiryActions,
 		ExternalScaleUps,
 
 		// Tier 3
 		IdleSeconds,
 		PredictionRegimeChanges,
-		PVCRetentionRemaining,
 		AutomationSkipped,
 		DryrunActions,
 		TargetUnavailable,

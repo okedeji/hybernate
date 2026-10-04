@@ -11,9 +11,8 @@
 | `target` | `WorkloadRef` | Yes | | The workload to manage |
 | `target.kind` | `Deployment` \| `StatefulSet` | Yes | `Deployment` | Target kind |
 | `target.name` | string | Yes | | Target name (same namespace) |
-| `desiredState` | `Running` \| `Paused` \| `Destroyed` | No | | Manual lifecycle override |
+| `desiredState` | `Running` \| `Paused` | No | | Manual lifecycle override |
 | `idlePolicy` | `IdlePolicySpec` | No | | Idle detection configuration |
-| `idlePolicy.action` | `pause` \| `destroy` | No | `pause` | Action once idle for `idleAfter` |
 | `idlePolicy.idleAfter` | duration | No | `1h` | Time without activity before acting |
 | `idlePolicy.activity.cpuThreshold` | int | No | `10` | CPU utilization % of requests above which the workload is active (0-100) |
 | `idlePolicy.activity.prometheus[].promQL` | string | Yes (per entry) | | PromQL query; a result above zero is activity |
@@ -27,12 +26,6 @@
 | `wake.onRequest` | bool | No | `true` | Route the workload's Services to the doorman while paused |
 | `wake.maxWait` | duration | No | `2m` | How long a request is held while the workload wakes |
 | `wake.page` | bool | No | `true` | Answer a browser loading a page with a waking-up page instead of holding it |
-| `pause` | `PauseSpec` | No | | Pause behavior |
-| `pause.expireAfter` | duration | No | | Max pause duration |
-| `pause.expireAction` | `resume` \| `destroy` | No | `destroy` | Action on expiry |
-| `destroy` | `DestroySpec` | No | | Destroy behavior |
-| `destroy.pvcRetention` | duration | No | | PVC retention after destroy |
-| `destroy.pvcRetentionWarning` | duration | No | | Warning before PVC cleanup |
 | `prediction` | `PredictionSpec` | Yes | | Forecast engine config |
 | `prediction.confidence` | int (0-100) | No | `85` | Confidence threshold |
 | `costTracking` | `CostTrackingSpec` | No | | Custom cost rate overrides |
@@ -73,10 +66,6 @@
 | `pause.previousReplicas` | int32 | Replicas before pause |
 | `pause.pausedAt` | time | When paused |
 | `pause.resources` | `ResourceSnapshot` | Resource profile at pause |
-| `destroy` | `DestroyStatus` | State after destroy |
-| `destroy.destroyedAt` | time | When destroyed |
-| `destroy.resources` | `ResourceSnapshot` | Resource profile at destroy |
-| `destroy.pvcRetentionExpiresAt` | time | When PVCs will be cleaned up |
 | `prediction` | `PredictionStatus` | Forecast engine state |
 | `prediction.dailyPhase` | string | Daily season phase |
 | `prediction.dailyConfidence` | int | Daily accuracy % |
@@ -99,4 +88,4 @@
 
 ### WorkloadPhase Values
 
-`Creating`, `Running`, `Idle`, `Pausing`, `Paused`, `Resuming`, `Destroying`, `Destroyed`
+`Creating`, `Running`, `Idle`, `Pausing`, `Paused`, `Resuming`

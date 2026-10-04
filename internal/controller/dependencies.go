@@ -145,7 +145,7 @@ func (g *dependencyGraph) inCycle(workload *v1alpha1.ManagedWorkload) bool {
 // counts: its pods may still be serving.
 func isAwake(phase v1alpha1.WorkloadPhase) bool {
 	switch phase {
-	case v1alpha1.PhasePaused, v1alpha1.PhaseDestroying, v1alpha1.PhaseDestroyed:
+	case v1alpha1.PhasePaused:
 		return false
 	default:
 		return true
@@ -302,7 +302,7 @@ func (r *Reconciler) checkDependenciesExist(ctx context.Context, workload *v1alp
 	return nil
 }
 
-// warnIfDependentsAwake notes when a manual pause or destroy overrides the
+// warnIfDependentsAwake notes when a manual pause overrides the
 // dependency hold. The user's choice wins, but dependents may now fail.
 func (r *Reconciler) warnIfDependentsAwake(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
 	g, err := r.loadDependencyGraph(ctx)

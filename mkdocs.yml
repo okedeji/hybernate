@@ -73,7 +73,7 @@ nav:
   - Guides:
       - Opting In: guides/opt-in.md
       - ManagedWorkload: guides/managed-workload.md
-      - Pause & Destroy: guides/pause-destroy.md
+      - Pause and Resume: guides/pause.md
       - Cluster Autoscaler: guides/cluster-autoscaler.md
       - Dry Run: guides/dry-run.md
       - Prometheus Activity: guides/prometheus-signals.md

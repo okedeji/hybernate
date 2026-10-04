@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 # Pause & Destroy Guide
 
 Hybernate provides two lifecycle actions: **pause** (scale to zero) and **destroy** (delete the workload). Both include safety mechanisms for data preservation.
@@ -6,16 +7,33 @@ Hybernate provides two lifecycle actions: **pause** (scale to zero) and **destro
 
 Pausing scales the workload to zero replicas. The Deployment or StatefulSet still exists; only the pods are removed.
 
+=======
+# Pause and Resume
+
+Hybernate's one action is to **pause**: scale a workload to zero replicas. The Deployment or StatefulSet stays, and so do its PVCs and their data; only the pods are removed. Hybernate never deletes a workload or its storage.
+
+## Pause
+
+>>>>>>> Stashed changes
 ### What Happens When a Workload Is Paused
 
 1. The current replica count is saved to `status.pause.previousReplicas`
 2. A resource snapshot is captured (CPU, memory, storage per replica) for cost savings calculation
+<<<<<<< Updated upstream
 3. The workload is scaled to 0
+=======
+3. The workload is scaled to 0, recorded under the field manager `hybernate`
+>>>>>>> Stashed changes
 4. The phase transitions to `Paused`
 5. `status.pause.pausedAt` is set
 
 ### Triggering a Pause
 
+<<<<<<< Updated upstream
+=======
+**Automatically:** once the workload has had no activity for `idlePolicy.idleAfter`; see [Idle Detection](../concepts/idle-detection.md).
+
+>>>>>>> Stashed changes
 **Manually:**
 
 ```bash
@@ -23,6 +41,7 @@ kubectl patch managedworkload my-api -n staging \
   --type merge -p '{"spec":{"desiredState":"Paused"}}'
 ```
 
+<<<<<<< Updated upstream
 **Automatically:** When idle detection confirms idle and `idlePolicy.action` is `pause` or `auto`.
 
 ### Pause Expiry
@@ -46,6 +65,20 @@ If `expireAfter` is not set, the workload stays paused indefinitely.
 ### Resume
 
 Resuming restores the saved replica count and waits for pods to become ready.
+=======
+A workload paused this way stays paused until `desiredState` is removed or set to `Running`: it doesn't wake on activity or requests.
+
+## Resume
+
+Resuming restores the saved replica count and waits for the pods to be Ready.
+
+**Automatically:**
+
+- A request to the workload's Service, through [wake on request](../concepts/wake-on-request.md)
+- A `hybernate.io/last-activity` annotation newer than the pause, or a future `hybernate.io/active-until`, on the ManagedWorkload or its target, such as from [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md)
+- With `autoResume: true`, ahead of demand a confident forecast expects
+- Something else scaling it up, such as `kubectl scale`; see [Argo CD and Flux](gitops.md) for when that's a GitOps tool
+>>>>>>> Stashed changes
 
 **Manually:**
 
@@ -54,6 +87,7 @@ kubectl patch managedworkload my-api -n staging \
   --type merge -p '{"spec":{"desiredState":"Running"}}'
 ```
 
+<<<<<<< Updated upstream
 **Automatically:**
 
 - When `expireAfter` elapses with `expireAction: Resume`
@@ -128,3 +162,16 @@ The `hybernate.io/cleanup` finalizer is automatically added to every ManagedWork
 
 - If a ManagedWorkload CR is deleted while PVC retention is pending, the operator runs PVC cleanup before allowing the deletion to complete
 - Paused workloads are resumed before the ManagedWorkload CR is removed (if applicable)
+=======
+## Cost Savings While Paused
+
+Cost tracking is always enabled. While a workload is paused, what its CPU and memory would have cost accrues as savings; its PVCs still cost, since they stay.
+
+## Workloads Nobody Comes Back To
+
+A paused workload costs only its storage. To remove one for good, delete it the way it was created: from Git, by the pipeline that made the environment, or with a TTL tool such as kube-janitor. Those know when an environment is finished; Hybernate only knows it's idle.
+
+## Finalizer
+
+The `hybernate.io/cleanup` finalizer is added to every ManagedWorkload, so that deleting one while its workload is paused scales the workload back to the replicas it had first. No longer managing a workload never leaves it switched off.
+>>>>>>> Stashed changes

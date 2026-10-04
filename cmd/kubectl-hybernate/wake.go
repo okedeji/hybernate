@@ -144,9 +144,5 @@ func checkWakeable(w *v1alpha1.ManagedWorkload) error {
 		return fmt.Errorf("%s/%s %w: spec.desiredState is %s; remove it or set it to Running",
 			w.Namespace, w.Name, errNotWakeable, *d)
 	}
-	if w.Status.Phase == v1alpha1.PhaseDestroyed || w.Status.Phase == v1alpha1.PhaseDestroying {
-		return fmt.Errorf("%s/%s %w: it's %s, so its %s was deleted; redeploy it to bring it back",
-			w.Namespace, w.Name, errNotWakeable, w.Status.Phase, w.Spec.Target.Kind)
-	}
 	return nil
 }

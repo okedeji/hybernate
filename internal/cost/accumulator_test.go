@@ -107,29 +107,19 @@ func TestAccumulateSavings(t *testing.T) {
 	rates := Rates{CPUPerHour: 0.031, MemoryPerHour: 0.004, StoragePerMonth: 0.08}
 
 	tests := []struct {
-		name       string
-		initial    Snapshot
-		cpuCores   float64
-		memoryGiB  float64
-		storageGiB float64
-		elapsed    time.Duration
-		wantSaved  float64
+		name      string
+		initial   Snapshot
+		cpuCores  float64
+		memoryGiB float64
+		elapsed   time.Duration
+		wantSaved float64
 	}{
 		{
-			name:      "paused workload, no storage savings",
+			name:      "compute only: PVCs stay while paused",
 			cpuCores:  2,
 			memoryGiB: 8,
 			elapsed:   1 * time.Hour,
-			// (2 * 0.031 + 8 * 0.004 + 0 * storageHourly) * 1h
 			wantSaved: 2*0.031 + 8*0.004,
-		},
-		{
-			name:       "destroyed with PVCs cleaned",
-			cpuCores:   2,
-			memoryGiB:  8,
-			storageGiB: 20,
-			elapsed:    1 * time.Hour,
-			wantSaved:  2*0.031 + 8*0.004 + 20*(0.08/730),
 		},
 		{
 			name:      "capped at 2h",
@@ -150,7 +140,7 @@ func TestAccumulateSavings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := AccumulateSavings(tt.initial, tt.cpuCores, tt.memoryGiB, tt.storageGiB, tt.elapsed, rates)
+			got := AccumulateSavings(tt.initial, tt.cpuCores, tt.memoryGiB, tt.elapsed, rates)
 			assert.InDelta(t, tt.wantSaved, got.EstimatedSavedCost, 0.0001)
 		})
 	}

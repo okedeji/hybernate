@@ -128,26 +128,7 @@ spec:
                 enum:
                 - Running
                 - Paused
-                - Destroyed
                 type: string
-              destroy:
-                description: |-
-                  Destroy configures behavior after the workload is destroyed, including
-                  PVC retention and cleanup.
-                properties:
-                  pvcRetention:
-                    description: |-
-                      PVCRetention is how long to keep PVCs after the workload is destroyed.
-                      After this period, PVCs are deleted. Omit to delete PVCs immediately.
-                    format: duration
-                    type: string
-                  pvcRetentionWarning:
-                    description: |-
-                      PVCRetentionWarning triggers a warning event this duration before
-                      PVCs are deleted, giving users time to recover data if needed.
-                    format: duration
-                    type: string
-                type: object
               dryRun:
                 description: |-
                   DryRun makes the operator evaluate all policies and emit events but
@@ -155,19 +136,9 @@ spec:
                 type: boolean
               idlePolicy:
                 description: |-
-                  IdlePolicy configures automatic idle detection. Signals detect ground
-                  truth, the prediction engine confirms the pattern, and after a grace
-                  period the operator executes the configured action (pause or destroy).
+                  IdlePolicy configures automatic pausing: the operator pauses the
+                  workload once it has had no activity for IdlePolicy.IdleAfter.
                 properties:
-                  action:
-                    default: pause
-                    description: |-
-                      Action to take once the workload has been idle for IdleAfter. "pause"
-                      scales to zero; "destroy" deletes the workload.
-                    enum:
-                    - pause
-                    - destroy
-                    type: string
                   activity:
                     description: |-
                       Activity configures what counts as activity, beyond the deploys and
@@ -210,28 +181,7 @@ spec:
                     default: 1h
                     description: |-
                       IdleAfter is how long the workload must go without any activity
-                      before the operator acts.
-                    format: duration
-                    type: string
-                type: object
-              pause:
-                description: |-
-                  Pause configures behavior while the workload is paused, including
-                  automatic expiry and what action to take when the pause expires.
-                properties:
-                  expireAction:
-                    default: destroy
-                    description: |-
-                      ExpireAction determines what happens when ExpireAfter elapses.
-                      "destroy" deletes the workload; "resume" scales it back up.
-                    enum:
-                    - destroy
-                    - resume
-                    type: string
-                  expireAfter:
-                    description: |-
-                      ExpireAfter is the maximum duration a workload can remain paused.
-                      After this period, the operator executes the ExpireAction.
+                      before the operator pauses it.
                     format: duration
                     type: string
                 type: object
@@ -448,7 +398,7 @@ spec:
                   estimatedMonthlySavings:
                     description: |-
                       EstimatedMonthlySavings is the projected dollar amount saved by Hybernate
-                      actions (pause, destroy) this month. These savings are only
+                      pauses this month. These savings are only
                       realized when freed resources lead to node removal by a cluster autoscaler.
                     type: string
                   lastAccumulatedAt:
@@ -522,51 +472,6 @@ spec:
                 - estimatedCostWithoutManagement
                 - estimatedMonthlyCost
                 - estimatedMonthlySavings
-                type: object
-              destroy:
-                description: Destroy holds state after the workload is destroyed.
-                properties:
-                  destroyedAt:
-                    description: DestroyedAt is when the workload was destroyed.
-                    format: date-time
-                    type: string
-                  pvcRetentionExpiresAt:
-                    description: |-
-                      PVCRetentionExpiresAt is when remaining PVCs will be cleaned up.
-                      Only set when DestroySpec.PVCRetention is configured.
-                    format: date-time
-                    type: string
-                  resources:
-                    description: |-
-                      Resources captures the workload's resource profile at destroy time
-                      for cost savings calculation.
-                    properties:
-                      cpuMillis:
-                        description: CPUMillis is total CPU request in millicores
-                          per replica.
-                        format: int64
-                        type: integer
-                      memoryBytes:
-                        description: MemoryBytes is total memory request in bytes
-                          per replica.
-                        format: int64
-                        type: integer
-                      replicas:
-                        description: Replicas is the replica count at the time of
-                          the snapshot.
-                        format: int32
-                        type: integer
-                      storageBytes:
-                        description: StorageBytes is total PVC provisioned capacity
-                          in bytes.
-                        format: int64
-                        type: integer
-                    required:
-                    - cpuMillis
-                    - memoryBytes
-                    - replicas
-                    - storageBytes
-                    type: object
                 type: object
               doorman:
                 description: |-
@@ -663,7 +568,7 @@ spec:
               lastActedAt:
                 description: |-
                   LastActedAt is when the operator last mutated the target workload
-                  (pause, resume, destroy, or drift correction).
+                  (pause or resume).
                 format: date-time
                 type: string
               lastScaledUp:
@@ -754,8 +659,6 @@ spec:
                 - Pausing
                 - Paused
                 - Resuming
-                - Destroying
-                - Destroyed
                 type: string
               prediction:
                 description: Prediction reflects the current state of the forecasting

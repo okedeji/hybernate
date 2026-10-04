@@ -11,7 +11,7 @@ These metrics show whether the operator is healthy and what phase each workload 
 | `hybernate_workload_phase` | Gauge | `namespace`, `workload`, `phase` | 1 for each workload's current lifecycle phase |
 | `hybernate_reconcile_errors_total` | Counter | `controller` | Reconciliation errors by controller |
 | `hybernate_lifecycle_transitions_total` | Counter | `from`, `to` | Phase transitions |
-| `hybernate_lifecycle_action_duration_seconds` | Histogram | `action` | Duration of lifecycle actions (pause, resume, destroy) |
+| `hybernate_lifecycle_action_duration_seconds` | Histogram | `action` | Duration of lifecycle actions (pause, resume) |
 
 ## Tier 2: Operational Insight
 
@@ -23,8 +23,7 @@ These metrics help you understand what the operator is doing and why.
 | `hybernate_prediction_phase` | Gauge | `namespace`, `workload` | Engine phase (0-4) |
 | `hybernate_prediction_data_points` | Gauge | `namespace`, `workload` | Data points collected |
 | `hybernate_prediction_anomalies_total` | Counter | `namespace`, `workload` | Anomalies detected |
-| `hybernate_idle_detections_total` | Counter | `action`, `namespace`, `workload` | Idle detections by action |
-| `hybernate_pause_expiry_actions_total` | Counter | `action` | Pause expiry events |
+| `hybernate_idle_detections_total` | Counter | `namespace`, `workload` | Times each workload's idle clock ran out |
 | `hybernate_external_scale_ups_total` | Counter | `by` | Paused workloads scaled up outside Hybernate, by `argo-cd`, `flux`, or `other` |
 
 ## Tier 3: Debugging
@@ -35,7 +34,6 @@ These metrics help troubleshoot specific workload behavior.
 |--------|------|--------|-------------|
 | `hybernate_idle_seconds` | Gauge | `namespace`, `workload` | Seconds since the workload's last activity |
 | `hybernate_prediction_regime_changes_total` | Counter | `namespace`, `workload` | Regime changes detected |
-| `hybernate_pvc_retention_remaining_seconds` | Gauge | `namespace`, `workload` | Seconds until PVC cleanup |
 | `hybernate_automation_skipped_total` | Counter | `namespace`, `workload` | Automation skipped (manual override active) |
 | `hybernate_dryrun_actions_total` | Counter | `action` | Actions that would have been taken in dry-run |
 | `hybernate_target_unavailable_total` | Counter | `namespace`, `workload` | Target workload not found |

@@ -40,7 +40,7 @@ spec:
             summary: "Doorman wakes failing for {{ "{{" }} $labels.workload {{ "}}" }}"
             description: "Requests to paused workload {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.workload {{ "}}" }} are timing out or failing while it wakes. Check its events and the doorman logs."
         - alert: HybernateWorkloadStuck
-          expr: max by (namespace, workload, phase) (hybernate_workload_phase{phase=~"Pausing|Resuming|Destroying"}) == 1
+          expr: max by (namespace, workload, phase) (hybernate_workload_phase{phase=~"Pausing|Resuming"}) == 1
           for: 15m
           labels:
             severity: warning
@@ -55,11 +55,4 @@ spec:
           annotations:
             summary: "Target workload not found for {{ "{{" }} $labels.workload {{ "}}" }}"
             description: "ManagedWorkload {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.workload {{ "}}" }} cannot find its target. It may have been deleted or renamed."
-        - alert: HybernatePVCRetentionExpiring
-          expr: hybernate_pvc_retention_remaining_seconds > 0 < 86400
-          labels:
-            severity: warning
-          annotations:
-            summary: "PVC retention expiring for {{ "{{" }} $labels.workload {{ "}}" }}"
-            description: "PVCs for {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.workload {{ "}}" }} will be deleted in {{ "{{" }} $value | humanizeDuration {{ "}}" }}."
 {{- end }}

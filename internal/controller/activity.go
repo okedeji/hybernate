@@ -119,13 +119,6 @@ func cpuThresholdFor(workload *v1alpha1.ManagedWorkload) int {
 	return defaultCPUThreshold
 }
 
-func resolveIdleAction(workload *v1alpha1.ManagedWorkload) v1alpha1.IdleAction {
-	if p := workload.Spec.IdlePolicy; p != nil && p.Action == v1alpha1.IdleActionDestroy {
-		return v1alpha1.IdleActionDestroy
-	}
-	return v1alpha1.IdleActionPause
-}
-
 // recordActivity moves the clock forward when t is newer than the last
 // recorded activity. Older activity never moves it back.
 func recordActivity(status *v1alpha1.ActivityStatus, t time.Time, source v1alpha1.ActivitySource) {
@@ -338,10 +331,9 @@ func podTemplateHash(target client.Object) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// reconcileIdleClock pauses or destroys a workload once it has been inactive
-// for IdleAfter. Phase Idle means the clock has run out: in dry-run the
-// workload stays Idle and reports what it would do; otherwise the idle action
-// runs immediately.
+// reconcileIdleClock pauses a workload once it has been inactive for
+// IdleAfter. Phase Idle means the clock has run out: in dry-run the workload
+// stays Idle and reports the pause it would make; otherwise it pauses.
 func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object, engine forecaster) (*ctrl.Result, error) {
 	now := r.now()
 	obs := r.observeActivity(ctx, workload, target)
@@ -379,16 +371,15 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		return held, err
 	}
 
-	action := resolveIdleAction(workload)
 	idleFor := now.Sub(workload.Status.Activity.LastActivityTime.Time).Round(time.Minute)
 
 	if workload.Status.Phase != v1alpha1.PhaseIdle {
-		opmetrics.IdleDetections.WithLabelValues(string(action), workload.Namespace, workload.Name).Inc()
+		opmetrics.IdleDetections.WithLabelValues(workload.Namespace, workload.Name).Inc()
 		if workload.Spec.DryRun {
-			opmetrics.DryrunActions.WithLabelValues("idle_" + string(action)).Inc()
+			opmetrics.DryrunActions.WithLabelValues("idle_pause").Inc()
 		}
 		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleDetected, actionEvaluateIdle,
-			"no activity for %s, last seen from %s; %s", idleFor, workload.Status.Activity.LastActivitySource, action)
+			"no activity for %s, last seen from %s; pause", idleFor, workload.Status.Activity.LastActivitySource)
 		if workload.Spec.DryRun {
 			r.beginWouldBePause(ctx, workload)
 		}
@@ -399,9 +390,6 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 
 	if workload.Spec.DryRun {
 		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
-	}
-	if action == v1alpha1.IdleActionDestroy {
-		return r.handleDestroy(ctx, workload)
 	}
 	return r.handlePause(ctx, workload)
 }

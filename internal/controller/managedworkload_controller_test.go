@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -65,25 +64,6 @@ func (s *stubPauser) Resume(_ context.Context, _ *v1alpha1.ManagedWorkload) (boo
 	return s.resumeDone, s.resumeErr
 }
 
-type stubDestroyer struct {
-	destroyDone  bool
-	destroyErr   error
-	cleanupDone  bool
-	cleanupErr   error
-	destroyCalls int
-	cleanupCalls int
-}
-
-func (s *stubDestroyer) Destroy(_ context.Context, _ *v1alpha1.ManagedWorkload) (bool, error) {
-	s.destroyCalls++
-	return s.destroyDone, s.destroyErr
-}
-
-func (s *stubDestroyer) CleanupPVCs(_ context.Context, _ *v1alpha1.ManagedWorkload) (bool, error) {
-	s.cleanupCalls++
-	return s.cleanupDone, s.cleanupErr
-}
-
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -107,7 +87,7 @@ func targetDeploymentWithReplicas(name, namespace string, replicas int32) *appsv
 	}
 }
 
-func newTestReconcilerWithReplicas(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, destroyer *stubDestroyer, replicas int32) *Reconciler {
+func newTestReconcilerWithReplicas(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, replicas int32) *Reconciler {
 	t.Helper()
 	scheme := testScheme(t)
 
@@ -118,22 +98,21 @@ func newTestReconcilerWithReplicas(t *testing.T, workload *v1alpha1.ManagedWorkl
 	}
 
 	return &Reconciler{
-		Client:    builder.Build(),
-		Scheme:    scheme,
-		Recorder:  events.NewFakeRecorder(10),
-		pauser:    pauser,
-		destroyer: destroyer,
-		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
-		clock:     func() time.Time { return fixedTime },
+		Client:   builder.Build(),
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		pauser:   pauser,
+		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:    func() time.Time { return fixedTime },
 	}
 }
 
-func newTestReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, destroyer *stubDestroyer) *Reconciler {
+func newTestReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser) *Reconciler {
 	t.Helper()
-	return newTestReconcilerWithTarget(t, workload, pauser, destroyer, true)
+	return newTestReconcilerWithTarget(t, workload, pauser, true)
 }
 
-func newTestReconcilerWithTarget(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, destroyer *stubDestroyer, createTarget bool) *Reconciler {
+func newTestReconcilerWithTarget(t *testing.T, workload *v1alpha1.ManagedWorkload, pauser *stubPauser, createTarget bool) *Reconciler {
 	t.Helper()
 	scheme := testScheme(t)
 
@@ -152,13 +131,12 @@ func newTestReconcilerWithTarget(t *testing.T, workload *v1alpha1.ManagedWorkloa
 	}
 
 	return &Reconciler{
-		Client:    builder.Build(),
-		Scheme:    scheme,
-		Recorder:  events.NewFakeRecorder(10),
-		pauser:    pauser,
-		destroyer: destroyer,
-		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
-		clock:     func() time.Time { return fixedTime },
+		Client:   builder.Build(),
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		pauser:   pauser,
+		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:    func() time.Time { return fixedTime },
 	}
 }
 
@@ -189,7 +167,7 @@ func TestReconcile_SetsInitialPhaseToRunning(t *testing.T) {
 		},
 	}
 
-	r := newTestReconciler(t, workload, &stubPauser{}, &stubDestroyer{})
+	r := newTestReconciler(t, workload, &stubPauser{})
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
 
@@ -199,7 +177,7 @@ func TestReconcile_SetsInitialPhaseToRunning(t *testing.T) {
 }
 
 func TestReconcile_NotFoundIsNoOp(t *testing.T) {
-	r := newTestReconciler(t, nil, &stubPauser{}, &stubDestroyer{})
+	r := newTestReconciler(t, nil, &stubPauser{})
 	result, err := r.Reconcile(context.Background(), reconcileFor("missing"))
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -218,7 +196,7 @@ func TestReconcile_PauseTransitions(t *testing.T) {
 	}
 
 	pauser := &stubPauser{pauseDone: true}
-	r := newTestReconciler(t, workload, pauser, &stubDestroyer{})
+	r := newTestReconciler(t, workload, pauser)
 
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
@@ -239,7 +217,7 @@ func TestReconcile_PauseNotDoneRequeues(t *testing.T) {
 	}
 
 	pauser := &stubPauser{pauseDone: false}
-	r := newTestReconciler(t, workload, pauser, &stubDestroyer{})
+	r := newTestReconciler(t, workload, pauser)
 
 	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
@@ -257,7 +235,7 @@ func TestReconcile_AlreadyPausedIsNoOp(t *testing.T) {
 	}
 
 	pauser := &stubPauser{}
-	r := newTestReconciler(t, workload, pauser, &stubDestroyer{})
+	r := newTestReconciler(t, workload, pauser)
 
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
@@ -277,7 +255,7 @@ func TestReconcile_ResumeTransitions(t *testing.T) {
 	}
 
 	pauser := &stubPauser{resumeDone: true}
-	r := newTestReconciler(t, workload, pauser, &stubDestroyer{})
+	r := newTestReconciler(t, workload, pauser)
 
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
@@ -298,228 +276,11 @@ func TestReconcile_ResumeNotReadyRequeues(t *testing.T) {
 	}
 
 	pauser := &stubPauser{resumeDone: false}
-	r := newTestReconciler(t, workload, pauser, &stubDestroyer{})
+	r := newTestReconciler(t, workload, pauser)
 
 	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
 	assert.Equal(t, 5*time.Second, result.RequeueAfter)
-}
-
-// --- Destroy ---
-
-func TestReconcile_DestroyTransitions(t *testing.T) {
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			DesiredState: desiredState(v1alpha1.DesiredStateDestroyed),
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
-	}
-
-	destroyer := &stubDestroyer{destroyDone: true}
-	r := newTestReconciler(t, workload, &stubPauser{}, destroyer)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-
-	w := getWorkload(t, r, "api")
-	assert.Equal(t, v1alpha1.PhaseDestroyed, w.Status.Phase)
-	assert.Equal(t, 1, destroyer.destroyCalls)
-}
-
-func TestReconcile_AlreadyDestroyedIsNoOp(t *testing.T) {
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			DesiredState: desiredState(v1alpha1.DesiredStateDestroyed),
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseDestroyed},
-	}
-
-	destroyer := &stubDestroyer{}
-	r := newTestReconciler(t, workload, &stubPauser{}, destroyer)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-	assert.Equal(t, 0, destroyer.destroyCalls)
-}
-
-// --- Pause Expiry ---
-
-func TestReconcile_PauseExpiryDestroysWorkload(t *testing.T) {
-	pausedAt := metav1.NewTime(fixedTime.Add(-2 * time.Hour))
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			Pause: &v1alpha1.PauseSpec{
-				ExpireAfter:  &metav1.Duration{Duration: 1 * time.Hour},
-				ExpireAction: v1alpha1.ExpireActionDestroy,
-			},
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{
-			Phase: v1alpha1.PhasePaused,
-			Pause: &v1alpha1.PauseStatus{
-				PreviousReplicas: 3,
-				PausedAt:         &pausedAt,
-			},
-		},
-	}
-
-	destroyer := &stubDestroyer{destroyDone: true}
-	r := newTestReconciler(t, workload, &stubPauser{}, destroyer)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-
-	w := getWorkload(t, r, "api")
-	assert.Equal(t, v1alpha1.PhaseDestroyed, w.Status.Phase)
-	assert.Equal(t, 1, destroyer.destroyCalls)
-}
-
-func TestReconcile_PauseExpiryResumesWorkload(t *testing.T) {
-	pausedAt := metav1.NewTime(fixedTime.Add(-2 * time.Hour))
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			Pause: &v1alpha1.PauseSpec{
-				ExpireAfter:  &metav1.Duration{Duration: 1 * time.Hour},
-				ExpireAction: v1alpha1.ExpireActionResume,
-			},
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{
-			Phase: v1alpha1.PhasePaused,
-			Pause: &v1alpha1.PauseStatus{
-				PreviousReplicas: 3,
-				PausedAt:         &pausedAt,
-			},
-		},
-	}
-
-	pauser := &stubPauser{resumeDone: true}
-	r := newTestReconciler(t, workload, pauser, &stubDestroyer{})
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-
-	w := getWorkload(t, r, "api")
-	assert.Equal(t, v1alpha1.PhaseRunning, w.Status.Phase)
-	assert.Equal(t, 1, pauser.resumeCalls)
-}
-
-func TestReconcile_PauseNotExpiredRequeuesWithRemaining(t *testing.T) {
-	pausedAt := metav1.NewTime(fixedTime.Add(-30 * time.Minute))
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			Pause: &v1alpha1.PauseSpec{
-				ExpireAfter: &metav1.Duration{Duration: 1 * time.Hour},
-			},
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{
-			Phase: v1alpha1.PhasePaused,
-			Pause: &v1alpha1.PauseStatus{
-				PreviousReplicas: 3,
-				PausedAt:         &pausedAt,
-			},
-		},
-	}
-
-	r := newTestReconciler(t, workload, &stubPauser{}, &stubDestroyer{})
-
-	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-	assert.Equal(t, 30*time.Minute, result.RequeueAfter)
-}
-
-// --- PVC Retention ---
-
-func TestReconcile_PVCRetentionCleansUpAfterExpiry(t *testing.T) {
-	destroyedAt := metav1.NewTime(fixedTime.Add(-8 * time.Hour))
-	expiresAt := metav1.NewTime(fixedTime.Add(-1 * time.Hour))
-	retention := metav1.Duration{Duration: 7 * time.Hour}
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:  v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			Destroy: &v1alpha1.DestroySpec{PVCRetention: &retention},
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{
-			Phase: v1alpha1.PhaseDestroyed,
-			Destroy: &v1alpha1.DestroyStatus{
-				DestroyedAt:           &destroyedAt,
-				PVCRetentionExpiresAt: &expiresAt,
-			},
-		},
-	}
-
-	destroyer := &stubDestroyer{cleanupDone: true}
-	r := newTestReconciler(t, workload, &stubPauser{}, destroyer)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-	assert.Equal(t, 1, destroyer.cleanupCalls)
-}
-
-func TestReconcile_PVCRetentionWaitsBeforeExpiry(t *testing.T) {
-	destroyedAt := metav1.NewTime(fixedTime.Add(-1 * time.Hour))
-	expiresAt := metav1.NewTime(fixedTime.Add(6 * time.Hour))
-	retention := metav1.Duration{Duration: 7 * time.Hour}
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:  v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			Destroy: &v1alpha1.DestroySpec{PVCRetention: &retention},
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{
-			Phase: v1alpha1.PhaseDestroyed,
-			Destroy: &v1alpha1.DestroyStatus{
-				DestroyedAt:           &destroyedAt,
-				PVCRetentionExpiresAt: &expiresAt,
-			},
-		},
-	}
-
-	destroyer := &stubDestroyer{}
-	r := newTestReconciler(t, workload, &stubPauser{}, destroyer)
-
-	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-	assert.Equal(t, 6*time.Hour, result.RequeueAfter)
-	assert.Equal(t, 0, destroyer.cleanupCalls)
-}
-
-func TestReconcile_PVCRetentionCancelledWhenSpecRemoved(t *testing.T) {
-	destroyedAt := metav1.NewTime(fixedTime.Add(-2 * time.Hour))
-	expiresAt := metav1.NewTime(fixedTime.Add(5 * time.Hour))
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			// No Destroy spec — user removed pvcRetention after destroy
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{
-			Phase: v1alpha1.PhaseDestroyed,
-			Destroy: &v1alpha1.DestroyStatus{
-				DestroyedAt:           &destroyedAt,
-				PVCRetentionExpiresAt: &expiresAt,
-			},
-		},
-	}
-
-	destroyer := &stubDestroyer{}
-	r := newTestReconciler(t, workload, &stubPauser{}, destroyer)
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.NoError(t, err)
-	assert.Equal(t, 0, destroyer.cleanupCalls, "should not clean up PVCs when retention removed from spec")
-
-	w := getWorkload(t, r, "api")
-	assert.Nil(t, w.Status.Destroy.PVCRetentionExpiresAt, "should clear expiry from status")
 }
 
 // --- Finalizer + Deletion ---
@@ -532,7 +293,7 @@ func TestReconcile_FinalizerAddedOnFirstReconcile(t *testing.T) {
 		},
 	}
 
-	r := newTestReconciler(t, workload, &stubPauser{}, &stubDestroyer{})
+	r := newTestReconciler(t, workload, &stubPauser{})
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
 
@@ -540,7 +301,7 @@ func TestReconcile_FinalizerAddedOnFirstReconcile(t *testing.T) {
 	assert.Contains(t, w.Finalizers, finalizerName)
 }
 
-func TestReconcile_DeletionRemovesFinalizerWhenNoPVCRetention(t *testing.T) {
+func TestReconcile_DeletionRemovesFinalizer(t *testing.T) {
 	now := metav1.Now()
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{
@@ -555,7 +316,7 @@ func TestReconcile_DeletionRemovesFinalizerWhenNoPVCRetention(t *testing.T) {
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
 	}
 
-	r := newTestReconciler(t, workload, &stubPauser{}, &stubDestroyer{})
+	r := newTestReconciler(t, workload, &stubPauser{})
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
 
@@ -596,7 +357,7 @@ func TestReconcileDelete_RestoresAPausedWorkload(t *testing.T) {
 			}
 			c := builder.Build()
 			r := &Reconciler{Client: c, Scheme: testScheme(t), Recorder: events.NewFakeRecorder(10),
-				pauser: lifecycle.NewPauser(c), destroyer: &stubDestroyer{},
+				pauser:  lifecycle.NewPauser(c),
 				engines: newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
 				clock:   func() time.Time { return fixedTime }}
 
@@ -626,7 +387,7 @@ func TestReconcile_TargetNotFoundSetsConditionAndRequeues(t *testing.T) {
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning},
 	}
 
-	r := newTestReconcilerWithTarget(t, workload, &stubPauser{}, &stubDestroyer{}, false)
+	r := newTestReconcilerWithTarget(t, workload, &stubPauser{}, false)
 
 	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
@@ -671,7 +432,7 @@ func targetReplicas(t *testing.T, r *Reconciler) int32 {
 func TestReconcile_RunningReplicaChangesAreLeftAlone(t *testing.T) {
 	workload := pausedWorkload(v1alpha1.PhaseRunning)
 	workload.Status.Pause = nil
-	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, &stubDestroyer{}, 7)
+	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, 7)
 
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
@@ -681,7 +442,7 @@ func TestReconcile_RunningReplicaChangesAreLeftAlone(t *testing.T) {
 }
 
 func TestReconcile_PausedAtZeroStaysPaused(t *testing.T) {
-	r := newTestReconcilerWithReplicas(t, pausedWorkload(v1alpha1.PhasePaused), &stubPauser{}, &stubDestroyer{}, 0)
+	r := newTestReconcilerWithReplicas(t, pausedWorkload(v1alpha1.PhasePaused), &stubPauser{}, 0)
 
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
@@ -703,8 +464,7 @@ func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
 	}
 
 	pauser := &stubPauser{}
-	destroyer := &stubDestroyer{}
-	r := newTestReconciler(t, workload, pauser, destroyer)
+	r := newTestReconciler(t, workload, pauser)
 
 	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
@@ -712,7 +472,6 @@ func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
 	assert.Equal(t, 1*time.Hour, result.RequeueAfter)
 	assert.Equal(t, 0, pauser.pauseCalls)
 	assert.Equal(t, 0, pauser.resumeCalls)
-	assert.Equal(t, 0, destroyer.destroyCalls)
 }
 
 // --- Duplicate target detection ---
@@ -758,13 +517,12 @@ func TestReconcile_DuplicateTargetBlocksNewer(t *testing.T) {
 		Build()
 
 	r := &Reconciler{
-		Client:    k,
-		Scheme:    scheme,
-		Recorder:  recorder,
-		pauser:    &stubPauser{},
-		destroyer: &stubDestroyer{},
-		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
-		clock:     func() time.Time { return fixedTime },
+		Client:   k,
+		Scheme:   scheme,
+		Recorder: recorder,
+		pauser:   &stubPauser{},
+		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:    func() time.Time { return fixedTime },
 	}
 
 	// Reconcile the newer one — should be blocked.
@@ -831,13 +589,12 @@ func TestReconcile_DuplicateTargetAllowsOlder(t *testing.T) {
 		Build()
 
 	r := &Reconciler{
-		Client:    k,
-		Scheme:    scheme,
-		Recorder:  events.NewFakeRecorder(10),
-		pauser:    &stubPauser{},
-		destroyer: &stubDestroyer{},
-		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
-		clock:     func() time.Time { return fixedTime },
+		Client:   k,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		pauser:   &stubPauser{},
+		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:    func() time.Time { return fixedTime },
 	}
 
 	// Reconcile the older one — should proceed normally.
@@ -886,13 +643,12 @@ func TestReconcile_DuplicateTargetClearsWhenResolved(t *testing.T) {
 		Build()
 
 	r := &Reconciler{
-		Client:    k,
-		Scheme:    scheme,
-		Recorder:  events.NewFakeRecorder(10),
-		pauser:    &stubPauser{},
-		destroyer: &stubDestroyer{},
-		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
-		clock:     func() time.Time { return fixedTime },
+		Client:   k,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		pauser:   &stubPauser{},
+		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:    func() time.Time { return fixedTime },
 	}
 
 	// No duplicate exists anymore — condition should clear.
@@ -933,13 +689,12 @@ func newSharedTargetReconciler(t *testing.T, objs ...client.Object) (*Reconciler
 		WithObjects(append(objs, targetDeployment("idle-app", "default"))...).
 		Build()
 	return &Reconciler{
-		Client:    k,
-		Scheme:    scheme,
-		Recorder:  recorder,
-		pauser:    &stubPauser{},
-		destroyer: &stubDestroyer{},
-		engines:   newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
-		clock:     func() time.Time { return fixedTime },
+		Client:   k,
+		Scheme:   scheme,
+		Recorder: recorder,
+		pauser:   &stubPauser{},
+		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		clock:    func() time.Time { return fixedTime },
 	}, recorder
 }
 
@@ -1041,7 +796,6 @@ func TestReconcile_ResumesInterruptedTransition(t *testing.T) {
 	}{
 		{name: "pause", phase: v1alpha1.PhasePausing, wantPhase: v1alpha1.PhasePaused},
 		{name: "resume", phase: v1alpha1.PhaseResuming, wantPhase: v1alpha1.PhaseRunning},
-		{name: "destroy", phase: v1alpha1.PhaseDestroying, wantPhase: v1alpha1.PhaseDestroyed},
 	}
 
 	for _, tt := range tests {
@@ -1050,8 +804,7 @@ func TestReconcile_ResumesInterruptedTransition(t *testing.T) {
 			// else would pick the transition back up.
 			workload := lifecycleWorkload("stuck-app", nil, tt.phase)
 			pauser := &stubPauser{pauseDone: true, resumeDone: true}
-			destroyer := &stubDestroyer{destroyDone: true}
-			r := newTestReconciler(t, workload, pauser, destroyer)
+			r := newTestReconciler(t, workload, pauser)
 
 			_, err := r.Reconcile(context.Background(), reconcileFor("stuck-app"))
 			require.NoError(t, err)
@@ -1059,33 +812,6 @@ func TestReconcile_ResumesInterruptedTransition(t *testing.T) {
 			assert.Equal(t, tt.wantPhase, getWorkload(t, r, "stuck-app").Status.Phase)
 		})
 	}
-}
-
-func TestReconcile_DestroyRetriesAfterFailureAndKeepsSnapshot(t *testing.T) {
-	workload := lifecycleWorkload("doomed-app", desiredState(v1alpha1.DesiredStateDestroyed), v1alpha1.PhaseRunning)
-	destroyer := &stubDestroyer{destroyErr: errors.New("api server unavailable")}
-	r := newTestReconciler(t, workload, &stubPauser{}, destroyer)
-	r.metrics = &stubMetrics{cpuPerReplica: 500, memoryBytes: 256 << 20}
-
-	_, err := r.Reconcile(context.Background(), reconcileFor("doomed-app"))
-	require.Error(t, err)
-
-	failed := getWorkload(t, r, "doomed-app")
-	require.Equal(t, v1alpha1.PhaseDestroying, failed.Status.Phase)
-	require.NotNil(t, failed.Status.Destroy)
-	require.NotNil(t, failed.Status.Destroy.Resources, "snapshot must be persisted before the delete is attempted")
-	snapshot := *failed.Status.Destroy.Resources
-
-	destroyer.destroyErr = nil
-	destroyer.destroyDone = true
-	_, err = r.Reconcile(context.Background(), reconcileFor("doomed-app"))
-	require.NoError(t, err)
-
-	destroyed := getWorkload(t, r, "doomed-app")
-	assert.Equal(t, v1alpha1.PhaseDestroyed, destroyed.Status.Phase)
-	assert.Equal(t, 2, destroyer.destroyCalls)
-	require.NotNil(t, destroyed.Status.Destroy.Resources)
-	assert.Equal(t, snapshot, *destroyed.Status.Destroy.Resources)
 }
 
 func TestSetCondition_UpdatesReasonWithoutStatusChange(t *testing.T) {
@@ -1136,7 +862,7 @@ func TestFindWorkloadsForTarget_MatchesKindAndName(t *testing.T) {
 
 func TestReconcile_WorkloadPhaseGaugeFollowsTransitions(t *testing.T) {
 	workload := lifecycleWorkload("phase-gauge-app", desiredState(v1alpha1.DesiredStatePaused), v1alpha1.PhaseRunning)
-	r := newTestReconciler(t, workload, &stubPauser{pauseDone: true}, &stubDestroyer{})
+	r := newTestReconciler(t, workload, &stubPauser{pauseDone: true})
 
 	_, err := r.Reconcile(context.Background(), reconcileFor("phase-gauge-app"))
 	require.NoError(t, err)
@@ -1154,7 +880,7 @@ func TestReconcileDelete_DropsWorkloadPhaseSeries(t *testing.T) {
 	workload.Finalizers = []string{finalizerName}
 	deleting := metav1.NewTime(fixedTime)
 	workload.DeletionTimestamp = &deleting
-	r := newTestReconciler(t, workload, &stubPauser{}, &stubDestroyer{})
+	r := newTestReconciler(t, workload, &stubPauser{})
 	metrics.WorkloadPhase.WithLabelValues("default", "deleted-gauge-app", "Running").Set(1)
 
 	_, err := r.Reconcile(context.Background(), reconcileFor("deleted-gauge-app"))

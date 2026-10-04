@@ -1,47 +1,39 @@
 # Lifecycle
 
-Every ManagedWorkload moves through a defined set of phases. The operator drives transitions based on workload activity, predictions, manual overrides, and timers.
+Every ManagedWorkload moves through a defined set of phases. The operator drives transitions based on workload activity, forecasts, and manual overrides. Its one action is to pause: it never deletes a workload or its storage.
 
 ## Phases
 
 ```
 Creating ──► Running ──► Idle ──► Pausing ──► Paused
-                │          │                    │
-                │          │         ┌──────────┤
-                │          │         ▼          ▼
-                │          │      Resuming   Destroying ──► Destroyed
-                │          │         │
-                │          │         ▼
-                │          └──── Running
+                ▲                               │
+                │                               ▼
+                └────────────────────────── Resuming
 ```
 
 | Phase | Description |
 |-------|-------------|
 | **Creating** | Initial phase on CR creation. Transitions to Running after first reconcile. |
-| **Running** | Workload is active. Idle detection is evaluated on each reconcile. |
-| **Idle** | No activity for `idleAfter`. The operator executes the configured idle action, or in dry-run reports what it would do. |
-| **Pausing** | Workload is being scaled to zero. In-progress until replicas reach 0. |
-| **Paused** | Workload is at zero replicas. Expiry timers and PVC retention are tracked here. |
-| **Resuming** | Previous replica count is being restored. Transitions to Running when pods are ready. |
-| **Destroying** | Target workload is being deleted. PVC retention countdown starts here. |
-| **Destroyed** | Target workload has been deleted. PVC cleanup happens when retention expires. |
+| **Running** | Workload is active. Its activity clock is evaluated on each reconcile. |
+| **Idle** | No activity for `idleAfter`. The operator pauses it, or in dry-run reports the pause it would make. |
+| **Pausing** | Workload is being scaled to zero. |
+| **Paused** | Workload is at zero replicas. |
+| **Resuming** | Previous replica count is being restored. Transitions to Running when the pods are Ready. |
 
 ## Transition Triggers
 
 ### Automatic (no `desiredState` set)
 
 - **Running → Idle**: No activity for `idleAfter`, and no confident forecast of demand
-- **Idle → Pausing**: Idle action is `pause`
-- **Idle → Running**: Activity resumes (dry-run only; otherwise the idle action has already run)
-- **Idle → Destroying**: Idle action is `destroy`
-- **Paused → Resuming**: An activity annotation newer than the pause, pause expiry with `expireAction: resume`, or `autoResume` ahead of forecast demand
-- **Paused → Destroying**: Pause expiry elapses with `expireAction: Destroy`
+- **Idle → Pausing**: Right away, unless the workload is in dry-run, is held awake by its dependents, or a GitOps tool undid its last pause within the hour
+- **Idle → Running**: Activity resumes (dry-run only; otherwise the pause has already started)
+- **Paused → Resuming**: A request to its Service, an activity annotation newer than the pause, or `autoResume` ahead of forecast demand
+- **Paused → Running**: Something other than Hybernate scales it up; see [Argo CD and Flux](../guides/gitops.md)
 
 ### Manual (`desiredState` set)
 
 - **Any → Pausing → Paused**: `desiredState: Paused`
 - **Any → Resuming → Running**: `desiredState: Running`
-- **Any → Destroying → Destroyed**: `desiredState: Destroyed`
 
 Manual overrides take priority over automation. Remove `desiredState` to return to automatic management.
 
@@ -51,29 +43,31 @@ Every lifecycle operation is idempotent. The operator checkpoints state in the C
 
 - Re-pausing an already-paused workload is a no-op
 - Resuming reads the saved replica count, not a hardcoded value
-- Destroy records PVC retention expiry once, not on every reconcile
 
 This means the operator can crash and restart at any point without leaving workloads in an inconsistent state.
 
 ## Status Conditions
 
-The operator sets standard Kubernetes conditions on the CR:
+The operator sets standard Kubernetes conditions on the CR, each with `Reason`, `Message`, and `LastTransitionTime`:
 
 | Type | Meaning |
 |------|---------|
-| `Ready` | The operator is successfully managing this workload |
-| `Idle` | The workload has been confirmed idle |
-| `Paused` | The workload is currently paused |
-| `Degraded` | Something is wrong (target not found, API errors) |
-
-Each condition includes `Reason`, `Message`, and `LastTransitionTime` for debugging.
+| `TargetAvailable` | The Deployment or StatefulSet exists |
+| `MetricsAvailable` | CPU can be measured, so the activity clock can run |
+| `PrometheusAvailable` | The Prometheus activity queries answer, when configured |
+| `WakeOnRequest` | Requests to the paused workload's Services wake it |
+| `HeldByDependents` | It's kept awake for the workloads that depend on it |
+| `WaitingForDependencies` | Its resume waits for a dependency to be Ready |
+| `DependencyCycle`, `DependencyNotFound` | A problem with `dependsOn` |
+| `DuplicateTarget` | Another ManagedWorkload manages the same target |
+| `GitOpsConflict` | A GitOps tool undid its last pause; see [Argo CD and Flux](../guides/gitops.md) |
 
 ## Events
 
 User-visible state changes emit Kubernetes events that show up in `kubectl describe`:
 
-- Lifecycle transitions (paused, resumed, destroyed)
-- Drift detection (a paused workload scaled up externally)
-- PVC retention warnings
+- Lifecycle transitions (idle, paused, resumed)
+- Wakes, and what woke it
+- A scale-up outside Hybernate, and a GitOps tool undoing a pause
 - Forecast phase changes
 - Anomaly detection

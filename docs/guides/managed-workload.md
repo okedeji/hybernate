@@ -34,7 +34,6 @@ spec:
     name: my-api
 
   idlePolicy:
-    action: pause
     idleAfter: 1h
     activity:
       cpuThreshold: 10
@@ -46,14 +45,6 @@ spec:
     onRequest: true
     maxWait: 2m
     page: true
-
-  pause:
-    expireAfter: "24h"
-    expireAction: Resume
-
-  destroy:
-    pvcRetention: "168h"
-    pvcRetentionWarning: "24h"
 
   prediction:
     confidence: 85
@@ -83,8 +74,7 @@ Optional manual override. When set, automation stops and the operator drives the
 | Value | Effect |
 |-------|--------|
 | `Running` | Resume the workload (restore previous replicas) |
-| `Paused` | Pause the workload (scale to zero) |
-| `Destroyed` | Delete the workload |
+| `Paused` | Pause the workload (scale to zero), and keep it paused |
 
 Remove the field to return to automatic management.
 
@@ -94,8 +84,7 @@ See [Idle Detection](../concepts/idle-detection.md) for how the activity clock w
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `action` | `pause`, `destroy` | `pause` | What to do once the workload has been idle for `idleAfter` |
-| `idleAfter` | duration | `1h` | How long without any activity before acting |
+| `idleAfter` | duration | `1h` | How long without any activity before pausing |
 | `activity.cpuThreshold` | int (percent) | `10` | CPU utilization, as % of requests, above which the workload counts as active (0-100) |
 | `activity.prometheus[].promQL` | string | _(none)_ | PromQL query; a result above zero counts as activity. See the [Prometheus Activity Guide](prometheus-signals.md) |
 | `autoResume` | bool | `false` | Wake ahead of the demand a confident forecast predicts |
@@ -124,22 +113,6 @@ While the workload is paused, a request to any of its Services wakes it and is a
 | `page` | bool | `true` | Answer a browser loading a page with a waking-up page that reloads until the workload is Running. Other requests are held either way |
 
 A workload paused with `desiredState: Paused` doesn't wake on request.
-
-### `pause`
-
-See [Pause & Destroy](pause-destroy.md) for detailed behavior.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `expireAfter` | duration | _(none)_ | Max time paused before expiry action |
-| `expireAction` | `resume` or `destroy` | `destroy` | What happens when expiry elapses |
-
-### `destroy`
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `pvcRetention` | duration | _(none)_ | How long to keep PVCs after destroy |
-| `pvcRetentionWarning` | duration | _(none)_ | Emit warning event this long before PVC cleanup |
 
 ### `prediction`
 
