@@ -45,7 +45,7 @@ func main() {
 		Short: "Hybernate kubectl plugin for workload lifecycle management",
 	}
 
-	root.AddCommand(enableCmd(), scanCmd(), wakeCmd())
+	root.AddCommand(depsCmd(), enableCmd(), scanCmd(), wakeCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
