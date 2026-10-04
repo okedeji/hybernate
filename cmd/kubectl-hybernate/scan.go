@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +32,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 
 	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/discovery"
@@ -133,8 +131,8 @@ Examples:
   kubectl hybernate scan --open=false`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if opts.output != "table" && opts.output != "json" && opts.output != "yaml" {
-				return fmt.Errorf("unknown output %q: use table, json, or yaml", opts.output)
+			if err := checkOutput(opts.output); err != nil {
+				return err
 			}
 			window, err := parseWindow(opts.window)
 			if err != nil {
@@ -171,7 +169,7 @@ Examples:
 	cmd.Flags().StringSliceVarP(&opts.namespaces, "namespace", "n", nil,
 		"Namespace to scan; repeat for several (defaults to all you can read)")
 	cmd.Flags().StringSliceVar(&opts.exclude, "exclude-namespaces", discovery.SystemNamespaces, "Namespaces to skip")
-	cmd.Flags().StringVarP(&opts.output, "output", "o", "table", "Output format: table, json, or yaml")
+	addOutputFlag(cmd, &opts.output)
 	cmd.Flags().IntVar(&opts.limit, "limit", 25,
 		"Workloads to list in the table, most savings first (0 for all)")
 	cmd.Flags().IntVar(&opts.cpuThreshold, "cpu-threshold", defaultCPUThreshold,
@@ -358,21 +356,7 @@ func bindingSubject(username string) string {
 }
 
 func writeScan(w io.Writer, result scanResult, opts scanOptions) error {
-	switch opts.output {
-	case "json":
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(result)
-	case "yaml":
-		out, err := yaml.Marshal(result)
-		if err != nil {
-			return fmt.Errorf("encoding yaml: %w", err)
-		}
-		_, err = w.Write(out)
-		return err
-	default:
-		return writeTable(w, result, opts.limit)
-	}
+	return writeOutput(w, opts.output, result, func() error { return writeTable(w, result, opts.limit) })
 }
 
 func writeTable(w io.Writer, result scanResult, limit int) error {

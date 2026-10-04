@@ -165,7 +165,7 @@ var (
 // for scripts, or a session with nowhere to show a browser, gets no report
 // unless one is asked for.
 func writeReport(stdout, stderr io.Writer, result scanResult, opts scanOptions) error {
-	open := opts.open && opts.output == "table" && interactive(stdout)
+	open := opts.open && opts.output == outputTable && interactive(stdout)
 	path := opts.html
 	if path == "" {
 		if !open {

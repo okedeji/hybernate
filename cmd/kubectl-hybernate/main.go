@@ -17,7 +17,9 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -27,6 +29,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
@@ -91,4 +94,40 @@ func kubeConfigFor(contextName string) (config *rest.Config, namespace, name str
 		return nil, "", name, fmt.Errorf("reading kubeconfig namespace: %w", err)
 	}
 	return config, namespace, name, nil
+}
+
+// The -o formats every command that reports takes.
+const (
+	outputTable = "table"
+	outputJSON  = "json"
+	outputYAML  = "yaml"
+)
+
+func addOutputFlag(cmd *cobra.Command, output *string) {
+	cmd.Flags().StringVarP(output, "output", "o", outputTable, "Output format: table, json, or yaml")
+}
+
+func checkOutput(output string) error {
+	if output != outputTable && output != outputJSON && output != outputYAML {
+		return fmt.Errorf("unknown output %q: use table, json, or yaml", output)
+	}
+	return nil
+}
+
+// writeOutput writes v as JSON or YAML, or calls table for the table.
+func writeOutput(w io.Writer, output string, v any, table func() error) error {
+	switch output {
+	case outputJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(v)
+	case outputYAML:
+		out, err := yaml.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("encoding yaml: %w", err)
+		}
+		_, err = w.Write(out)
+		return err
+	}
+	return table()
 }
