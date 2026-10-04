@@ -20,6 +20,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ import (
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
+	"github.com/okedeji/hybernate/internal/gitops"
 	"github.com/okedeji/hybernate/internal/metrics"
 )
 
@@ -122,6 +124,9 @@ type Workload struct {
 	// it went live if later. Hybernate doesn't record these yet, so they
 	// stay unset until it does.
 	Slept *Slept `json:"slept,omitempty"`
+	// ReplicasFromGit is the GitOps tool that last set its replicas from
+	// Git, which would undo every pause until it's told to leave them.
+	ReplicasFromGit string `json:"replicasFromGit,omitempty"`
 	// OnSpot means a pod of it is on a spot node, priced at on-demand, so it
 	// costs less than shown.
 	OnSpot bool `json:"onSpot,omitempty"`
@@ -285,6 +290,7 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 			plural(len(noHistory), "workload has", "workloads have"), listSome(noHistory)))
 	}
 	report.Notes = append(report.Notes, s.findDependencies(ctx, report.Workloads, sources, opts.Namespaces)...)
+	report.Notes = append(report.Notes, gitOpsNotes(report.Workloads)...)
 
 	slices.SortFunc(report.Workloads, func(a, b Workload) int {
 		if c := cmp.Compare(stateOrder[a.State], stateOrder[b.State]); c != 0 {
@@ -301,6 +307,28 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 	report.Totals = totals(report.Workloads)
 	return report, nil
 }
+
+// gitOpsNotes say which workloads have replicas set from Git, which their
+// GitOps tool would set again after each pause, and where the fix is.
+func gitOpsNotes(workloads []Workload) []string {
+	byTool := map[string][]string{}
+	for _, w := range workloads {
+		if w.ReplicasFromGit != "" {
+			byTool[w.ReplicasFromGit] = append(byTool[w.ReplicasFromGit], w.Namespace+"/"+w.Name)
+		}
+	}
+	tools := slices.Sorted(maps.Keys(byTool))
+	notes := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names := byTool[tool]
+		notes = append(notes, fmt.Sprintf("%s set from Git by %s, which would undo every pause: %s. "+
+			"Have %s leave the replicas to Hybernate first: %s", plural(len(names), "workload has its replicas",
+			"workloads have their replicas"), tool, listSome(names), tool, gitOpsGuide))
+	}
+	return notes
+}
+
+const gitOpsGuide = "https://okedeji.io/hybernate/guides/gitops/"
 
 // stateOrder lists idle workloads first, the ones worth acting on.
 var stateOrder = map[State]int{StateIdle: 0, StatePaused: 1, StateActive: 2, StateUnknown: 3}
@@ -349,6 +377,8 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 				Managed:   mw != nil,
 				DryRun:    mw != nil && mw.Spec.DryRun,
 			}
+			writer, _ := gitops.ReplicasWriter(obj.GetManagedFields())
+			w.ReplicasFromGit = string(writer.Tool)
 			if times := rollouts[obj.GetUID()]; len(times) > 0 {
 				last := slices.MaxFunc(times, func(a, b time.Time) int { return a.Compare(b) })
 				w.LastDeployed = &last

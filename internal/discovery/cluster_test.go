@@ -19,6 +19,7 @@ package discovery
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -457,4 +458,32 @@ func TestMeasured_Wakes(t *testing.T) {
 
 	assert.Equal(t, 3, measured(dry(v1alpha1.PhaseRunning), 0.1, now).Wakes, "every pause ended")
 	assert.Equal(t, 2, measured(dry(v1alpha1.PhaseIdle), 0.1, now).Wakes, "one still under way")
+}
+
+// A workload whose replicas a GitOps tool sets is flagged before anyone
+// opts it in, with where to find the fix.
+func TestScanCluster_ReplicasFromGit(t *testing.T) {
+	fromGit := func(name, manager string) runtime.Object {
+		d := makeDeployment(name, testNamespace, 1, "100m", "128Mi", nil)
+		d.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: manager, Operation: metav1.ManagedFieldsOperationApply, APIVersion: "apps/v1",
+			Time: &metav1.Time{Time: scanTime}, FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:spec":{"f:replicas":{}}}`)}}}
+		return d
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithReturnManagedFields().WithRuntimeObjects(
+		fromGit("argo-app", "argocd-controller"), fromGit("argo-db", "argocd-controller"),
+		fromGit("flux-app", "kustomize-controller"), fromGit("scaled", "kubectl-scale")).Build()
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), scanOptions(testNamespace))
+	require.NoError(t, err)
+
+	got := byName(report)
+	assert.Equal(t, "Argo CD", got["argo-app"].ReplicasFromGit)
+	assert.Equal(t, "Flux", got["flux-app"].ReplicasFromGit)
+	assert.Empty(t, got["scaled"].ReplicasFromGit)
+	notes := strings.Join(report.Notes, "\n")
+	assert.Contains(t, notes, "2 workloads have their replicas set from Git by Argo CD, which would undo every pause: "+
+		testNamespace+"/argo-app, "+testNamespace+"/argo-db. Have Argo CD leave the replicas to Hybernate first: "+
+		"https://okedeji.io/hybernate/guides/gitops/")
+	assert.Contains(t, notes, "1 workload has its replicas set from Git by Flux")
 }
