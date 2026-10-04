@@ -1044,6 +1044,85 @@ data:
 			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 		})
 	})
+
+	// Runs after "Idle clock", which installs metrics-server.
+	Context("GitOps", func() {
+		const (
+			gitOpsNamespace = "hybernate-e2e-gitops"
+			gitOpsName      = "e2e-synced"
+		)
+		// syncFromGit applies the Deployment as Argo CD does, taking the
+		// replicas back from whoever set them, as a sync does.
+		syncFromGit := func() error {
+			cmd := exec.Command("kubectl", "apply", "--server-side", "--field-manager=argocd-controller",
+				"--force-conflicts", "-f", "-")
+			cmd.Stdin = strings.NewReader(deploymentManifest(gitOpsName, gitOpsNamespace, 2))
+			_, err := utils.Run(cmd)
+			return err
+		}
+
+		BeforeAll(func() {
+			_, err := utils.Run(exec.Command("kubectl", "create", "ns", gitOpsNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", gitOpsNamespace, "--wait=false"))
+			})
+			Expect(syncFromGit()).To(Succeed())
+			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+gitOpsName,
+				"-n", gitOpsNamespace, "--timeout=2m"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("reports Argo CD undoing a pause, with the fix, and doesn't fight it", func() {
+			By("scanning, which says the replicas are set from Git before it's opted in")
+			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", gitOpsNamespace, "-o", "json", "--window", "0"))
+			Expect(err).NotTo(HaveOccurred())
+			var scanned struct {
+				Workloads []struct {
+					ReplicasFromGit string `json:"replicasFromGit"`
+				} `json:"workloads"`
+			}
+			Expect(json.Unmarshal([]byte(out), &scanned)).To(Succeed())
+			Expect(scanned.Workloads).To(HaveLen(1))
+			Expect(scanned.Workloads[0].ReplicasFromGit).To(Equal("Argo CD"))
+
+			By("managing it with a one-minute idle clock, and waiting for it to pause")
+			Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: %[1]s, namespace: %[2]s}
+spec:
+  target: {kind: Deployment, name: %[1]s}
+  idlePolicy: {idleAfter: 1m}
+  prediction: {confidence: 85}
+`, gitOpsName, gitOpsNamespace))).To(Succeed())
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", gitOpsName, gitOpsNamespace, "{.status.phase}")
+			}, 4*time.Minute, 5*time.Second).Should(Equal("Paused"))
+			Expect(jsonpath("deployment", gitOpsName, gitOpsNamespace, "{.metadata.managedFields[*].manager}")).
+				To(ContainSubstring("hybernate"), "the pause is recorded under Hybernate's field manager")
+
+			By("syncing from Git, as Argo CD would")
+			Expect(syncFromGit()).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace, "{.status.phase}")).To(Equal("Running"))
+				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace,
+					`{.status.conditions[?(@.type=="GitOpsConflict")].status}`)).To(Equal("True"))
+				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace,
+					`{.status.conditions[?(@.type=="GitOpsConflict")].message}`)).To(ContainSubstring("managedFieldsManagers"))
+				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace, "{.status.lastScaledUp.by}")).
+					To(Equal("argocd-controller"))
+				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace, "{.status.lastScaledUp.gitOps}")).
+					To(Equal("Argo CD"))
+			}, time.Minute, 5*time.Second).Should(Succeed())
+
+			By("checking it isn't paused again in a loop with Git, though its idle clock runs out")
+			Consistently(func() (string, error) {
+				return jsonpath("deployment", gitOpsName, gitOpsNamespace, "{.spec.replicas}")
+			}, 2*time.Minute, 10*time.Second).Should(Equal("2"))
+		})
+	})
 })
 
 // deploymentManifest is a Deployment of the pause container, which uses no
