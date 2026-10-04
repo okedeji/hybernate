@@ -13,6 +13,12 @@ If you are using an older version, we recommend upgrading to the latest release 
 
 ---
 
+## How Releases Are Secured
+
+What Hybernate can do in a cluster, what it talks to, and how to verify a release's signatures and provenance are on the [Security](https://okedeji.io/hybernate/reference/security/) page.
+
+---
+
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability, please report it responsibly.
