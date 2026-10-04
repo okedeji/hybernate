@@ -48,18 +48,6 @@ spec:
             description: ManagedWorkloadSpec defines the desired lifecycle behavior
               for a workload.
             properties:
-              conflictAction:
-                default: warn
-                description: |-
-                  ConflictAction controls how the operator reacts when someone scales up
-                  a paused target outside of Hybernate. "enforce" scales it back to zero,
-                  "warn" emits an event but leaves the change, "defer" accepts the change
-                  and treats the workload as running.
-                enum:
-                - enforce
-                - warn
-                - defer
-                type: string
               costTracking:
                 description: |-
                   CostTracking configures custom cost rates for this workload.
@@ -330,6 +318,7 @@ spec:
                     - annotation
                     - prometheus
                     - unobserved
+                    - scaled-up
                     type: string
                   lastActivityTime:
                     description: LastActivityTime is the most recent activity from
@@ -677,6 +666,33 @@ spec:
                   (pause, resume, destroy, or drift correction).
                 format: date-time
                 type: string
+              lastScaledUp:
+                description: |-
+                  LastScaledUp is the last time something other than Hybernate scaled
+                  the workload up while it was paused, which wakes it.
+                properties:
+                  at:
+                    format: date-time
+                    type: string
+                  by:
+                    description: |-
+                      By is the field manager that set the replicas, such as kubectl-scale
+                      or argocd-controller.
+                    type: string
+                  gitOps:
+                    description: |-
+                      GitOps is the GitOps tool behind By, such as Argo CD or Flux, which
+                      will set the replicas again each time Hybernate pauses the workload
+                      until it's told to leave them.
+                    type: string
+                  replicas:
+                    format: int32
+                    type: integer
+                required:
+                - at
+                - by
+                - replicas
+                type: object
               lastTransitionTime:
                 description: LastTransitionTime is when the workload last changed
                   phases.

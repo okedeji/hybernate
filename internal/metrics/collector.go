@@ -82,10 +82,10 @@ var (
 		Help: "Total pause expiry events by action (resume or destroy).",
 	}, []string{"action"})
 
-	DriftDetections = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_drift_detections_total",
-		Help: "Total replica drift detections by conflict policy.",
-	}, []string{"policy"})
+	ExternalScaleUps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "hybernate_external_scale_ups_total",
+		Help: "Paused workloads scaled up outside Hybernate, by what did it: argo-cd, flux, or other.",
+	}, []string{"by"})
 )
 
 // --- Tier 3: Debugging ---
@@ -157,7 +157,7 @@ func init() {
 		PredictionAnomalies,
 		IdleDetections,
 		PauseExpiryActions,
-		DriftDetections,
+		ExternalScaleUps,
 
 		// Tier 3
 		IdleSeconds,

@@ -25,7 +25,7 @@ These metrics help you understand what the operator is doing and why.
 | `hybernate_prediction_anomalies_total` | Counter | `namespace`, `workload` | Anomalies detected |
 | `hybernate_idle_detections_total` | Counter | `action`, `namespace`, `workload` | Idle detections by action |
 | `hybernate_pause_expiry_actions_total` | Counter | `action` | Pause expiry events |
-| `hybernate_drift_detections_total` | Counter | `policy` | Paused workloads scaled up externally |
+| `hybernate_external_scale_ups_total` | Counter | `by` | Paused workloads scaled up outside Hybernate, by `argo-cd`, `flux`, or `other` |
 
 ## Tier 3: Debugging
 

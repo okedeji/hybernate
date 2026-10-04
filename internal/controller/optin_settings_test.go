@@ -43,7 +43,6 @@ func TestOptInSpec_Defaults(t *testing.T) {
 	assert.True(t, *spec.Wake.Page)
 	// Fields the API server would default, set so a rewrite changes nothing.
 	assert.Equal(t, 85, spec.Prediction.Confidence)
-	assert.Equal(t, v1alpha1.ConflictActionWarn, spec.ConflictAction)
 }
 
 func TestOptInSpec_Precedence(t *testing.T) {

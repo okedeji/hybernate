@@ -153,9 +153,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Writes are made under Hybernate's own field manager, so the replicas
+	// it pauses are attributed to it rather than to the binary's name.
+	c := client.WithFieldOwner(mgr.GetClient(), v1alpha1.FieldManager)
 	readyz := healthz.Ping
 	if runDoorman {
-		server := doorman.NewServer(mgr.GetClient(), mgr.GetEventRecorder("hybernate-doorman"), "")
+		server := doorman.NewServer(c, mgr.GetEventRecorder("hybernate-doorman"), "")
 		if err := mgr.Add(server); err != nil {
 			setupLog.Error(err, "unable to add doorman")
 			os.Exit(1)
@@ -163,7 +166,7 @@ func main() {
 		readyz = server.Ready
 	} else {
 		if err := (&controller.Reconciler{
-			Client:           mgr.GetClient(),
+			Client:           c,
 			Scheme:           mgr.GetScheme(),
 			Recorder:         mgr.GetEventRecorder("hybernate"),
 			PrometheusURL:    prometheusURL,
@@ -176,7 +179,7 @@ func main() {
 		}
 		for _, kind := range []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment, v1alpha1.TargetKindStatefulSet} {
 			if err := (&controller.OptInReconciler{
-				Client:   mgr.GetClient(),
+				Client:   c,
 				Scheme:   mgr.GetScheme(),
 				Recorder: mgr.GetEventRecorder("hybernate"),
 				Kind:     kind,

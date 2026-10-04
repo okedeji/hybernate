@@ -33,23 +33,24 @@ import (
 )
 
 const (
-	ReasonPredictionFed        = "PredictionFed"
-	ReasonAutomationSkipped    = "AutomationSkipped"
-	ReasonIdleDetected         = "IdleDetected"
-	ReasonIdleVetoed           = "IdleVetoed"
-	ReasonActivityResumed      = "ActivityResumed"
-	ReasonWokeByActivity       = "WokeByActivity"
-	ReasonPaused               = "Paused"
-	ReasonResumed              = "Resumed"
-	ReasonDestroyed            = "Destroyed"
-	ReasonPauseExpired         = "PauseExpired"
-	ReasonPVCsCleaned          = "PVCsCleaned"
-	ReasonPVCRetentionExpiring = "PVCRetentionExpiring"
-	ReasonAutoResume           = "AutoResume"
-	ReasonDriftDetected        = "DriftDetected"
-	ReasonDriftCorrected       = "DriftCorrected"
-	ReasonRegimeChange         = "RegimeChange"
-	ReasonTargetNotFound       = "TargetNotFound"
+	ReasonPredictionFed          = "PredictionFed"
+	ReasonAutomationSkipped      = "AutomationSkipped"
+	ReasonIdleDetected           = "IdleDetected"
+	ReasonIdleVetoed             = "IdleVetoed"
+	ReasonActivityResumed        = "ActivityResumed"
+	ReasonWokeByActivity         = "WokeByActivity"
+	ReasonPaused                 = "Paused"
+	ReasonResumed                = "Resumed"
+	ReasonDestroyed              = "Destroyed"
+	ReasonPauseExpired           = "PauseExpired"
+	ReasonPVCsCleaned            = "PVCsCleaned"
+	ReasonPVCRetentionExpiring   = "PVCRetentionExpiring"
+	ReasonAutoResume             = "AutoResume"
+	ReasonScaledUp               = "ScaledUp"
+	ReasonGitOpsConflict         = "GitOpsConflict"
+	ReasonGitOpsConflictResolved = "GitOpsConflictResolved"
+	ReasonRegimeChange           = "RegimeChange"
+	ReasonTargetNotFound         = "TargetNotFound"
 )
 
 // Actions populate the events.k8s.io/v1 Action field, which the API server
@@ -64,8 +65,7 @@ const (
 	actionExpirePause    = "ExpirePause"
 	actionCleanupPVCs    = "CleanupPVCs"
 	actionCheckTarget    = "CheckTarget"
-	actionCheckDrift     = "CheckDrift"
-	actionCorrectDrift   = "CorrectDrift"
+	actionCheckReplicas  = "CheckReplicas"
 	actionCheckDuplicate = "CheckDuplicate"
 	actionAutoManage     = "AutoManage"
 	actionScan           = "Scan"
@@ -166,13 +166,6 @@ func seasonPhases(phase forecast.Phase) (daily, weekly string) {
 	default:
 		return seasonUnknown, seasonUnknown
 	}
-}
-
-func resolveConflictAction(workload *v1alpha1.ManagedWorkload) v1alpha1.ConflictAction {
-	if workload.Spec.ConflictAction != "" {
-		return workload.Spec.ConflictAction
-	}
-	return v1alpha1.ConflictActionWarn
 }
 
 func (r *Reconciler) stampLastActed(workload *v1alpha1.ManagedWorkload) {

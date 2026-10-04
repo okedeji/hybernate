@@ -87,10 +87,10 @@ func depReconciler(t *testing.T, pauser *stubPauser, objs ...client.Object) *Rec
 	}
 }
 
-func fetch(t *testing.T, r *Reconciler, namespace, name string) *v1alpha1.ManagedWorkload {
+func fetch(t *testing.T, r *Reconciler, name string) *v1alpha1.ManagedWorkload {
 	t.Helper()
 	var w v1alpha1.ManagedWorkload
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, &w))
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: name}, &w))
 	return &w
 }
 
@@ -205,9 +205,9 @@ func TestDependencies_WakingWakesDependencies(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, fixedTime.UTC().Format(time.RFC3339),
-		fetch(t, r, "default", "postgres").Annotations[v1alpha1.AnnotationLastActivity],
+		fetch(t, r, "postgres").Annotations[v1alpha1.AnnotationLastActivity],
 		"the dependency is woken through its activity annotation")
-	assert.Empty(t, fetch(t, r, "default", "redis").Annotations[v1alpha1.AnnotationLastActivity])
+	assert.Empty(t, fetch(t, r, "redis").Annotations[v1alpha1.AnnotationLastActivity])
 	assert.Equal(t, v1alpha1.PhaseRunning, api.Status.Phase, "without waitForReady the dependent doesn't wait")
 }
 
@@ -238,7 +238,7 @@ func TestDependencies_WaitForReady(t *testing.T) {
 				assert.Equal(t, 0, pauser.resumeCalls, "the dependent must not scale up before its dependency is Ready")
 				require.NotNil(t, result)
 				assert.Equal(t, dependencyReadyCheckInterval, result.RequeueAfter)
-				assert.True(t, meta.IsStatusConditionTrue(fetch(t, r, "default", "api").Status.Conditions, conditionWaitingForDependencies))
+				assert.True(t, meta.IsStatusConditionTrue(fetch(t, r, "api").Status.Conditions, conditionWaitingForDependencies))
 				return
 			}
 			assert.Equal(t, 1, pauser.resumeCalls)
@@ -325,4 +325,18 @@ func TestFindRelatedWorkloads_Dependencies(t *testing.T) {
 		{NamespacedName: types.NamespacedName{Namespace: "preview-42", Name: "api"}},
 	}, r.findWorkloadsForTarget(context.Background(), postgresTarget(1, 1)),
 		"a dependency's readiness changing re-checks dependents waiting for it")
+}
+
+// A workload woken by a scale-up wakes its dependencies, as any wake does.
+func TestDependencies_ScaleUpWakesDependencies(t *testing.T) {
+	pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
+	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhasePaused, postgresRef())
+	api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1, PausedAt: &pausedAt}
+	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
+	r := depReconciler(t, &stubPauser{}, api, postgres)
+
+	require.NoError(t, r.wakeOnScaleUp(context.Background(), api, scaledBy("kubectl-scale", 1)))
+
+	assert.Equal(t, fixedTime.UTC().Format(time.RFC3339),
+		fetch(t, r, "postgres").Annotations[v1alpha1.AnnotationLastActivity])
 }
