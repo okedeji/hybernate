@@ -52,6 +52,7 @@ A value that can't be read is reported in an `InvalidSetting` warning event on t
 | Annotation | Value | Applied To | Description |
 |------------|-------|-----------|-------------|
 | `hybernate.io/last-activity` | RFC 3339 time | ManagedWorkloads, Deployments, StatefulSets | Activity seen by another tool, such as a developer portal. A time after the pause wakes a paused workload. See [Activity annotations](../concepts/idle-detection.md#activity-annotations). |
+| `hybernate.io/ignore-dependencies` | comma-separated names | Deployments, StatefulSets, ManagedWorkloads | Dependencies Hybernate shouldn't learn for this workload, comma-separated, as `namespace/name` or a name in its own namespace. See [Learned dependencies](../concepts/dependencies.md#learned-dependencies). |
 | `hybernate.io/active-until` | RFC 3339 time | ManagedWorkloads, Deployments, StatefulSets | Keeps the workload awake until that time, and wakes it if paused. |
 | `hybernate.io/last-request` | RFC 3339 time | ManagedWorkloads | Set by the doorman when it holds a request for a paused workload. Wakes it like `last-activity`, and the clock records the wake as `request`. See [Wake on Request](../concepts/wake-on-request.md). |
 

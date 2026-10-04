@@ -215,6 +215,24 @@ It refuses, and says why, when activity can't wake the workload: `desiredState: 
 
 Your user needs `get` and `patch` on `managedworkloads` in the namespace.
 
+## Show a Workload's Dependencies
+
+```bash
+kubectl hybernate deps postgres -n preview-42
+```
+
+```
+preview-42/postgres (StatefulSet, Paused)
+Depends on:
+  nothing
+Depended on by:
+  preview-42/api      learned from PGHOST                   Running
+  preview-42/worker   declared in dependsOn, waitForReady   Paused
+Learned links come from the dependent's environment; hybernate.io/ignore-dependencies on it drops one.
+```
+
+`deps` shows what Hybernate holds awake and wakes with a ManagedWorkload, in both directions: what it depends on, and what depends on it, in any namespace. Each link says where it comes from, a `dependsOn` or what Hybernate [learned](../concepts/dependencies.md#learned-dependencies) from the dependent's environment, and what the other workload is doing now; one Hybernate doesn't manage shows as `not managed`. It only reads ManagedWorkloads. Without access to them in every namespace, it reads the workload's own and says that dependents elsewhere aren't shown.
+
 ## Enable a Workload
 
 A workload opted in with `hybernate.io/dry-run: "true"` is measured but never paused. `enable` ends that, so Hybernate starts pausing it while idle:

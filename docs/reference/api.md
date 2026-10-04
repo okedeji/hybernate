@@ -47,6 +47,7 @@
 | `phase` | `WorkloadPhase` | Current lifecycle phase |
 | `conditions[]` | `Condition` | Standard K8s conditions |
 | `pause` | `PauseStatus` | State while paused |
+| `learnedDependencies` | `LearnedDependencies` | Dependencies Hybernate found in the workload's environment, held and woken like `dependsOn`: `from`, `at`, and `dependencies` (`namespace`, `kind`, `name`, `via`, `address`). See [Learned dependencies](../concepts/dependencies.md#learned-dependencies) |
 | `lastScaledUp` | `ScaledUp` | The last time the workload was scaled up outside Hybernate while paused, which wakes it: `at`, `replicas`, `by` (the field manager, such as `kubectl-scale`), and `gitOps` (`Argo CD` or `Flux`, when it was set from Git; see [Argo CD and Flux](../guides/gitops.md)) |
 | `activity.lastActivityTime` | time | Most recent activity from any source |
 | `activity.lastActivitySource` | string | `created`, `woke`, `request`, `cpu`, `rollout`, `annotation`, `prometheus`, `unobserved`, or `scaled-up` |
