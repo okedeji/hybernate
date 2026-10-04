@@ -146,10 +146,14 @@ func TestFind_RemembersKEDAIsntInstalled(t *testing.T) {
 	}
 	assert.Equal(t, 1, lookups)
 
-	now = now.Add(kedaRecheck)
-	_, _, err := f.Find(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
+	_, _, err := f.FindNow(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
 	require.NoError(t, err)
-	assert.Equal(t, 2, lookups, "looked for again, in case KEDA was installed since")
+	assert.Equal(t, 2, lookups, "a pause or resume looks again")
+
+	now = now.Add(kedaRecheck)
+	_, _, err = f.Find(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
+	require.NoError(t, err)
+	assert.Equal(t, 3, lookups, "looked for again, in case KEDA was installed since")
 }
 
 func TestHoldKEDA(t *testing.T) {
@@ -180,4 +184,24 @@ func TestClamp(t *testing.T) {
 	assert.Equal(t, int32(2), a.Clamp(1))
 	assert.Equal(t, int32(5), a.Clamp(5))
 	assert.Equal(t, int32(10), a.Clamp(30))
+}
+
+// Once a pause or resume finds KEDA, Find stops relying on its absence.
+func TestFindNow_ForgetsThatKEDAWasMissing(t *testing.T) {
+	c := withKEDA(t, keda("web", map[string]any{"scaleTargetRef": map[string]any{"name": "web"}}))
+	f := NewFinder(c)
+	f.noKEDAUntil = f.now().Add(time.Hour)
+
+	_, found, err := f.Find(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
+	require.NoError(t, err)
+	assert.False(t, found, "still relying on KEDA being missing")
+
+	got, found, err := f.FindNow(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, KEDA, got.Kind)
+
+	_, found, err = f.Find(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
+	require.NoError(t, err)
+	assert.True(t, found)
 }

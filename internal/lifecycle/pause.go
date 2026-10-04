@@ -70,7 +70,7 @@ func (p *Pauser) Pause(ctx context.Context, workload *v1alpha1.ManagedWorkload) 
 		if scale.Spec.Replicas > 0 {
 			workload.Status.Pause.PreviousReplicas = scale.Spec.Replicas
 		}
-		a, found, err := p.autoscalers.Find(ctx, workload.Namespace, workload.Spec.Target.Kind,
+		a, found, err := p.autoscalers.FindNow(ctx, workload.Namespace, workload.Spec.Target.Kind,
 			workload.Spec.Target.Name)
 		if err != nil {
 			return false, fmt.Errorf("finding the workload's autoscaler: %w", err)
@@ -142,7 +142,7 @@ func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload)
 // at least one, so it's running.
 func (p *Pauser) resumeReplicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error) {
 	replicas := workload.Status.Pause.PreviousReplicas
-	a, found, err := p.autoscalers.Find(ctx, workload.Namespace, workload.Spec.Target.Kind,
+	a, found, err := p.autoscalers.FindNow(ctx, workload.Namespace, workload.Spec.Target.Kind,
 		workload.Spec.Target.Name)
 	if err != nil {
 		return 0, fmt.Errorf("finding the workload's autoscaler: %w", err)

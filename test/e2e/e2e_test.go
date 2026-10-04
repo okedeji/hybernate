@@ -1268,8 +1268,10 @@ spec:
 			manage("e2e-keda")
 			Expect(jsonpath("scaledobject", "e2e-keda", autoscaleNamespace,
 				`{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}`)).To(Equal("0"))
-			Expect(jsonpath("managedworkload", "e2e-keda", autoscaleNamespace,
-				`{.status.conditions[?(@.type=="Autoscaled")].reason}`)).To(Equal("KEDA"))
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", "e2e-keda", autoscaleNamespace,
+					`{.status.conditions[?(@.type=="Autoscaled")].reason}`)
+			}, time.Minute, 5*time.Second).Should(Equal("KEDA"))
 			Consistently(replicas("e2e-keda"), time.Minute, 10*time.Second).Should(Equal("0"),
 				"KEDA holds it, though its trigger is active")
 
