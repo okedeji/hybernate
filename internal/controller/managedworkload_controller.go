@@ -70,6 +70,14 @@ type Reconciler struct {
 	// PodReader reads pods without caching them. Defaults to Client.
 	PodReader client.Reader
 
+	// ProtectedNamespaces are name patterns, such as prod-*, of namespaces
+	// Hybernate doesn't manage unless they're labelled to allow it.
+	ProtectedNamespaces []string
+
+	// WatchNamespaces are the namespaces Hybernate works in, with a Role in
+	// each, or every namespace when empty.
+	WatchNamespaces []string
+
 	pauser        lifecyclePauser
 	metrics       metricsReader
 	prices        listPricer
@@ -156,6 +164,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if err := r.wakeOnScaleUp(ctx, &workload, target); err != nil {
 		return ctrl.Result{}, err
 	}
+	if protected, err := r.inProtectedNamespace(ctx, &workload); err != nil {
+		return ctrl.Result{}, err
+	} else if protected {
+		return r.reconcileProtected(ctx, &workload)
+	}
+	r.clearCondition(&workload, conditionProtected, "NotProtected")
 	if err := r.reportAutoscaler(ctx, &workload); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -702,6 +716,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&appsv1.StatefulSet{}, targetHandler).
 		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForDoorman)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.findPausedWorkloadsInNamespace)).
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsInNamespace)).
 		Named("managedworkload").
 		Complete(r)
 }
