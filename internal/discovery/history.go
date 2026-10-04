@@ -55,8 +55,10 @@ type History struct {
 	Hours float64 `json:"hours"`
 	// RunningHours had at least one of its pods running.
 	RunningHours float64 `json:"runningHours"`
-	// IdleHours were running with CPU below the threshold and no rollout.
-	IdleHours float64 `json:"idleHours"`
+	// QuietHours were running with no activity: CPU below the threshold
+	// and no rollout. A workload sleeps through fewer, since after each
+	// activity the clock waits idleAfter before pausing it.
+	QuietHours float64 `json:"quietHours"`
 	// SleepHours were running while the clock had run out, so Hybernate
 	// would have had the workload paused.
 	SleepHours float64 `json:"sleepHours"`
@@ -125,7 +127,7 @@ func (r replay) run() History {
 		}
 		h.RunningHours += stepHours
 		if !active {
-			h.IdleHours += stepHours
+			h.QuietHours += stepHours
 		}
 		if asleep {
 			h.SleepHours += stepHours
@@ -237,7 +239,7 @@ func (s *Scanner) readHistory(ctx context.Context, namespace string, opts Cluste
 // its namespace's history, or returns nil when none of it is the workload's.
 // Its requests and prices are today's, since the history only records CPU.
 func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, since time.Time,
-	rollouts []time.Time, opts ClusterOptions) *History {
+	rollouts []time.Time, threshold int, idleAfter time.Duration, opts ClusterOptions) *History {
 	containers := make([]string, 0, len(spec.Containers))
 	for _, c := range metrics.WorkloadContainers(spec) {
 		containers = append(containers, c.Name)
@@ -258,17 +260,22 @@ func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, sin
 		requestCores: float64(ownCPU) / 1000,
 		podHourly: cost.ComputeHourly(float64(w.PodCPURequestMillis)/1000,
 			float64(w.PodMemoryRequestBytes)/(1<<30), opts.Rates),
-		threshold: opts.CPUThreshold,
-		idleAfter: opts.IdleAfter,
+		threshold: threshold,
+		idleAfter: idleAfter,
 	}.run()
 	return &h
 }
 
-// monthlyFreed is what a workload's history says pausing it would free a
-// month, for ordering.
-func monthlyFreed(w Workload) float64 {
-	if w.History == nil {
-		return 0
+// CouldSave is what pausing a workload Hybernate doesn't pause yet would
+// free a month: measured, for one in dry-run, or estimated from history,
+// for one Hybernate doesn't manage. It's 0 for a live workload, whose
+// saving is already happening.
+func CouldSave(w Workload) float64 {
+	switch {
+	case w.Measured != nil:
+		return w.Measured.MonthlyFreed
+	case !w.Managed && w.History != nil:
+		return w.History.MonthlyFreed
 	}
-	return w.History.MonthlyFreed
+	return 0
 }

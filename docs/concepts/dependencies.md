@@ -6,7 +6,7 @@ Some workloads never see outside traffic: databases, message brokers, caches, wo
 kind: ManagedWorkload
 metadata:
   name: api
-  namespace: sandbox-42
+  namespace: preview-42
 spec:
   target: {kind: Deployment, name: api}
   dependsOn:
@@ -23,7 +23,7 @@ Declare `dependsOn` on the workload that **needs** the other one. Each entry nam
 **A dependency doesn't pause while anything that depends on it is awake.** When its own clock runs out, it stays up and says why:
 
 ```
-HeldByDependents=True   kept awake for sandbox-42/api, sandbox-43/api
+HeldByDependents=True   kept awake for preview-42/api, preview-43/api
 ```
 
 Its clock keeps running. Once the last dependent has paused, the dependency pauses on its next check, provided its own clock has run out too.
@@ -45,7 +45,7 @@ dependsOn:
 The dependent then stays in `Resuming`, without scaling up, until every replica of that dependency is Ready:
 
 ```
-WaitingForDependencies=True   waiting for sandbox-42/postgres (0 ready)
+WaitingForDependencies=True   waiting for preview-42/postgres (0 ready)
 ```
 
 There's no timeout, because a slow start is exactly why you'd set it. If the wait runs past 15 minutes, the `HybernateWorkloadStuck` alert fires.
@@ -62,7 +62,7 @@ There's no timeout, because a slow start is exactly why you'd set it. If the wai
 
 ## Across namespaces
 
-Dependencies can point into other namespaces, so sandboxes can share a database or broker that lives elsewhere. A dependency can only be kept awake or woken by its dependents, never paused, scaled down, or deleted, so the most a dependent in another namespace can do is keep it running. `HeldByDependents` always names the holders by namespace.
+Dependencies can point into other namespaces, so preview environments can share a database or broker that lives elsewhere. A dependency can only be kept awake or woken by its dependents, never paused, scaled down, or deleted, so the most a dependent in another namespace can do is keep it running. `HeldByDependents` always names the holders by namespace.
 
 ## When you need dependsOn
 
@@ -72,4 +72,4 @@ A request through a normal Service wakes a paused workload by itself, through [w
 - **No slow first request.** Waking dependencies with the workload, and `waitForReady`, means the first request doesn't wait for the database too.
 - **Holding a dependency awake** while its dependents are, so it doesn't pause under them.
 
-[`kubectl hybernate scan`](../getting-started/kubectl-plugin.md#scan-your-clusters) reads workloads' environment variables and lists the dependencies it finds there, flagging the headless ones with the annotation to add.
+[`kubectl hybernate scan`](../getting-started/kubectl-plugin.md#scan-a-cluster) reads workloads' environment variables and lists the dependencies it finds there, with whether each is declared.

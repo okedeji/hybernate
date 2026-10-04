@@ -36,7 +36,7 @@ import (
 
 var wakeTime = time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
 
-var apiKey = client.ObjectKey{Namespace: "sandbox-42", Name: "api"}
+var apiKey = client.ObjectKey{Namespace: "preview-42", Name: "api"}
 
 func managedWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
 	return &v1alpha1.ManagedWorkload{
@@ -81,14 +81,14 @@ func TestWake_StampsActivity(t *testing.T) {
 		wantActiveUntil string
 		wantOutput      string
 	}{
-		{name: "a paused workload", phase: v1alpha1.PhasePaused, wantOutput: "waking sandbox-42/api\n"},
+		{name: "a paused workload", phase: v1alpha1.PhasePaused, wantOutput: "waking preview-42/api\n"},
 		{
 			name: "kept awake for a while", phase: v1alpha1.PhasePaused, keepAwake: 2 * time.Hour,
-			wantActiveUntil: "2026-10-03T11:00:00Z", wantOutput: "waking sandbox-42/api\n",
+			wantActiveUntil: "2026-10-03T11:00:00Z", wantOutput: "waking preview-42/api\n",
 		},
 		{
 			name: "a running workload", phase: v1alpha1.PhaseRunning,
-			wantOutput: "sandbox-42/api is already running; its idle clock restarts now\n",
+			wantOutput: "preview-42/api is already running; its idle clock restarts now\n",
 		},
 	}
 	for _, tt := range tests {
@@ -128,7 +128,7 @@ func TestWake_WaitsUntilRunning(t *testing.T) {
 
 	require.NoError(t, wake(testContext(t), c, apiKey, testOptions(), &out))
 
-	assert.Contains(t, out.String(), "sandbox-42/api is Running after")
+	assert.Contains(t, out.String(), "preview-42/api is Running after")
 	assert.GreaterOrEqual(t, gets, 4, "it polls until the workload is Running")
 }
 
@@ -141,7 +141,7 @@ func TestWake_TimesOut(t *testing.T) {
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Contains(t, err.Error(), "still Paused")
-	assert.Contains(t, err.Error(), "kubectl describe managedworkload api -n sandbox-42")
+	assert.Contains(t, err.Error(), "kubectl describe managedworkload api -n preview-42")
 }
 
 func TestWake_RefusesWhatActivityCantWake(t *testing.T) {

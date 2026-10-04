@@ -106,12 +106,12 @@ func newFakePrometheus(t *testing.T, f *fakePrometheus) *Prometheus {
 
 func TestPrometheusURL_ReadsANamespacesCPU(t *testing.T) {
 	f := &fakePrometheus{byNamespace: map[string][]series{
-		"sandbox": {{pod: "api-7d9f8c6b5-abcde", container: "app", cores: func(time.Time) float64 { return 0.25 }}},
+		"dev": {{pod: "api-7d9f8c6b5-abcde", container: "app", cores: func(time.Time) float64 { return 0.25 }}},
 	}}
 	p := newFakePrometheus(t, f)
 	end := scanTime.Truncate(minStep)
 
-	history, err := p.namespaceCPU(context.Background(), "sandbox", end.Add(-time.Hour), end, minStep)
+	history, err := p.namespaceCPU(context.Background(), "dev", end.Add(-time.Hour), end, minStep)
 
 	require.NoError(t, err, "the path prefix in the URL is kept")
 	require.Len(t, history, 1)
@@ -119,7 +119,7 @@ func TestPrometheusURL_ReadsANamespacesCPU(t *testing.T) {
 	assert.Len(t, history[0].samples, 13)
 	assert.InDelta(t, 0.25, history[0].samples[end.Unix()], 0.0001)
 	require.Len(t, f.queries, 1)
-	assert.Contains(t, f.queries[0], `namespace="sandbox"`)
+	assert.Contains(t, f.queries[0], `namespace="dev"`)
 	assert.Contains(t, f.queries[0], `container!="POD"`, "the pause container isn't the workload's")
 }
 
@@ -146,7 +146,7 @@ func TestPrometheusURL_Errors(t *testing.T) {
 			p, err := NewPrometheusURL(server.URL, server.Client())
 			require.NoError(t, err)
 
-			_, err = p.namespaceCPU(context.Background(), "sandbox", scanTime.Add(-time.Hour), scanTime, minStep)
+			_, err = p.namespaceCPU(context.Background(), "dev", scanTime.Add(-time.Hour), scanTime, minStep)
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.want)
@@ -206,7 +206,7 @@ func TestFindPrometheus(t *testing.T) {
 				})
 			}
 
-			p, err := FindPrometheus(context.Background(), builder.Build(), nil, []string{"sandbox"})
+			p, err := FindPrometheus(context.Background(), builder.Build(), nil, []string{"dev"})
 
 			if tt.wantErr != nil {
 				assert.ErrorIs(t, err, tt.wantErr)

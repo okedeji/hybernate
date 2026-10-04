@@ -9,17 +9,17 @@ It assumes Hybernate is [installed](installation.md) and you have the [kubectl p
 If you don't have one to try, create a Deployment:
 
 ```bash
-kubectl create namespace sandbox
-kubectl create deployment my-api --image=nginx:1.27-alpine --replicas=2 -n sandbox
-kubectl set resources deployment my-api -n sandbox --requests=cpu=100m,memory=64Mi
-kubectl expose deployment my-api -n sandbox --port=80
-kubectl rollout status deployment/my-api -n sandbox
+kubectl create namespace dev
+kubectl create deployment my-api --image=nginx:1.27-alpine --replicas=2 -n dev
+kubectl set resources deployment my-api -n dev --requests=cpu=100m,memory=64Mi
+kubectl expose deployment my-api -n dev --port=80
+kubectl rollout status deployment/my-api -n dev
 ```
 
 ## 2. See what's idle
 
 ```bash
-kubectl hybernate scan -n sandbox
+kubectl hybernate scan -n dev
 ```
 
 The scan shows each workload, whether it's idle right now and why, and what it costs while running. A workload deployed in the last hour counts as active, as Hybernate would treat it, so a brand-new one shows as active until then.
@@ -27,8 +27,8 @@ The scan shows each workload, whether it's idle right now and why, and what it c
 ## 3. Opt it in, measuring first
 
 ```bash
-kubectl label deployment my-api -n sandbox hybernate.io/managed=true
-kubectl annotate deployment my-api -n sandbox hybernate.io/dry-run=true hybernate.io/idle-after=5m
+kubectl label deployment my-api -n dev hybernate.io/managed=true
+kubectl annotate deployment my-api -n dev hybernate.io/dry-run=true hybernate.io/idle-after=5m
 ```
 
 The label opts the workload in; the annotations are its settings. Here, dry-run means it's measured and never paused, and `idle-after: 5m` makes the example quick (the default is an hour). In real use, these usually go in the workload's manifest or Helm values, or on its namespace to cover everything in it. See [Opting In](../guides/opt-in.md).
@@ -36,7 +36,7 @@ The label opts the workload in; the annotations are its settings. Here, dry-run 
 Hybernate creates a ManagedWorkload for it:
 
 ```bash
-kubectl get managedworkloads -n sandbox
+kubectl get managedworkloads -n dev
 ```
 
 ```
@@ -47,36 +47,36 @@ my-api   Running   10s
 ## 4. Watch it measure
 
 ```bash
-kubectl get managedworkload my-api -n sandbox -o jsonpath='{.status.activity}'
+kubectl get managedworkload my-api -n dev -o jsonpath='{.status.activity}'
 ```
 
 `status.activity` is the activity clock: when the workload was last active, from what, and when it would pause. Once there's been no activity for `idle-after`, the phase becomes `Idle` and an event says it would have paused. Nothing is scaled down in dry-run:
 
 ```bash
-kubectl describe managedworkload my-api -n sandbox
+kubectl describe managedworkload my-api -n dev
 ```
 
 Each would-be pause is added up in `status.dryRun`: how many times it would have paused, how long it would have slept, and what that would have freed. Send it a request, or mark it active, to end one:
 
 ```bash
-kubectl annotate deployment my-api -n sandbox --overwrite hybernate.io/last-activity=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-kubectl get managedworkload my-api -n sandbox -o jsonpath='{.status.dryRun}'
+kubectl annotate deployment my-api -n dev --overwrite hybernate.io/last-activity=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+kubectl get managedworkload my-api -n dev -o jsonpath='{.status.dryRun}'
 ```
 
-`kubectl hybernate scan -n sandbox` shows the same summary.
+`kubectl hybernate scan -n dev` shows the same summary.
 
 ## 5. Let it pause
 
 When you're happy with what you see:
 
 ```bash
-kubectl hybernate enable my-api -n sandbox
+kubectl hybernate enable my-api -n dev
 ```
 
 This removes the dry-run annotation. Once the workload has had no activity for `idle-after`, Hybernate scales it to zero, remembering it had 2 replicas:
 
 ```bash
-kubectl get deployment my-api -n sandbox
+kubectl get deployment my-api -n dev
 # READY: 0/0
 ```
 
@@ -85,19 +85,19 @@ kubectl get deployment my-api -n sandbox
 Send it a request. The [doorman](../concepts/wake-on-request.md) holds the request, wakes the workload, and answers once it's Ready:
 
 ```bash
-kubectl run curl --rm -it --image=curlimages/curl:8.7.1 -n sandbox --restart=Never -- curl -s http://my-api
+kubectl run curl --rm -it --image=curlimages/curl:8.7.1 -n dev --restart=Never -- curl -s http://my-api
 ```
 
 A browser opening it gets a waking-up page instead, which loads the app once it's up. You can also wake it from the terminal:
 
 ```bash
-kubectl hybernate wake my-api -n sandbox
+kubectl hybernate wake my-api -n dev
 ```
 
 ## 7. Stop managing it
 
 ```bash
-kubectl label deployment my-api -n sandbox hybernate.io/managed-
+kubectl label deployment my-api -n dev hybernate.io/managed-
 ```
 
 Removing the label removes the ManagedWorkload. If the workload is paused, it's scaled back to its replicas first, so it's never left switched off.

@@ -78,7 +78,7 @@ func echoServer(t *testing.T) int32 {
 
 func pausedWorkload(name string, doormanPort int32, maxWait time.Duration) *v1alpha1.ManagedWorkload {
 	return &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "sandbox"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "dev"},
 		Spec: v1alpha1.ManagedWorkloadSpec{
 			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: name},
 			Wake:   &v1alpha1.WakeSpec{MaxWait: &metav1.Duration{Duration: maxWait}},
@@ -95,7 +95,7 @@ func readySlice(port int32) *discoveryv1.EndpointSlice {
 	const service = "api"
 	return &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: service + "-real", Namespace: "sandbox",
+			Name: service + "-real", Namespace: "dev",
 			Labels: map[string]string{discoveryv1.LabelServiceName: service},
 		},
 		AddressType: discoveryv1.AddressTypeIPv4,
@@ -159,7 +159,7 @@ func TestServer_HoldsWakesAndPassesThrough(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		var w v1alpha1.ManagedWorkload
-		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "sandbox", Name: "api"}, &w))
+		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "dev", Name: "api"}, &w))
 		return w.Annotations[v1alpha1.AnnotationLastRequest] != ""
 	}, 5*time.Second, 20*time.Millisecond, "the held connection must stamp the request annotation")
 
@@ -180,7 +180,7 @@ func TestServer_IgnoresItsOwnSlice(t *testing.T) {
 	s, _ := startServer(t, pausedWorkload("api", port, time.Minute), own)
 
 	addr, err := s.readyBackend(context.Background(), route{
-		workload: types.NamespacedName{Namespace: "sandbox", Name: "api"}, service: "api", portName: "http",
+		workload: types.NamespacedName{Namespace: "dev", Name: "api"}, service: "api", portName: "http",
 	})
 
 	require.NoError(t, err)
@@ -194,7 +194,7 @@ func TestServer_WaitsForAReadyPod(t *testing.T) {
 	s, _ := startServer(t, pausedWorkload("api", port, time.Minute), starting)
 
 	addr, err := s.readyBackend(context.Background(), route{
-		workload: types.NamespacedName{Namespace: "sandbox", Name: "api"}, service: "api", portName: "http",
+		workload: types.NamespacedName{Namespace: "dev", Name: "api"}, service: "api", portName: "http",
 	})
 
 	require.NoError(t, err)
@@ -204,14 +204,14 @@ func TestServer_WaitsForAReadyPod(t *testing.T) {
 func TestServer_ClosesAfterMaxWait(t *testing.T) {
 	port := freePort(t)
 	startServer(t, pausedWorkload("slow", port, 300*time.Millisecond))
-	before := testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("sandbox", "slow", "timeout"))
+	before := testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("dev", "slow", "timeout"))
 
 	conn := dial(t, port)
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
 	_, err := conn.Read(make([]byte, 1))
 
 	assert.ErrorIs(t, err, io.EOF, "a workload that isn't Ready within maxWait gets its connection closed")
-	assert.Equal(t, before+1, testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("sandbox", "slow", "timeout")))
+	assert.Equal(t, before+1, testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("dev", "slow", "timeout")))
 }
 
 // Every connection waiting on a slow wake times out together, so they share
@@ -246,7 +246,7 @@ func TestServer_ServesThePageToABrowser(t *testing.T) {
 	w := pausedWorkload("api", port, time.Minute)
 	w.Status.Pause = &v1alpha1.PauseStatus{PausedAt: ptr.To(metav1.NewTime(time.Now().Add(-3 * time.Hour)))}
 	_, c := startServer(t, w)
-	before := testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("sandbox", "api", "page"))
+	before := testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("dev", "api", "page"))
 
 	conn := dial(t, port)
 	_, err := conn.Write([]byte(browserGET))
@@ -261,9 +261,9 @@ func TestServer_ServesThePageToABrowser(t *testing.T) {
 	assert.Contains(t, string(body), "<title>Waking up api</title>")
 	assert.Contains(t, string(body), "<header>api</header>", "the address the browser asked for")
 	assert.Contains(t, string(body), "<dd>3 hours ago</dd>", "how long it was paused")
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "sandbox", Name: "api"}, w))
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "dev", Name: "api"}, w))
 	assert.NotEmpty(t, w.Annotations[v1alpha1.AnnotationLastRequest], "the page still wakes the workload")
-	assert.Equal(t, before+1, testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("sandbox", "api", "page")))
+	assert.Equal(t, before+1, testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("dev", "api", "page")))
 }
 
 // In the moment between a pod being Ready and the operator routing traffic
@@ -396,7 +396,7 @@ func eventCount(r *events.FakeRecorder, reason string) int {
 func TestServer_ReplicasReportOneWake(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
-	key := types.NamespacedName{Namespace: "sandbox", Name: "api"}
+	key := types.NamespacedName{Namespace: "dev", Name: "api"}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pausedWorkload("api", freePort(t), time.Minute)).Build()
 	stale := interceptor.NewClient(c, staleReads(t, c, key))
 	now := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
@@ -420,7 +420,7 @@ func TestServer_ReplicasReportOneWake(t *testing.T) {
 func TestServer_StampsDespiteAConflict(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
-	key := types.NamespacedName{Namespace: "sandbox", Name: "api"}
+	key := types.NamespacedName{Namespace: "dev", Name: "api"}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pausedWorkload("api", freePort(t), time.Minute)).Build()
 	stale := interceptor.NewClient(c, staleReads(t, c, key))
 
@@ -449,7 +449,7 @@ func TestServer_LeavesARecentStampAlone(t *testing.T) {
 	recorder := events.NewFakeRecorder(10)
 	s := NewServer(c, recorder, "127.0.0.1")
 	s.now = func() time.Time { return now }
-	key := types.NamespacedName{Namespace: "sandbox", Name: "api"}
+	key := types.NamespacedName{Namespace: "dev", Name: "api"}
 
 	require.NoError(t, s.wake(context.Background(), route{workload: key, service: "api"}))
 

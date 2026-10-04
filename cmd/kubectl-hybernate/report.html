@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Workload scan: {{.Cluster}}</title>
+<style>
+:root {
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --bg: #ffffff;
+  --text: #000000;
+  --muted: #6f6f6f;
+  --faint: #b4b4b4;
+  --line: #ececec;
+  --track: #f6f6f6;
+  --amber: #f5a623;
+  --green: #16a34a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --text: #ffffff;
+    --muted: #8f8f8f;
+    --faint: #4a4a4a;
+    --line: #1c1c1c;
+    --track: #0d0d0d;
+    --amber: #f5b041;
+    --green: #22c55e;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+header, footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px 24px;
+  padding: 22px 32px; font: 12.5px var(--mono); color: var(--muted); }
+footer { border-top: 1px solid var(--line); margin-top: 72px; }
+footer a { display: inline-flex; align-items: center; gap: 7px; color: inherit; text-decoration: none; }
+footer a:hover { color: var(--text); }
+footer svg { width: 13px; height: 13px; }
+main { max-width: 1120px; margin: 0 auto; padding: 40px 32px 0; }
+h1 { margin: 0 0 14px; font: 600 30px/1.2 var(--mono); letter-spacing: -.02em; }
+.lede { margin: 0 0 6px; max-width: 680px; color: var(--muted); font-size: 15px; line-height: 1.6; }
+.prices { margin: 0; color: var(--muted); font: 12.5px var(--mono); }
+.headline { margin: 48px 0 0; padding: 32px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 32px 48px; }
+.figure b { display: block; font: 600 56px/1 var(--mono); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.figure span { display: block; margin-top: 12px; font: 500 14px var(--mono); color: var(--text); }
+.figure small { display: block; margin-top: 4px; font: 13px/1.5 var(--sans); color: var(--muted); }
+.facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; margin: 28px 0 0; padding-top: 24px; border-top: 1px solid var(--line); }
+.facts div { font: 600 22px var(--mono); font-variant-numeric: tabular-nums; }
+.facts span { display: block; margin-top: 6px; font: 13px/1.5 var(--sans); color: var(--muted); }
+h2 { margin: 64px 0 6px; font: 600 13px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+h2 + p { margin: 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.6; max-width: 720px; }
+.scroll { overflow: auto; margin-top: 14px; max-height: 560px; border-bottom: 1px solid var(--line); }
+.scroll table tbody tr:last-child td { border-bottom: 0; }
+.count { margin: 14px 0 0; font: 12.5px var(--mono); color: var(--muted); }
+.tools { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
+.tools .count { margin: 0; }
+.legend { display: grid; grid-template-columns: 80px 1fr; gap: 6px 16px; margin: 18px 0 0; max-width: 760px;
+  font-size: 13.5px; line-height: 1.55; color: var(--muted); }
+.legend dt { font: 500 12px var(--mono); color: var(--text); padding-top: 2px; }
+.legend dd { margin: 0; }
+.legend { grid-template-columns: 110px 1fr; }
+th .tip { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; cursor: help; }
+.hub { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 24px 40px; margin: 40px 0 0;
+  padding: 28px 32px; border-radius: 10px; background: var(--text); color: var(--bg); }
+.hub h3 { margin: 0 0 10px; font: 600 19px/1.35 var(--mono); letter-spacing: -.01em; }
+.hub p { margin: 0; max-width: 620px; font-size: 14.5px; line-height: 1.65; opacity: .78; }
+.hub a { display: inline-flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 7px;
+  background: var(--bg); color: var(--text); font: 600 13px var(--mono); text-decoration: none; white-space: nowrap; }
+.hub a:hover { opacity: .88; }
+.hub small { display: block; margin-top: 10px; text-align: center; font: 12px var(--mono); opacity: .7; }
+table { width: 100%; border-collapse: collapse; font: 12.5px var(--mono); font-variant-numeric: tabular-nums; }
+th { position: sticky; top: 0; background: var(--bg); padding: 0 14px 10px 0; text-align: left; font-weight: 500;
+  font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); white-space: nowrap;
+  border-bottom: 1px solid var(--line); }
+th button { all: unset; cursor: pointer; }
+th button:hover, th[aria-sort] button { color: var(--text); }
+th[aria-sort="ascending"] button::after { content: " \2191"; }
+th[aria-sort="descending"] button::after { content: " \2193"; }
+td { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.n, th.n { text-align: right; }
+.sub { display: block; margin-top: 4px; color: var(--muted); font: 12.5px/1.45 var(--sans); }
+.because { display: block; margin: 4px 0 0 15px; color: var(--muted); font: 12.5px/1.45 var(--sans); min-width: 200px; max-width: 320px; }
+td.ref { white-space: nowrap; }
+.state { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+.idle .dot { background: var(--amber); }
+.active .dot { background: var(--green); }
+.paused .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--text); }
+.filter { width: 100%; max-width: 320px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--text); font: 13px var(--mono); }
+.filter:focus { outline: none; border-color: var(--muted); }
+pre.shell .line::before { content: "$ "; color: var(--faint); user-select: none; }
+pre.shell .sh-cmd { font-weight: 600; }
+pre.shell .sh-flag { color: var(--muted); }
+pre.shell .sh-key { color: var(--text); }
+pre.shell .sh-val { color: var(--green); }
+pre { margin: 14px 0 0; padding: 16px 18px; background: var(--track); border-radius: 6px; overflow-x: auto;
+  font: 12.5px/1.7 var(--mono); }
+ul.plain { margin: 0; padding: 0 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.7; max-width: 820px; }
+.method p { margin: 0 0 12px; max-width: 760px; font-size: 14px; line-height: 1.65; color: var(--muted); }
+.empty { color: var(--muted); font-size: 14px; }
+@media (max-width: 640px) {
+  header, footer { padding: 18px 20px; }
+  main { padding: 28px 20px 0; }
+  .figure b { font-size: 40px; }
+  .facts { grid-template-columns: repeat(2, 1fr); }
+  .hub { grid-template-columns: 1fr; padding: 24px; }
+  .legend { grid-template-columns: 1fr; }
+}
+@media print {
+  :root { --bg: #fff; --text: #000; --muted: #555; --line: #ddd; --track: #f4f4f4; }
+  .filter, th button::after { display: none; }
+  .scroll { max-height: none; overflow: visible; }
+  .hub { background: none; color: #000; border: 1px solid #000; }
+  .hub a { border: 1px solid #000; }
+  th { position: static; }
+  tr { break-inside: avoid; }
+  h2 { break-after: avoid; }
+  main { max-width: none; padding: 0; }
+  footer { margin-top: 32px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <span>kubectl hybernate scan</span>
+  <span>{{.Cluster}} &middot; {{.ScannedAt}}</span>
+</header>
+<main>
+  <h1>Workload scan</h1>
+  <p class="lede">{{.Basis}}</p>
+  <p class="prices">{{.Prices}}</p>
+
+  <section class="headline">
+    <div class="figures">
+      {{range .Headline.Figures}}<div class="figure"><b>{{.Value}}</b><span>{{.Label}}</span>{{if .Detail}}<small>{{.Detail}}</small>{{end}}</div>{{end}}
+    </div>
+    {{if .Facts}}
+    <div class="facts">
+      {{range .Facts}}<div>{{.Value}}<span>{{.Label}}</span></div>{{end}}
+    </div>
+    {{end}}
+  </section>
+
+  <aside class="hub">
+    <div>
+      <h3>Turn this estimate into savings you can show finance.</h3>
+      <p>This report covers one cluster, at list prices, from one scan. Hybernate Hub shows every cluster together, records what Hybernate actually pauses, checks it against your cloud bill, and keeps the history, so the number you report is the one on the invoice.</p>
+    </div>
+    <div>
+      <a href="{{.HubURL}}">Try Hybernate Hub &rarr;</a>
+      <small>Free for up to 2 clusters</small>
+    </div>
+  </aside>
+
+
+  {{if .Namespaces}}
+  <h2>By namespace</h2>
+  <p>Where the cost is, and{{if .History}} what pausing would free, by what history shows{{else}} what's idle right now{{end}}.</p>
+  <div class="tools">
+    <p class="count" data-count="namespaces">{{len .Namespaces}} {{if eq (len .Namespaces) 1}}namespace{{else}}namespaces{{end}}; select a column to sort</p>
+    <input class="filter" type="search" placeholder="Filter by namespace" aria-label="Filter namespaces" data-filter="namespaces">
+  </div>
+  <div class="scroll">
+    <table data-sortable id="namespaces">
+      <thead><tr>
+        <th><button type="button">Namespace</button></th>
+        <th class="n"><button type="button">Workloads</button></th>
+        <th class="n"><button type="button">Idle now</button></th>
+        <th class="n"><button type="button">Cost / month</button></th>
+        {{if .Saving}}<th class="n"><button type="button" class="tip" title="{{.Tips.Saved}}">Saved this month</button></th>{{end}}
+        {{if .CouldSave}}<th class="n"><button type="button" class="tip" title="{{.Tips.CouldSave}}">Could save / month</button></th>{{end}}
+      </tr></thead>
+      <tbody>
+        {{range .Namespaces}}<tr>
+          <td>{{.Namespace}}</td>
+          <td class="n" data-v="{{.Workloads}}">{{.Workloads}}</td>
+          <td class="n" data-v="{{.Idle}}">{{.Idle}}</td>
+          <td class="n" data-v="{{.CostSort}}">{{.Cost}}</td>
+          {{if $.Saving}}<td class="n" data-v="{{.SavedSort}}">{{.Saved}}</td>{{end}}
+          {{if $.CouldSave}}<td class="n" data-v="{{.CouldSaveSort}}">{{.CouldSave}}</td>{{end}}
+        </tr>{{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+
+  <h2>Workloads</h2>
+  <p>Every Deployment and StatefulSet in the cluster: what each is doing right now, what Hybernate saves pausing the live ones, and what pausing the rest could save.</p>
+  {{if .Workloads}}
+  <div class="tools">
+    <p class="count" data-count="workloads">{{len .Workloads}} {{if eq (len .Workloads) 1}}workload{{else}}workloads{{end}}; select a column to sort</p>
+    <input class="filter" type="search" placeholder="Filter by name, namespace, or state" aria-label="Filter workloads" data-filter="workloads">
+  </div>
+  <div class="scroll">
+    <table data-sortable id="workloads">
+      <thead><tr>
+        <th><button type="button">Workload</button></th>
+        <th><button type="button">State</button></th>
+        <th class="n"><button type="button">Cost / month</button></th>
+        {{if .Slept}}<th class="n"><button type="button" class="tip" title="{{.Tips.Slept}}">Slept this month</button></th>{{end}}
+        {{if .Saving}}<th class="n"><button type="button" class="tip" title="{{.Tips.Saved}}">Saved this month</button></th>{{end}}
+        {{if .Sleep}}<th class="n"><button type="button" class="tip" title="{{.Tips.CouldSleep}}">Could sleep</button></th>{{end}}
+        {{if .CouldSave}}<th class="n"><button type="button" class="tip" title="{{.Tips.CouldSave}}">Could save / month</button></th>{{end}}
+      </tr></thead>
+      <tbody>
+        {{range .Workloads}}<tr>
+          <td class="ref">{{.Workload}}<span class="sub">{{.Namespace}}</span></td>
+          <td><span class="state {{.StateClass}}"><span class="dot"></span>{{.State}}</span>{{if .Because}}<span class="because">{{.Because}}</span>{{end}}</td>
+          <td class="n" data-v="{{.CostSort}}">{{.Cost}}</td>
+          {{if $.Slept}}<td class="n" data-v="{{.SleptSort}}">{{.Slept}}{{if ne .SleptWakes "-"}}<span class="sub">{{.SleptWakes}} {{if eq .SleptWakes "1"}}wake{{else}}wakes{{end}}<br>{{.SleptSince}}</span>{{end}}</td>{{end}}
+          {{if $.Saving}}<td class="n" data-v="{{.SavedSort}}">{{.Saved}}</td>{{end}}
+          {{if $.Sleep}}<td class="n" data-v="{{.CouldSleepSort}}">{{.CouldSleep}}{{if ne .Wakes "-"}}<span class="sub">{{.Wakes}} {{if eq .Wakes "1"}}wake{{else}}wakes{{end}}{{if .Since}}<br>{{.Since}}{{end}}</span>{{end}}</td>{{end}}
+          {{if $.CouldSave}}<td class="n" data-v="{{.CouldSaveSort}}">{{.CouldSave}}</td>{{end}}
+        </tr>{{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="empty">None could be judged; the notes say why.</p>
+  {{end}}
+
+  {{if .Dependencies}}
+  <h2>Dependencies</h2>
+  <p>What each workload connects to. Hybernate wakes a dependency with the workloads that need it, and keeps it up while they are.</p>
+  <p class="count">{{len .Dependencies}} found; select a column to sort</p>
+  <div class="scroll">
+    <table data-sortable>
+      <thead><tr>
+        <th><button type="button">Workload</button></th>
+        <th><button type="button">Depends on</button></th>
+        <th><button type="button">Found</button></th>
+        <th><button type="button">Status</button></th>
+      </tr></thead>
+      <tbody>{{range .Dependencies}}<tr>
+        <td class="ref">{{.Workload}}</td>
+        <td class="ref">{{.Target}}</td>
+        <td>{{.Found}}</td>
+        <td>{{.Status}}</td>
+      </tr>{{end}}</tbody>
+    </table>
+  </div>
+  {{end}}
+
+  {{if .Notes}}
+  <h2>Notes</h2>
+  <ul class="plain">{{range .Notes}}<li>{{.}}</li>{{end}}</ul>
+  {{end}}
+
+  <h2>What these numbers mean</h2>
+  <div class="method">{{range .Method}}<p>{{.}}</p>{{end}}</div>
+  {{if .Terms}}<dl class="legend">{{range .Terms}}<dt>{{.Name}}</dt><dd>{{.Meaning}}</dd>{{end}}</dl>{{end}}
+
+  {{if .NextSteps}}
+  <h2>Next steps</h2>
+  <p>Opt a workload in, measuring first so nothing is paused, then let Hybernate pause it once the measurements look right.</p>
+  <pre class="shell">{{range .NextSteps}}{{.}}
+{{end}}</pre>
+  {{end}}
+</main>
+<footer>
+  <span>Generated by kubectl hybernate scan &middot; Every cluster together, with verified savings: <a href="{{.HubURL}}">Hybernate Hub</a></span>
+  <a href="https://okedeji.io/hybernate"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="{{.Mark}}"/></svg>Hybernate</a>
+</footer>
+<script>
+document.querySelectorAll("table[data-sortable]").forEach(function (table) {
+  var heads = table.querySelectorAll("th");
+  heads.forEach(function (th, col) {
+    var button = th.querySelector("button");
+    if (!button) return;
+    button.addEventListener("click", function () {
+      var ascending = th.getAttribute("aria-sort") !== "ascending";
+      heads.forEach(function (h) { h.removeAttribute("aria-sort"); });
+      th.setAttribute("aria-sort", ascending ? "ascending" : "descending");
+      var body = table.tBodies[0];
+      var rows = Array.prototype.slice.call(body.rows);
+      rows.sort(function (a, b) {
+        var x = a.cells[col], y = b.cells[col];
+        var xv = x.dataset.v !== undefined ? parseFloat(x.dataset.v) : x.textContent.trim().toLowerCase();
+        var yv = y.dataset.v !== undefined ? parseFloat(y.dataset.v) : y.textContent.trim().toLowerCase();
+        var order = xv < yv ? -1 : xv > yv ? 1 : 0;
+        return ascending ? order : -order;
+      });
+      rows.forEach(function (row) { body.appendChild(row); });
+    });
+  });
+});
+document.querySelectorAll("[data-count]").forEach(function (count) { count.dataset.all = count.textContent; });
+document.querySelectorAll("input[data-filter]").forEach(function (input) {
+  var table = document.getElementById(input.dataset.filter);
+  input.addEventListener("input", function () {
+    var words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+    var rows = table.tBodies[0].rows, shown = 0;
+    Array.prototype.forEach.call(rows, function (row) {
+      var text = row.textContent.toLowerCase();
+      row.hidden = !words.every(function (w) { return text.indexOf(w) >= 0; });
+      if (!row.hidden) shown++;
+    });
+    var count = document.querySelector('[data-count="' + input.dataset.filter + '"]');
+    if (count) count.textContent = words.length ? shown + " of " + rows.length + " shown" : count.dataset.all;
+  });
+});
+</script>
+</body>
+</html>

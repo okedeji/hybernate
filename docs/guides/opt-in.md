@@ -7,7 +7,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: checkout-api
-  namespace: sandbox-42
+  namespace: preview-42
   labels:
     hybernate.io/managed: "true"
   annotations:
@@ -25,7 +25,7 @@ Label the namespace to opt in every Deployment and StatefulSet in it. Annotation
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: sandbox-42
+  name: preview-42
   labels:
     hybernate.io/managed: "true"
   annotations:
@@ -33,7 +33,7 @@ metadata:
     hybernate.io/idle-after: "2h"
 ```
 
-This covers sandbox and preview namespaces, and third-party charts that don't let you add labels to their workloads. To leave one workload out of a managed namespace, label it `hybernate.io/ignore: "true"`.
+This covers dev and preview namespaces, and third-party charts that don't let you add labels to their workloads. To leave one workload out of a managed namespace, label it `hybernate.io/ignore: "true"`.
 
 ## Settings
 
@@ -70,8 +70,8 @@ So a namespace can measure everything with `dry-run: "true"` while one workload 
 Start with `hybernate.io/dry-run: "true"`. Hybernate runs each workload's activity clock without pausing anything, and keeps a summary of the pauses it would have made in its ManagedWorkload's `status.dryRun`: how many, how long it would have slept, and what that would have freed. `kubectl hybernate scan` lists the same for every workload in dry-run. See [Dry Run](dry-run.md#what-dry-run-measured). When you're ready:
 
 ```bash
-kubectl hybernate enable checkout-api -n sandbox-42
-kubectl hybernate enable --all -n sandbox-42     # every workload in the namespace
+kubectl hybernate enable checkout-api -n preview-42
+kubectl hybernate enable --all -n preview-42     # every workload in the namespace
 ```
 
 `enable` removes the dry-run annotation, or, when the dry-run comes from the namespace, sets the workload's own to `"false"`. Removing the annotation and setting `"false"` mean the same.
