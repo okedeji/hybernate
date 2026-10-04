@@ -1170,7 +1170,7 @@ spec:
 				cmd.Stdin = strings.NewReader(manifest)
 				_, _ = utils.Run(cmd)
 			})
-			for _, d := range []string{"keda-operator", "keda-operator-metrics-apiserver", "keda-admission-webhooks"} {
+			for _, d := range []string{"keda-operator", "keda-metrics-apiserver", "keda-admission"} {
 				_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+d, "-n", "keda",
 					"--timeout=3m"))
 				Expect(err).NotTo(HaveOccurred())
