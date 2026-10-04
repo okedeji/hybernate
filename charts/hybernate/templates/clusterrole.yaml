@@ -5,48 +5,35 @@ metadata:
   labels:
     {{- include "hybernate.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [""]
-    resources: [configmaps]
-    verbs: [get, list, watch, create, update, patch]
-  - apiGroups: [""]
-    resources: [events]
-    verbs: [create, patch]
-  - apiGroups: [events.k8s.io]
-    resources: [events]
-    verbs: [create, patch]
-  - apiGroups: [""]
-    resources: [namespaces, nodes, services]
-    verbs: [get, list, watch]
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get, list]
-  - apiGroups: [discovery.k8s.io]
-    resources: [endpointslices]
-    verbs: [create, delete, get, list, patch, update, watch]
-  - apiGroups: [""]
-    resources: [persistentvolumeclaims]
-    verbs: [get, list, watch]
-  - apiGroups: [apps]
-    resources: [deployments, statefulsets]
-    verbs: [get, list, watch]
-  - apiGroups: [apps]
-    resources: [deployments/scale, statefulsets/scale]
-    verbs: [get, update]
-  - apiGroups: [autoscaling]
-    resources: [horizontalpodautoscalers]
-    verbs: [get, list, watch]
-  - apiGroups: [keda.sh]
-    resources: [scaledobjects]
-    verbs: [get, list, patch, watch]
-  - apiGroups: [hybernate.io]
-    resources: [managedworkloads]
-    verbs: [create, delete, get, list, patch, update, watch]
-  - apiGroups: [hybernate.io]
-    resources: [managedworkloads/finalizers]
-    verbs: [update]
-  - apiGroups: [hybernate.io]
-    resources: [managedworkloads/status]
-    verbs: [get, patch, update]
-  - apiGroups: [metrics.k8s.io]
-    resources: [pods]
-    verbs: [get, list]
+  {{- include "hybernate.managerClusterRules" . | nindent 2 }}
+  {{- if not .Values.watchNamespaces }}
+  {{- include "hybernate.managerRules" . | nindent 2 }}
+  {{- end }}
+{{- range .Values.watchNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "hybernate.fullname" $ }}-manager
+  namespace: {{ . }}
+  labels:
+    {{- include "hybernate.labels" $ | nindent 4 }}
+rules:
+  {{- include "hybernate.managerRules" $ | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "hybernate.fullname" $ }}-manager
+  namespace: {{ . }}
+  labels:
+    {{- include "hybernate.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "hybernate.fullname" $ }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hybernate.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}

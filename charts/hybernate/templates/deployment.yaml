@@ -44,6 +44,12 @@ spec:
             {{- end }}
             {{- end }}
             - --zap-log-level={{ .Values.logLevel }}
+            {{- with .Values.watchNamespaces }}
+            - --watch-namespaces={{ join "," . }}
+            {{- end }}
+            {{- with .Values.protectedNamespaces }}
+            - --protected-namespaces={{ join "," . }}
+            {{- end }}
             {{- with .Values.prometheus.url }}
             - --prometheus-url={{ . }}
             {{- end }}
