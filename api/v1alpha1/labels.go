@@ -20,9 +20,9 @@ package v1alpha1
 // Any other value, "True" and "yes" included, leaves it off.
 const True = "true"
 
-// FieldManager is the name the API server records Hybernate's writes under,
-// such as the replica count it pauses, so a GitOps tool can be told to
-// leave them alone.
+// FieldManager is the name Hybernate's writes, such as the replica count it
+// pauses, are made under, so the API server attributes them to it where it
+// records who set a field.
 const FieldManager = "hybernate"
 
 const (

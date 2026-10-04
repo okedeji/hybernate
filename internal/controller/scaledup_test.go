@@ -84,7 +84,7 @@ func TestWakeOnScaleUp_ByGitOps(t *testing.T) {
 	tests := []struct {
 		manager, tool, fix string
 	}{
-		{"argocd-controller", "Argo CD", "managedFieldsManagers: - hybernate"},
+		{"argocd-controller", "Argo CD", "jsonPointers: [/spec/replicas]"},
 		{"kustomize-controller", "Flux", "Leave replicas out of the workload's manifest"},
 	}
 	for _, tt := range tests {

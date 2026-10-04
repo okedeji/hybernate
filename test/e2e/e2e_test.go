@@ -1099,8 +1099,6 @@ spec:
 			Eventually(func() (string, error) {
 				return jsonpath("managedworkload", gitOpsName, gitOpsNamespace, "{.status.phase}")
 			}, 4*time.Minute, 5*time.Second).Should(Equal("Paused"))
-			Expect(jsonpath("deployment", gitOpsName, gitOpsNamespace, "{.metadata.managedFields[*].manager}")).
-				To(ContainSubstring("hybernate"), "the pause is recorded under Hybernate's field manager")
 
 			By("syncing from Git, as Argo CD would")
 			Expect(syncFromGit()).To(Succeed())
@@ -1110,7 +1108,7 @@ spec:
 				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace,
 					`{.status.conditions[?(@.type=="GitOpsConflict")].status}`)).To(Equal("True"))
 				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace,
-					`{.status.conditions[?(@.type=="GitOpsConflict")].message}`)).To(ContainSubstring("managedFieldsManagers"))
+					`{.status.conditions[?(@.type=="GitOpsConflict")].message}`)).To(ContainSubstring("/spec/replicas"))
 				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace, "{.status.lastScaledUp.by}")).
 					To(Equal("argocd-controller"))
 				g.Expect(jsonpath("managedworkload", gitOpsName, gitOpsNamespace, "{.status.lastScaledUp.gitOps}")).

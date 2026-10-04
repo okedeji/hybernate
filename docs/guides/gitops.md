@@ -18,17 +18,18 @@ along with a `GitOpsConflict` warning event. Hybernate waits an hour before paus
 
 Before you opt anything in, [`kubectl hybernate scan`](../getting-started/kubectl-plugin.md#scan-a-cluster) lists the workloads whose replicas are set from Git, by tool.
 
-Hybernate's writes are recorded under the field manager `hybernate`, which is what the Argo CD setting below refers to.
-
 ## Argo CD
 
-Have Argo CD ignore the replicas Hybernate sets, once for every app, in the `argocd-cm` ConfigMap:
+Have Argo CD ignore the replicas of Deployments and StatefulSets, once for every app, in the `argocd-cm` ConfigMap:
 
 ```yaml title="argocd-cm" linenums="1"
 data:
-  resource.customizations.ignoreDifferences.all: |
-    managedFieldsManagers:
-      - hybernate
+  resource.customizations.ignoreDifferences.apps_Deployment: |
+    jsonPointers:
+      - /spec/replicas
+  resource.customizations.ignoreDifferences.apps_StatefulSet: |
+    jsonPointers:
+      - /spec/replicas
 ```
 
 Then add `RespectIgnoreDifferences=true` to each app's sync options, so a sync leaves them too and not only the diff:
@@ -40,15 +41,9 @@ spec:
       - RespectIgnoreDifferences=true
 ```
 
-Ignoring by field manager leaves Argo CD in charge of every other field, and of replicas changed by anything but Hybernate. If your apps already ignore `/spec/replicas`, for example for an HPA, that covers Hybernate as well:
+This is the setting Argo CD's own docs give for an HPA, so apps that already have it need nothing more. To keep it to some apps, put the same `jsonPointers` in their `spec.ignoreDifferences` instead.
 
-```yaml
-spec:
-  ignoreDifferences:
-    - group: apps
-      kind: Deployment
-      jsonPointers: [/spec/replicas]
-```
+Argo CD can also ignore fields by the field manager that set them, but not for this: when a server-side-applied object is scaled through its scale subresource, Kubernetes drops the field's owner without recording a new one, so the replicas Hybernate sets aren't attributed to any manager.
 
 ## Flux
 

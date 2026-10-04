@@ -75,7 +75,7 @@ func TestReplicasWriter(t *testing.T) {
 }
 
 func TestFix(t *testing.T) {
-	assert.Contains(t, Fix(ArgoCD), "      - hybernate", "names Hybernate's field manager")
+	assert.Contains(t, Fix(ArgoCD), "    jsonPointers: [/spec/replicas]")
 	assert.NotEmpty(t, Fix(Flux))
 	assert.Empty(t, Fix(""))
 }

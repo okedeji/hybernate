@@ -153,8 +153,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Writes are recorded under Hybernate's own field manager, so a GitOps
-	// tool can be told to leave the replicas it pauses.
+	// Writes are made under Hybernate's own field manager, so the replicas
+	// it pauses are attributed to it rather than to the binary's name.
 	c := client.WithFieldOwner(mgr.GetClient(), v1alpha1.FieldManager)
 	readyz := healthz.Ping
 	if runDoorman {

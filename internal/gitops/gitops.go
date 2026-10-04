@@ -25,8 +25,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
 
 // Tool is a GitOps tool that applies workloads from Git.
@@ -102,10 +100,11 @@ func Fix(t Tool) []string {
 	switch t {
 	case ArgoCD:
 		return []string{
-			"Have Argo CD ignore the replicas Hybernate sets, once for every app, in the argocd-cm ConfigMap:",
-			"  resource.customizations.ignoreDifferences.all: |",
-			"    managedFieldsManagers:",
-			"      - " + v1alpha1.FieldManager,
+			"Have Argo CD ignore replicas, as for an HPA, once for every app, in the argocd-cm ConfigMap:",
+			"  resource.customizations.ignoreDifferences.apps_Deployment: |",
+			"    jsonPointers: [/spec/replicas]",
+			"  resource.customizations.ignoreDifferences.apps_StatefulSet: |",
+			"    jsonPointers: [/spec/replicas]",
 			"and add RespectIgnoreDifferences=true to each app's syncPolicy.syncOptions, so syncs leave them too.",
 		}
 	case Flux:
