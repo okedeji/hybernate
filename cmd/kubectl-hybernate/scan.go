@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -33,7 +32,6 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -48,8 +46,7 @@ const hubURL = "https://okedeji.io/hybernate/hub"
 const defaultCPUThreshold = 10
 
 type scanOptions struct {
-	contexts     []string
-	allContexts  bool
+	context      string
 	namespaces   []string
 	exclude      []string
 	output       string
@@ -60,18 +57,8 @@ type scanOptions struct {
 	window       string
 	idleAfter    time.Duration
 	promURL      string
-}
-
-// clusterScan is one context's scan, or why it couldn't be scanned.
-type clusterScan struct {
-	// Context is the kubeconfig context; Cluster is how it's shown.
-	Context string `json:"context"`
-	Cluster string `json:"cluster"`
-	*discovery.ClusterReport
-	// HistoryAccess is what an admin can run to let the user read the
-	// cluster's Prometheus, when the scan found one it wasn't allowed to.
-	HistoryAccess []string `json:"historyAccess,omitempty"`
-	Error         string   `json:"error,omitempty"`
+	html         string
+	open         bool
 }
 
 // prices are what costs were calculated with, and whether they're the
@@ -79,13 +66,47 @@ type clusterScan struct {
 type prices struct {
 	CPUPerHour    float64 `json:"cpuPerHour"`
 	MemoryPerHour float64 `json:"memoryPerHour"`
-	Assumed       bool    `json:"assumed"`
+	CPUAssumed    bool    `json:"cpuAssumed"`
+	MemoryAssumed bool    `json:"memoryAssumed"`
 }
 
+// sentence says what costs were priced at, and which prices are the
+// built-in assumption rather than the user's own.
+func (p prices) sentence() string {
+	cpu := fmt.Sprintf("$%.3f per vCPU-hour", p.CPUPerHour)
+	memory := fmt.Sprintf("$%.3f per GiB-hour of memory", p.MemoryPerHour)
+	switch {
+	case p.CPUAssumed && p.MemoryAssumed:
+		return "Assumed list prices: " + cpu + " and " + memory + ", from AWS on-demand in us-east-1."
+	case p.CPUAssumed:
+		return "Your memory price, " + memory + ", and the assumed CPU price, " + cpu + " (AWS on-demand, us-east-1)."
+	case p.MemoryAssumed:
+		return "Your CPU price, " + cpu + ", and the assumed memory price, " + memory + " (AWS on-demand, us-east-1)."
+	default:
+		return "Your prices: " + cpu + " and " + memory + "."
+	}
+}
+
+// scanResult is a scan of one cluster, with the rules and prices it was
+// judged and priced with.
 type scanResult struct {
-	Clusters []clusterScan    `json:"clusters"`
-	Prices   prices           `json:"prices"`
-	Totals   discovery.Totals `json:"totals"`
+	ScannedAt time.Time `json:"scannedAt"`
+	// Context is the kubeconfig context; Cluster is how it's shown.
+	Context  string   `json:"context"`
+	Cluster  string   `json:"cluster"`
+	Settings settings `json:"settings"`
+	Prices   prices   `json:"prices"`
+	*discovery.ClusterReport
+	// HistoryAccess is what an admin can run to let the user read the
+	// cluster's Prometheus, when the scan found one it wasn't allowed to.
+	HistoryAccess []string `json:"historyAccess,omitempty"`
+}
+
+// settings are the rules the scan judged with, so a report can state them.
+type settings struct {
+	CPUThreshold int    `json:"cpuThreshold"`
+	IdleAfter    string `json:"idleAfter"`
+	Window       string `json:"window"`
 }
 
 func scanCmd() *cobra.Command {
@@ -95,13 +116,14 @@ func scanCmd() *cobra.Command {
 		memoryPrice:  cost.DefaultRates.MemoryPerHour,
 		window:       "7d",
 		idleAfter:    time.Hour,
+		open:         true,
 	}
 	cmd := &cobra.Command{
 		Use:   "scan",
 		Short: "Find idle workloads and what they cost",
-		Long: `Scan reads your clusters and shows which Deployments and StatefulSets look
-idle, what they reserve, and what pausing them could save. It only reads,
-with your own kubeconfig, and needs nothing installed in the cluster.
+		Long: `Scan reads a cluster and shows which Deployments and StatefulSets look idle,
+what they reserve, and what pausing them could save. It only reads, with
+your own kubeconfig, and needs nothing installed in the cluster.
 
 With a Prometheus in the cluster, found automatically and queried through
 the API server, it replays Hybernate's activity clock over the last week of
@@ -109,19 +131,26 @@ CPU and rollouts: how long each workload would have slept, how often it
 would have been woken, and what that would have freed. Without one, it
 judges from CPU right now.
 
+Run in a terminal, it also opens the report as a web page, to share.
+
 Examples:
   # Scan the current context
   kubectl hybernate scan
 
-  # Scan several clusters, with a combined total
-  kubectl hybernate scan --context staging --context sandboxes
-  kubectl hybernate scan --all-contexts
+  # Another cluster in your kubeconfig
+  kubectl hybernate scan --context staging
 
   # One namespace, as JSON
-  kubectl hybernate scan -n sandbox-42 -o json
+  kubectl hybernate scan -n preview-42 -o json
 
   # A month of history from a Prometheus outside the cluster
-  kubectl hybernate scan --window 30d --prometheus-url https://thanos.example.com`,
+  kubectl hybernate scan --window 30d --prometheus-url https://thanos.example.com
+
+  # Save the report to send around
+  kubectl hybernate scan --html workload-scan.html
+
+  # The terminal only
+  kubectl hybernate scan --open=false`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if opts.output != "table" && opts.output != "json" && opts.output != "yaml" {
@@ -134,39 +163,42 @@ Examples:
 			if opts.idleAfter <= 0 {
 				return errors.New("--idle-after must be more than zero")
 			}
-			contexts, err := scanContexts(opts)
+			result, err := scanCluster(cmd.Context(), window, opts)
 			if err != nil {
 				return err
 			}
-			result := scanResult{Prices: pricesFor(cmd, opts)}
-			for _, name := range contexts {
-				result.Clusters = append(result.Clusters, scanContext(cmd.Context(), name, window, opts))
+			result.ScannedAt = time.Now().UTC().Truncate(time.Second)
+			result.Settings = settings{CPUThreshold: opts.cpuThreshold, IdleAfter: opts.idleAfter.String(), Window: opts.window}
+			result.Prices = pricesFor(cmd, opts)
+			if err := writeScan(cmd.OutOrStdout(), result, opts); err != nil {
+				return err
 			}
-			nameClusters(result.Clusters)
-			result.Totals = combinedTotals(result.Clusters)
-			return writeScan(cmd.OutOrStdout(), result, opts)
+			return writeReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), result, opts)
 		},
 	}
-	cmd.Flags().StringSliceVar(&opts.contexts, "context", nil,
-		"Kubeconfig context to scan; repeat for several (defaults to the current one)")
-	cmd.Flags().BoolVar(&opts.allContexts, "all-contexts", false, "Scan every context in the kubeconfig")
+	cmd.Flags().StringVar(&opts.context, "context", "",
+		"Kubeconfig context of the cluster to scan (defaults to the current one)")
 	cmd.Flags().StringSliceVarP(&opts.namespaces, "namespace", "n", nil,
 		"Namespace to scan; repeat for several (defaults to all you can read)")
 	cmd.Flags().StringSliceVar(&opts.exclude, "exclude-namespaces", discovery.SystemNamespaces, "Namespaces to skip")
 	cmd.Flags().StringVarP(&opts.output, "output", "o", "table", "Output format: table, json, or yaml")
 	cmd.Flags().IntVar(&opts.limit, "limit", 25,
-		"Workloads to list per cluster in the table, most savings first (0 for all)")
+		"Workloads to list in the table, most savings first (0 for all)")
 	cmd.Flags().IntVar(&opts.cpuThreshold, "cpu-threshold", defaultCPUThreshold,
-		"CPU use, as a percentage of requests, below which a workload counts as idle")
+		"CPU use, as a percentage of requests, at which a workload counts as active; managed workloads use their own")
 	cmd.Flags().Float64Var(&opts.cpuPrice, "cpu-price", opts.cpuPrice, "Your price per vCPU-hour, in dollars")
 	cmd.Flags().Float64Var(&opts.memoryPrice, "memory-price", opts.memoryPrice,
 		"Your price per GiB-hour of memory, in dollars")
 	cmd.Flags().StringVar(&opts.window, "window", opts.window,
 		"How much Prometheus history to replay, such as 7d or 36h; 0 judges from CPU right now only")
 	cmd.Flags().DurationVar(&opts.idleAfter, "idle-after", opts.idleAfter,
-		"How long without activity before the replay pauses a workload, as Hybernate's idleAfter")
+		"How long without activity makes a workload idle, as Hybernate's idleAfter; managed workloads use their own")
 	cmd.Flags().StringVar(&opts.promURL, "prometheus-url", "",
 		"Prometheus API to read history from, such as Thanos or Mimir (defaults to one found in the cluster)")
+	cmd.Flags().StringVar(&opts.html, "html", "",
+		"Save the HTML report to this file, to share (defaults to a temporary file when it opens in a browser)")
+	cmd.Flags().BoolVar(&opts.open, "open", opts.open,
+		"Open the HTML report in your browser, when the table is shown in a terminal")
 	return cmd
 }
 
@@ -176,27 +208,9 @@ func pricesFor(cmd *cobra.Command, opts scanOptions) prices {
 	return prices{
 		CPUPerHour:    opts.cpuPrice,
 		MemoryPerHour: opts.memoryPrice,
-		Assumed:       !cmd.Flags().Changed("cpu-price") && !cmd.Flags().Changed("memory-price"),
+		CPUAssumed:    !cmd.Flags().Changed("cpu-price"),
+		MemoryAssumed: !cmd.Flags().Changed("memory-price"),
 	}
-}
-
-func scanContexts(opts scanOptions) ([]string, error) {
-	if !opts.allContexts {
-		if len(opts.contexts) > 0 {
-			return opts.contexts, nil
-		}
-		return []string{""}, nil
-	}
-	config, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
-	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
-	}
-	var names []string
-	for name := range config.Contexts {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return names, nil
 }
 
 // parseWindow reads a duration that may be in days, which
@@ -216,26 +230,24 @@ func parseWindow(s string) (time.Duration, error) {
 	return d, nil
 }
 
-func scanContext(ctx context.Context, contextName string, window time.Duration, opts scanOptions) clusterScan {
-	config, _, current, err := kubeConfigFor(contextName)
-	scan := clusterScan{Context: current}
+func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (scanResult, error) {
+	config, _, current, err := kubeConfigFor(opts.context)
 	if err != nil {
-		scan.Error = err.Error()
-		return scan
+		return scanResult{}, err
 	}
+	scan := scanResult{Context: current, Cluster: clusterName(current)}
 	c, err := client.New(config, client.Options{Scheme: scheme})
 	if err != nil {
-		scan.Error = fmt.Sprintf("creating client: %v", err)
-		return scan
+		return scanResult{}, fmt.Errorf("creating client: %w", err)
 	}
 	namespaces, err := discovery.Namespaces(ctx, c, opts.namespaces, opts.exclude)
 	if errors.Is(err, discovery.ErrCantListNamespaces) {
-		scan.Error = "you can't list namespaces in this cluster; name the ones to scan with -n"
-		return scan
+		return scanResult{}, fmt.Errorf("can't scan %s: to find its workloads, the scan first lists the cluster's "+
+			"namespaces, and your access there doesn't allow that; name the namespaces to scan with -n, or ask an "+
+			"admin to let you list namespaces", scan.Cluster)
 	}
 	if err != nil {
-		scan.Error = err.Error()
-		return scan
+		return scanResult{}, fmt.Errorf("listing namespaces in %s: %w", scan.Cluster, err)
 	}
 	var history *discovery.Prometheus
 	var historyNote string
@@ -261,8 +273,7 @@ func scanContext(ctx context.Context, contextName string, window time.Duration, 
 		IdleAfter:    opts.idleAfter,
 	})
 	if err != nil {
-		scan.Error = err.Error()
-		return scan
+		return scanResult{}, fmt.Errorf("scanning %s: %w", scan.Cluster, err)
 	}
 	if historyNote != "" {
 		report.Notes = append([]string{historyNote}, report.Notes...)
@@ -271,7 +282,7 @@ func scanContext(ctx context.Context, contextName string, window time.Duration, 
 		report.Notes = append(discovery.AccessNotes(ctx, c, namespaces[0]), report.Notes...)
 	}
 	scan.ClusterReport = report
-	return scan
+	return scan, nil
 }
 
 // historySource finds the Prometheus to replay history from, or says why
@@ -333,31 +344,6 @@ func bindingSubject(username string) string {
 	return "--user=" + username
 }
 
-func combinedTotals(clusters []clusterScan) discovery.Totals {
-	var t discovery.Totals
-	for _, c := range clusters {
-		if c.ClusterReport == nil {
-			continue
-		}
-		t.Workloads += c.Totals.Workloads
-		t.MonthlyCost += c.Totals.MonthlyCost
-		t.Paused += c.Totals.Paused
-		t.PausedHourlyCost += c.Totals.PausedHourlyCost
-		t.Idle += c.Totals.Idle
-		t.IdleCPUMillis += c.Totals.IdleCPUMillis
-		t.IdleMemoryBytes += c.Totals.IdleMemoryBytes
-		t.IdleHourlyCost += c.Totals.IdleHourlyCost
-		t.IdleMonthlyCost += c.Totals.IdleMonthlyCost
-		t.Replayed.Workloads += c.Totals.Replayed.Workloads
-		t.Replayed.Sleepers += c.Totals.Replayed.Sleepers
-		t.Replayed.SleepHours += c.Totals.Replayed.SleepHours
-		t.Replayed.Wakes += c.Totals.Replayed.Wakes
-		t.Replayed.Freed += c.Totals.Replayed.Freed
-		t.Replayed.MonthlyFreed += c.Totals.Replayed.MonthlyFreed
-	}
-	return t
-}
-
 func writeScan(w io.Writer, result scanResult, opts scanOptions) error {
 	switch opts.output {
 	case "json":
@@ -378,50 +364,38 @@ func writeScan(w io.Writer, result scanResult, opts scanOptions) error {
 
 func writeTable(w io.Writer, result scanResult, limit int) error {
 	p := &printer{w: w}
-	for _, c := range result.Clusters {
-		if c.ClusterReport == nil {
-			p.line("%s: not scanned: %s", c.Cluster, c.Error)
-			p.line("")
-			continue
+	namespaces := map[string]bool{}
+	for _, wl := range result.Workloads {
+		namespaces[wl.Namespace] = true
+	}
+	p.line("%s: %s in %s", result.Cluster, countOf(result.Totals.Workloads, "workload"),
+		countOf(len(namespaces), "namespace"))
+	p.line("")
+	writeHeadline(p, result.Totals, replayedOver(result.History))
+	judged, unjudged := splitJudged(result.Workloads)
+	if len(judged) > 0 {
+		writeWorkloads(p, judged, limit, result.Mode == discovery.ModeHistory)
+	}
+	writeDependencies(p, result.Workloads, limit)
+	notes := append(unjudgedNotes(unjudged), result.Notes...)
+	if len(notes) > 0 {
+		p.line("Notes:")
+		for _, n := range notes {
+			p.line("  - %s", n)
 		}
-		namespaces := map[string]bool{}
-		for _, wl := range c.Workloads {
-			namespaces[wl.Namespace] = true
-		}
-		p.line("%s: %s in %s", c.Cluster, countOf(c.Totals.Workloads, "workload"), countOf(len(namespaces), "namespace"))
 		p.line("")
-		writeHeadline(p, c.Totals, replayedOver(c.History))
-		judged, unjudged := splitJudged(c.Workloads)
-		if len(judged) > 0 {
-			writeWorkloads(p, judged, limit, c.Mode == discovery.ModeHistory)
-		}
-		writeMeasured(p, c.Workloads)
-		writeDependencies(p, c.Workloads)
-		notes := append(unjudgedNotes(unjudged), c.Notes...)
-		if len(notes) > 0 {
-			p.line("Notes:")
-			for _, n := range notes {
-				p.line("  - %s", n)
-			}
-			p.line("")
-		}
-		if len(c.HistoryAccess) > 0 {
-			p.line("To replay history, an admin can let you read Prometheus, and nothing else, with:")
-			for _, command := range c.HistoryAccess {
-				p.line("  %s", command)
-			}
-			p.line("Or pass --prometheus-url if Prometheus is reachable from your machine.")
-			p.line("")
-		}
 	}
-	if len(result.Clusters) > 1 {
-		p.line("All clusters:")
-		writeHeadline(p, result.Totals, "their history")
+	if len(result.HistoryAccess) > 0 {
+		p.line("To replay history, an admin can let you read Prometheus, and nothing else, with:")
+		for _, command := range result.HistoryAccess {
+			p.line("  %s", command)
+		}
+		p.line("Or pass --prometheus-url if Prometheus is reachable from your machine.")
+		p.line("")
 	}
-	if result.Prices.Assumed {
-		p.line("Costs use assumed list prices: $%.3f per vCPU-hour and $%.3f per GiB-hour of memory,",
-			result.Prices.CPUPerHour, result.Prices.MemoryPerHour)
-		p.line("from AWS on-demand in us-east-1. Pass --cpu-price and --memory-price for yours.")
+	if result.Prices.CPUAssumed || result.Prices.MemoryAssumed {
+		p.line("Costs use %s", lowerFirst(result.Prices.sentence()))
+		p.line("Pass --cpu-price and --memory-price for yours.")
 		p.line("")
 	}
 	if result.Totals.Idle > 0 && result.Totals.Replayed.Workloads == 0 {
@@ -430,8 +404,8 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 		p.line("")
 	}
 	writeNextSteps(p, result)
-	p.line("Hybernate Hub verifies savings against your cloud bill, with history across all your")
-	p.line("clusters. Free for up to 2 clusters: %s", hubURL)
+	p.line("See every cluster together, with savings checked against your cloud bill and kept as history:")
+	p.line("Hybernate Hub, free for up to 2 clusters: %s", hubURL)
 	return p.err
 }
 
@@ -439,6 +413,25 @@ func writeHeadline(p *printer, t discovery.Totals, replayed string) {
 	if t.Paused > 0 {
 		p.line("  Hybernate has %s paused right now, freeing %s an hour.",
 			countOf(t.Paused, "workload"), cents(t.PausedHourlyCost))
+	}
+	if t.Live > 0 {
+		p.line("  Hybernate has saved %s this month pausing %s.", dollars(t.SavedThisMonth),
+			countOf(t.Live, "live workload"))
+	}
+	if t.DryRun > 0 {
+		p.line("  %s in dry-run: measured by Hybernate since starting, %s would have slept %s, freeing %s,",
+			plural(t.DryRun, "workload is", "workloads are"), pronoun(t.DryRun),
+			hoursTotal(t.Measured.SleptHours), cents(t.Measured.Freed))
+		p.line("  about %s a month.", dollars(t.Measured.MonthlyFreed))
+	}
+	if t.ScaledToZero > 0 {
+		them := "them"
+		if t.ScaledToZero == 1 {
+			them = "it"
+		}
+		p.line("  %s scaled to zero by hand; Hybernate can pause %s while idle and wake %s on the",
+			plural(t.ScaledToZero, "workload is", "workloads are"), them, them)
+		p.line("  next request instead.")
 	}
 	switch t.Idle {
 	case 0:
@@ -455,10 +448,10 @@ func writeHeadline(p *printer, t discovery.Totals, replayed string) {
 	}
 	if r := t.Replayed; r.Workloads > 0 && replayed != "" {
 		if r.Sleepers == 0 {
-			p.line("  Replaying %s, nothing Hybernate doesn't already pause would have slept.", replayed)
+			p.line("  Replaying %s, no unmanaged workload would have slept.", replayed)
 		} else {
-			p.line("  Replaying %s, Hybernate would have paused %s for %s in all, waking them %s,",
-				replayed, countOf(r.Sleepers, "workload"), hoursTotal(r.SleepHours), countOf(r.Wakes, "time"))
+			p.line("  Replaying %s, Hybernate would have paused %d of %s for %s in all,",
+				replayed, r.Sleepers, countOf(r.Workloads, "unmanaged workload"), hoursTotal(r.SleepHours))
 			p.line("  and freed %s: about %s/month.", dollars(r.Freed), dollars(r.MonthlyFreed))
 		}
 	}
@@ -531,38 +524,51 @@ func writeWorkloads(p *printer, workloads []Workload, limit int, history bool) {
 	if limit > 0 && len(shown) > limit {
 		shown = shown[:limit]
 	}
-	tw := tabwriter.NewWriter(p, 0, 0, 3, ' ', 0)
-	if history {
-		_, _ = fmt.Fprintln(tw, "  NAMESPACE\tWORKLOAD\tSTATE\tCPU\tREPLICAS\tCOST/MO\tIDLE\tASLEEP\tWAKES\tFREES/MO\tWHY")
-	} else {
-		_, _ = fmt.Fprintln(tw, "  NAMESPACE\tWORKLOAD\tSTATE\tCPU\tREPLICAS\tCOST/MO\tCOST/HOUR\tWHY")
+	saving, couldSave := savingColumns(workloads)
+	sleep, slept := sleepColumns(history, workloads), sleptColumn(workloads)
+	header := []string{"NAMESPACE", "WORKLOAD", "STATE", "BECAUSE", "COST/MO"}
+	if !history {
+		header = append(header, "COST/HOUR")
 	}
+	if slept {
+		header = append(header, "SLEPT THIS MONTH")
+	}
+	if saving {
+		header = append(header, "SAVED THIS MONTH")
+	}
+	if sleep {
+		header = append(header, "COULD SLEEP", "WAKES")
+	}
+	if couldSave {
+		header = append(header, "COULD SAVE/MO")
+	}
+	tw := tabwriter.NewWriter(p, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "  "+strings.Join(header, "\t"))
 	for _, wl := range shown {
-		cpu := "-"
-		if wl.CPUPercent != nil {
-			cpu = fmt.Sprintf("%d%%", *wl.CPUPercent)
+		couldSleep, wakes, since, _ := sleepCells(wl)
+		evidence := because(wl)
+		if since != "" {
+			evidence = strings.TrimPrefix(evidence+"; measuring "+since, "; ")
 		}
-		state := string(wl.State)
-		switch {
-		case wl.DryRun:
-			state += " (dry-run)"
-		case wl.Managed:
-			state += " (managed)"
-		}
-		why := strings.Join(append([]string{wl.Reason}, wl.Clues...), "; ")
-		ref := strings.ToLower(string(wl.Kind)) + "/" + wl.Name
+		row := []string{wl.Namespace, strings.ToLower(string(wl.Kind)) + "/" + wl.Name,
+			fmt.Sprintf("%s (%s)", wl.State, management(wl)), evidence, dollars(wl.MonthlyCost)}
 		if !history {
-			_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-				wl.Namespace, ref, state, cpu, wl.Replicas, dollars(wl.MonthlyCost), cents(wl.HourlyCost), why)
-			continue
+			row = append(row, cents(wl.HourlyCost))
 		}
-		idle, asleep, wakes, frees := "-", "-", "-", "-"
-		if h := wl.History; h != nil {
-			idle = fmt.Sprintf("%s of %s", hours(h.IdleHours), hours(h.RunningHours))
-			asleep, wakes, frees = hours(h.SleepHours), strconv.Itoa(h.Wakes), dollars(h.MonthlyFreed)
+		if slept {
+			hoursSlept, _, _, _ := sleptCells(wl)
+			row = append(row, hoursSlept)
 		}
-		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			wl.Namespace, ref, state, cpu, wl.Replicas, dollars(wl.MonthlyCost), idle, asleep, wakes, frees, why)
+		if saving {
+			row = append(row, savedCell(wl))
+		}
+		if sleep {
+			row = append(row, couldSleep, wakes)
+		}
+		if couldSave {
+			row = append(row, couldSaveCell(wl))
+		}
+		_, _ = fmt.Fprintln(tw, "  "+strings.Join(row, "\t"))
 	}
 	_ = tw.Flush()
 	if len(shown) < len(workloads) {
@@ -571,22 +577,66 @@ func writeWorkloads(p *printer, workloads []Workload, limit int, history bool) {
 	p.line("")
 }
 
+// savingColumns says which money columns a table needs: what Hybernate has
+// saved, for live workloads, and what pausing could save, for those it
+// doesn't pause yet, when the scan knows either for any of them.
+// sleptColumn says whether the scan knows how long Hybernate has had any
+// live workload paused.
+func sleptColumn(workloads []Workload) bool {
+	for _, wl := range workloads {
+		if wl.Slept != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// sleptCells are how long Hybernate has had a live workload paused this
+// month, how many times it was woken, and since when.
+func sleptCells(wl Workload) (slept, wakes, since string, sleptSort float64) {
+	s := wl.Slept
+	if s == nil || !wl.Managed || wl.DryRun {
+		return "-", "-", "", -1
+	}
+	return hours(s.Hours), strconv.Itoa(s.Wakes), "since " + s.Since.Format("Jan 2"), s.Hours
+}
+
+func savingColumns(workloads []Workload) (saving, couldSave bool) {
+	for _, wl := range workloads {
+		saving = saving || (wl.Managed && !wl.DryRun)
+		couldSave = couldSave || wl.Measured != nil || (!wl.Managed && wl.History != nil)
+	}
+	return saving, couldSave
+}
+
+// savedCell is what Hybernate has saved this month pausing a live workload.
+func savedCell(wl Workload) string {
+	if !wl.Managed || wl.DryRun {
+		return "-"
+	}
+	return dollars(wl.SavedThisMonth)
+}
+
+// couldSaveCell is what pausing a workload Hybernate doesn't pause yet
+// would free a month, from what dry-run measured or history shows.
+func couldSaveCell(wl Workload) string {
+	if wl.Measured == nil && (wl.Managed || wl.History == nil) {
+		return "-"
+	}
+	return dollars(discovery.CouldSave(wl))
+}
+
 func writeNextSteps(p *printer, result scanResult) {
 	var idle, measuring *Workload
 	installed := false
-	for _, c := range result.Clusters {
-		if c.ClusterReport == nil {
-			continue
+	for i := range result.Workloads {
+		wl := &result.Workloads[i]
+		installed = installed || wl.Managed
+		if idle == nil && result.Totals.Idle > 0 && wl.State == discovery.StateIdle && !wl.Managed {
+			idle = wl
 		}
-		for i := range c.Workloads {
-			wl := &c.Workloads[i]
-			installed = installed || wl.Managed
-			if idle == nil && result.Totals.Idle > 0 && wl.State == discovery.StateIdle && !wl.Managed {
-				idle = wl
-			}
-			if measuring == nil && wl.Measured != nil {
-				measuring = wl
-			}
+		if measuring == nil && wl.Measured != nil {
+			measuring = wl
 		}
 	}
 	if idle == nil && measuring == nil {
@@ -621,73 +671,111 @@ func writeNextSteps(p *printer, result scanResult) {
 	p.line("")
 }
 
-// writeMeasured lists what dry-run has measured for workloads in dry-run.
-func writeMeasured(p *printer, workloads []Workload) {
-	var measured []Workload
-	for _, wl := range workloads {
-		if wl.Measured != nil {
-			measured = append(measured, wl)
+// because is the evidence for a workload's state, or, for one in dry-run,
+// what Hybernate measured: that's from its own clock, which sees more than
+// the scan can, so it's what to judge going live by.
+func because(wl Workload) string {
+	var parts []string
+	for _, p := range append([]string{wl.Reason}, wl.Clues...) {
+		if p != "" {
+			parts = append(parts, p)
 		}
 	}
-	if len(measured) == 0 {
-		return
-	}
-	p.line("  Measured in dry-run, had Hybernate been pausing them:")
-	tw := tabwriter.NewWriter(p, 0, 0, 3, ' ', 0)
-	for _, wl := range measured {
-		m := wl.Measured
-		_, _ = fmt.Fprintf(tw, "  %s\t%s/%s\tsince %s: would have paused %s, slept %s, freeing %s\n",
-			wl.Namespace, strings.ToLower(string(wl.Kind)), wl.Name, m.Since.Format("Jan 2"),
-			countOf(m.Pauses, "time"), hours(m.SleptHours), cents(m.Freed))
-	}
-	_ = tw.Flush()
-	p.line("")
+	return strings.Join(parts, "; ")
 }
 
-// writeDependencies lists the dependencies found in workloads' environment,
-// and the annotation to add for each one reached at a headless address,
-// which only dependsOn covers.
-func writeDependencies(p *printer, workloads []Workload) {
-	var found bool
-	for _, wl := range workloads {
-		found = found || len(wl.Dependencies) > 0
+// sleepCells are how long a workload could have slept and how many times
+// it would have been woken: what Hybernate measured, for one in dry-run,
+// with the period it covers; what history shows, for one it doesn't
+// manage. A live workload has neither yet.
+func sleepCells(wl Workload) (slept, wakes, since string, sleptSort float64) {
+	switch {
+	case wl.Measured != nil:
+		m := wl.Measured
+		return hours(m.SleptHours), strconv.Itoa(m.Wakes), "since " + m.Since.Format("Jan 2"), m.SleptHours
+	case !wl.Managed && wl.History != nil:
+		h := wl.History
+		return hours(h.SleepHours), strconv.Itoa(h.Wakes), "", h.SleepHours
 	}
-	if !found {
+	return "-", "-", "", -1
+}
+
+// sleepColumns says whether the scan knows how long any workload could
+// have slept: from history, or from a dry-run measurement.
+func sleepColumns(history bool, workloads []Workload) bool {
+	for _, wl := range workloads {
+		if wl.Measured != nil {
+			return true
+		}
+	}
+	return history
+}
+
+// dependencyLine is one dependency a workload was found to have.
+type dependencyLine struct {
+	wl Workload
+	d  discovery.Dependency
+}
+
+// dependencyLines are the dependencies found, by workload.
+func dependencyLines(workloads []Workload) []dependencyLine {
+	n := 0
+	for _, wl := range workloads {
+		n += len(wl.Dependencies)
+	}
+	lines := make([]dependencyLine, 0, n)
+	for _, wl := range workloads {
+		for _, d := range wl.Dependencies {
+			lines = append(lines, dependencyLine{wl: wl, d: d})
+		}
+	}
+	return lines
+}
+
+// dependencyStatus says whether Hybernate wakes and holds a dependency with
+// the workload that needs it.
+func dependencyStatus(l dependencyLine) string {
+	switch {
+	case l.d.Declared:
+		return "declared"
+	case l.d.Connected:
+		return "connected by Hybernate"
+	case !l.wl.Managed:
+		return "connected once Hybernate manages it"
+	default:
+		return "not connected yet"
+	}
+}
+
+// foundVia says where a dependency was found.
+func foundVia(d discovery.Dependency) string {
+	if d.Source == discovery.SourceWake {
+		return "learned from a wake"
+	}
+	return d.Via
+}
+
+// writeDependencies lists the dependencies found, and whether Hybernate
+// wakes and holds each with the workload that needs it.
+func writeDependencies(p *printer, workloads []Workload, limit int) {
+	lines := dependencyLines(workloads)
+	if len(lines) == 0 {
 		return
 	}
-	p.line("  Dependencies found in environment variables (suggestions; never applied):")
+	p.line("  Dependencies Hybernate wakes and holds with the workloads that need them: %s",
+		plural(len(lines), "dependency", "dependencies"))
+	shown := lines
+	if limit > 0 && len(shown) > limit {
+		shown = shown[:limit]
+	}
 	tw := tabwriter.NewWriter(p, 0, 0, 3, ' ', 0)
-	type hint struct{ workload, value string }
-	var hints []hint
-	for _, wl := range workloads {
-		var needed []string
-		for _, d := range wl.Dependencies {
-			ref := dependencyRef(wl.Namespace, d)
-			note := ""
-			switch {
-			case d.Declared:
-				note = "already declared"
-			case d.Headless:
-				note = "headless"
-				needed = append(needed, ref)
-			}
-			_, _ = fmt.Fprintf(tw, "  %s\t%s/%s\t->\t%s\t%s=%s\t%s\n", wl.Namespace,
-				strings.ToLower(string(wl.Kind)), wl.Name, ref, d.Via, d.Address, note)
-		}
-		if len(needed) > 0 {
-			hints = append(hints, hint{
-				workload: fmt.Sprintf("%s/%s/%s", wl.Namespace, strings.ToLower(string(wl.Kind)), wl.Name),
-				value:    strings.Join(needed, ", "),
-			})
-		}
+	for _, l := range shown {
+		_, _ = fmt.Fprintf(tw, "  %s\t%s/%s\t->\t%s\t%s\t%s\n", l.wl.Namespace, strings.ToLower(string(l.wl.Kind)),
+			l.wl.Name, dependencyRef(l.wl.Namespace, l.d), foundVia(l.d), dependencyStatus(l))
 	}
 	_ = tw.Flush()
-	if len(hints) > 0 {
-		p.line("  The doorman can't hold connections to a headless address, so a request won't wake what's behind it.")
-		p.line("  Add the dependency to the workloads that use one:")
-		for _, h := range hints {
-			p.line("    %s: hybernate.io/depends-on: %q", h.workload, h.value)
-		}
+	if len(shown) < len(lines) {
+		p.line("  ...and %d more; --limit 0 lists them all", len(lines)-len(shown))
 	}
 	p.line("")
 }
@@ -702,39 +790,30 @@ func dependencyRef(namespace string, d discovery.Dependency) string {
 	return ref
 }
 
-// hours is a length of time to the hour, or the minute under one.
+// hours is a length of time to the nearest hour, or minute under one,
+// rounded as hoursTotal rounds so a row and its total agree.
 func hours(h float64) string {
-	if h < 1 {
-		return fmt.Sprintf("%dm", int(h*60))
+	if h > 0 && h < 1 {
+		return fmt.Sprintf("%dm", int(h*60+0.5))
 	}
-	return fmt.Sprintf("%dh", int(h))
+	return fmt.Sprintf("%dh", int(h+0.5))
 }
 
-// nameClusters gives each scanned cluster a readable name. EKS and GKE
-// contexts are long generated identifiers, so they're shortened to the
-// cluster with its provider and region. A name that would match another
-// keeps its full context, so two clusters never look like one.
-func nameClusters(clusters []clusterScan) {
-	count := map[string]int{}
-	for i := range clusters {
-		clusters[i].Cluster = shortClusterName(clusters[i].Context)
-		count[clusters[i].Cluster]++
+// clusterName is how a kubeconfig context is shown. EKS and GKE contexts
+// are long generated identifiers, so they're shortened to the cluster with
+// its provider and region.
+func clusterName(contextName string) string {
+	if contextName == "" {
+		return "current context"
 	}
-	for i := range clusters {
-		if count[clusters[i].Cluster] > 1 || clusters[i].Cluster == "" {
-			clusters[i].Cluster = clusters[i].Context
-		}
-		if clusters[i].Cluster == "" {
-			clusters[i].Cluster = "current context"
-		}
-	}
+	return shortClusterName(contextName)
 }
 
 // shortClusterName recognises the context names EKS and GKE generate and
 // leaves anything else as it is.
 //
 //	arn:aws:eks:us-east-1:123456789012:cluster/staging -> staging (EKS us-east-1)
-//	gke_myproject_europe-west1_sandboxes               -> sandboxes (GKE europe-west1)
+//	gke_myproject_europe-west1_dev                     -> dev (GKE europe-west1)
 //
 // GKE's form is unambiguous because project IDs, locations, and cluster names
 // can't contain underscores.
@@ -755,6 +834,40 @@ func shortClusterName(contextName string) string {
 		}
 	}
 	return contextName
+}
+
+// management says how Hybernate is involved with a workload: not at all,
+// measuring it in dry-run, or pausing it live.
+func management(wl Workload) string {
+	switch {
+	case !wl.Managed:
+		return "unmanaged"
+	case wl.DryRun:
+		return "dry-run"
+	default:
+		return "live"
+	}
+}
+
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToLower(s[:1]) + s[1:]
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+func pronoun(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "they"
 }
 
 // Workload is a scanned workload, named here for the table's helpers.

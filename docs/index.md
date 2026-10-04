@@ -33,7 +33,7 @@ Track per-workload resource consumption and savings. See exactly how much you're
 Label a workload or namespace `hybernate.io/managed: "true"` and Hybernate manages it, with its settings as annotations. Both live in the manifests or Helm values you already keep in Git, so Argo CD and Flux work as they do today.
 
 ### Scan Before You Install
-`kubectl hybernate scan` shows which workloads across your clusters are idle right now and what they cost while running, with nothing installed in the cluster.
+`kubectl hybernate scan` shows which workloads in a cluster are idle right now and what they cost while running, with nothing installed in the cluster.
 
 ### Full Observability
 Prometheus metrics for operator health, lifecycle transitions, and prediction confidence, with alerting rules included.
@@ -53,7 +53,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: my-api
-  namespace: sandbox
+  namespace: dev
   labels:
     hybernate.io/managed: "true"
   annotations:
@@ -61,7 +61,7 @@ metadata:
     hybernate.io/idle-after: "1h"
 ```
 
-Hybernate watches `my-api` and records each time it's active: CPU above 10% of its requests, a deploy, a request through its Service, or an activity annotation. In dry-run it only measures; once you run `kubectl hybernate enable my-api -n sandbox`, it pauses the Deployment after an hour with no activity, and wakes it when a request arrives.
+Hybernate watches `my-api` and records each time it's active: CPU above 10% of its requests, a deploy, a request through its Service, or an activity annotation. In dry-run it only measures; once you run `kubectl hybernate enable my-api -n dev`, it pauses the Deployment after an hour with no activity, and wakes it when a request arrives.
 
 For every setting, see [Opting In](guides/opt-in.md). For settings annotations don't cover, write a [ManagedWorkload](guides/managed-workload.md) yourself.
 

@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,9 @@ const staleAfter = 7 * 24 * time.Hour
 // recent keeps a workload awake.
 const defaultIdleAfter = time.Hour
 
+// defaultCPUThreshold matches the activity clock's default CPU threshold.
+const defaultCPUThreshold = 10
+
 // ClusterReport is what a scan found in one cluster.
 type ClusterReport struct {
 	Mode Mode `json:"mode"`
@@ -88,21 +92,34 @@ type Workload struct {
 	Replicas  int32               `json:"replicas"`
 	State     State               `json:"state"`
 	// CPUPercent is CPU use as a share of the workload's own requests,
-	// the measure the activity clock uses. Nil when it couldn't be measured.
-	CPUPercent *int `json:"cpuPercent,omitempty"`
+	// the measure the activity clock uses, and CPUMillisUsed the use itself.
+	// Nil and zero when it couldn't be measured.
+	CPUPercent    *int  `json:"cpuPercent,omitempty"`
+	CPUMillisUsed int64 `json:"cpuMillisUsed,omitempty"`
 	// PodCPURequestMillis and PodMemoryRequestBytes are what one replica's
 	// pod reserves, sidecars included: what pausing a replica frees.
 	PodCPURequestMillis   int64      `json:"podCPURequestMillis"`
 	PodMemoryRequestBytes int64      `json:"podMemoryRequestBytes"`
 	LastDeployed          *time.Time `json:"lastDeployed,omitempty"`
-	// Reason is the evidence for State, e.g. "CPU 64%" or "deployed 20m ago".
+	// Reason is the evidence for State, e.g. "CPU 64% of its request" or "deployed 20m ago".
 	Reason string `json:"reason,omitempty"`
 	// Unmeasured says why CPU couldn't be measured.
 	Unmeasured string `json:"unmeasured,omitempty"`
 	// DryRun means Hybernate measures it but never pauses it.
 	DryRun bool `json:"dryRun,omitempty"`
+	// ScaledByHand means it's at zero replicas, put there by something
+	// other than Hybernate, so nothing will wake it on a request.
+	ScaledByHand bool `json:"scaledByHand,omitempty"`
 	// Measured is what dry-run has measured, for a workload in dry-run.
 	Measured *Measured `json:"measured,omitempty"`
+	// SavedThisMonth is what Hybernate has saved this month pausing a live
+	// workload, priced at the rates it uses for the workload.
+	SavedThisMonth float64 `json:"savedThisMonth,omitempty"`
+	// Slept is how long Hybernate has had a live workload paused, and how
+	// many times it was woken, since Since: the start of the month, or when
+	// it went live if later. Hybernate doesn't record these yet, so they
+	// stay unset until it does.
+	Slept *Slept `json:"slept,omitempty"`
 	// History is what replaying the activity clock over its recorded CPU
 	// found, in ModeHistory.
 	History *History `json:"history,omitempty"`
@@ -122,12 +139,24 @@ type Workload struct {
 type Measured struct {
 	Since  time.Time `json:"since"`
 	Pauses int       `json:"pauses"`
+	// Wakes is how many of those pauses activity would have ended, which
+	// is all of them but one still under way.
+	Wakes int `json:"wakes"`
 	// SleptHours is how long its would-be pauses lasted, one under way
 	// included.
 	SleptHours float64 `json:"sleptHours"`
 	// Freed is what those hours would have freed, at the scan's prices and
-	// the replicas it runs now.
-	Freed float64 `json:"freed"`
+	// the replicas it runs now, and MonthlyFreed that over an average month
+	// at the rate measured so far.
+	Freed        float64 `json:"freed"`
+	MonthlyFreed float64 `json:"monthlyFreed"`
+}
+
+// Slept is what Hybernate has done pausing a live workload.
+type Slept struct {
+	Since time.Time `json:"since"`
+	Hours float64   `json:"hours"`
+	Wakes int       `json:"wakes"`
 }
 
 // Totals sum a scan's workloads.
@@ -138,16 +167,23 @@ type Totals struct {
 	// and what that frees each hour.
 	Paused           int     `json:"paused"`
 	PausedHourlyCost float64 `json:"pausedHourlyCost"`
-	Idle             int     `json:"idle"`
+	// ScaledToZero is how many are at zero replicas by hand.
+	ScaledToZero int `json:"scaledToZero"`
+	Idle         int `json:"idle"`
 	// IdleCPUMillis and IdleMemoryBytes are what idle workloads reserve,
 	// and IdleHourlyCost what each hour of it costs.
 	IdleCPUMillis   int64   `json:"idleCPUMillis"`
 	IdleMemoryBytes int64   `json:"idleMemoryBytes"`
 	IdleHourlyCost  float64 `json:"idleHourlyCost"`
 	IdleMonthlyCost float64 `json:"idleMonthlyCost"`
-	// Replayed sums the history of workloads Hybernate doesn't pause yet:
-	// unmanaged ones and those in dry-run.
-	Replayed ReplayTotals `json:"replayed"`
+	// Replayed sums the history of unmanaged workloads, Measured what
+	// Hybernate measured for those in dry-run, and SavedThisMonth what it
+	// has saved this month pausing live ones: each from its own source.
+	Replayed       ReplayTotals `json:"replayed"`
+	Measured       Measured     `json:"measured"`
+	DryRun         int          `json:"dryRun"`
+	SavedThisMonth float64      `json:"savedThisMonth"`
+	Live           int          `json:"live"`
 }
 
 // ReplayTotals sum what replaying the activity clock found.
@@ -163,14 +199,20 @@ type ReplayTotals struct {
 
 // ClusterOptions configures ScanCluster.
 type ClusterOptions struct {
-	Namespaces   []string
+	Namespaces []string
+	// CPUThreshold is the CPU use, as a percentage of requests, at which a
+	// workload Hybernate doesn't manage counts as active; managed ones use
+	// their own. Zero means the activity clock's default.
 	CPUThreshold int
 	Rates        cost.Rates
 	Now          func() time.Time
-	// History, when set, is replayed over Window with IdleAfter.
-	History   *Prometheus
-	Window    time.Duration
+	// IdleAfter is how long without activity makes a workload idle, for
+	// workloads Hybernate doesn't manage; managed ones use their own.
+	// Zero means the activity clock's default.
 	IdleAfter time.Duration
+	// History, when set, is replayed over Window.
+	History *Prometheus
+	Window  time.Duration
 }
 
 // ScanCluster scans every Deployment and StatefulSet in the namespaces and
@@ -191,7 +233,6 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 			"the Metrics API isn't available, so CPU couldn't be measured; is metrics-server installed?")
 	}
 
-	var scaledToZero int
 	var noHistory []string
 	sources := map[workloadKey]workloadSource{}
 	for _, namespace := range opts.Namespaces {
@@ -202,12 +243,11 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 		if history != nil && (since.IsZero() || historySince.Before(since)) {
 			since = historySince
 		}
-		workloads, zero, err := s.scanNamespace(ctx, namespace, haveMetrics, history, historySince, sources, opts)
+		workloads, err := s.scanNamespace(ctx, namespace, haveMetrics, history, historySince, sources, opts)
 		if err != nil {
 			report.Notes = append(report.Notes, fmt.Sprintf("skipped namespace %s: %v", namespace, err))
 			continue
 		}
-		scaledToZero += zero
 		for _, w := range workloads {
 			if history != nil && w.History == nil && w.State != StateUnknown {
 				noHistory = append(noHistory, w.Namespace+"/"+w.Name)
@@ -229,17 +269,13 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 		report.Notes = append(report.Notes, fmt.Sprintf("%s no CPU history in Prometheus, so only their CPU right now is known: %s",
 			plural(len(noHistory), "workload has", "workloads have"), listSome(noHistory)))
 	}
-	if scaledToZero > 0 {
-		report.Notes = append(report.Notes, fmt.Sprintf("%s already scaled to zero, not counted",
-			plural(scaledToZero, "workload is", "workloads are")))
-	}
 	report.Notes = append(report.Notes, s.findDependencies(ctx, report.Workloads, sources, opts.Namespaces)...)
 
 	slices.SortFunc(report.Workloads, func(a, b Workload) int {
 		if c := cmp.Compare(stateOrder[a.State], stateOrder[b.State]); c != 0 {
 			return c
 		}
-		if c := cmp.Compare(monthlyFreed(b), monthlyFreed(a)); c != 0 {
+		if c := cmp.Compare(CouldSave(b), CouldSave(a)); c != 0 {
 			return c
 		}
 		if c := cmp.Compare(b.MonthlyCost, a.MonthlyCost); c != 0 {
@@ -264,20 +300,19 @@ func (s *Scanner) metricsAvailable(ctx context.Context, namespaces []string) boo
 
 func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetrics bool,
 	history []containerCPU, historySince time.Time, sources map[workloadKey]workloadSource, opts ClusterOptions) (
-	[]Workload, int, error) {
+	[]Workload, error) {
 	managed := s.managedInNamespace(ctx, namespace)
 	rollouts, err := s.rollouts(ctx, namespace)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	now := opts.Now()
 
 	var out []Workload
-	var scaledToZero int
 	for _, kind := range []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment, v1alpha1.TargetKindStatefulSet} {
 		objs, err := s.listWorkloads(ctx, namespace, kind)
 		if err != nil {
-			return nil, 0, fmt.Errorf("listing %ss: %w", kind, err)
+			return nil, fmt.Errorf("listing %ss: %w", kind, err)
 		}
 		for _, obj := range objs {
 			if obj.GetLabels()[v1alpha1.LabelIgnore] == "true" {
@@ -307,11 +342,11 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 			w.PodCPURequestMillis, w.PodMemoryRequestBytes = ownCPU, ownMemory
 
 			if n == 0 {
-				if !pausedByHybernate(mw) {
-					scaledToZero++
-					continue
+				if pausedByHybernate(mw) {
+					judgePaused(&w, mw, now)
+				} else {
+					w.State, w.Reason, w.ScaledByHand = StatePaused, "scaled to zero, not by Hybernate", true
 				}
-				judgePaused(&w, mw, now)
 			} else {
 				if len(matchLabels) > 0 {
 					sel := labels.SelectorFromSet(matchLabels)
@@ -326,26 +361,28 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 						w.Unmeasured = "no metrics yet"
 					default:
 						percent := int(float64(used) / float64(ownCPU*int64(n)) * 100)
-						w.CPUPercent = &percent
+						w.CPUPercent, w.CPUMillisUsed = &percent, used
 					}
 				}
 				if mw != nil && mw.Status.Activity != nil {
-					judgeManaged(&w, mw, now, opts.CPUThreshold)
+					judgeManaged(&w, mw, now, thresholdFor(mw, opts))
 				} else {
-					judgeUnmanaged(&w, obj, now, opts.CPUThreshold)
+					judgeUnmanaged(&w, obj, now, thresholdFor(mw, opts), idleAfterFor(mw, opts))
 				}
 			}
 			w.Clues = clues(w, now)
 			w.HourlyCost = hourlyCost(w, opts.Rates)
 			w.MonthlyCost = w.HourlyCost * hoursPerMonth
 			w.Measured = measured(mw, w.HourlyCost, now)
+			w.SavedThisMonth = savedThisMonth(mw)
 			if history != nil && ownCPU > 0 {
-				w.History = replayWorkload(w, spec, history, historySince, rollouts[obj.GetUID()], opts)
+				w.History = replayWorkload(w, spec, history, historySince, rollouts[obj.GetUID()],
+					thresholdFor(mw, opts), idleAfterFor(mw, opts), opts)
 			}
 			out = append(out, w)
 		}
 	}
-	return out, scaledToZero, nil
+	return out, nil
 }
 
 func pausedByHybernate(mw *v1alpha1.ManagedWorkload) bool {
@@ -360,15 +397,35 @@ func measured(mw *v1alpha1.ManagedWorkload, hourlyCost float64, now time.Time) *
 	}
 	d := mw.Status.DryRun
 	slept := d.Slept.Duration
+	wakes := int(d.Pauses)
 	if mw.Status.Phase == v1alpha1.PhaseIdle && d.Resources != nil && mw.Status.LastTransitionTime != nil {
 		slept += max(now.Sub(mw.Status.LastTransitionTime.Time), 0)
+		wakes--
 	}
-	return &Measured{
+	m := &Measured{
 		Since:      d.Since.Time,
 		Pauses:     int(d.Pauses),
+		Wakes:      max(wakes, 0),
 		SleptHours: slept.Hours(),
 		Freed:      hourlyCost * slept.Hours(),
 	}
+	if measuring := now.Sub(d.Since.Time).Hours(); measuring > 0 {
+		m.MonthlyFreed = m.Freed / measuring * hoursPerMonth
+	}
+	return m
+}
+
+// savedThisMonth reads what Hybernate records it has saved this month
+// pausing a live workload.
+func savedThisMonth(mw *v1alpha1.ManagedWorkload) float64 {
+	if mw == nil || mw.Spec.DryRun || mw.Status.Cost == nil {
+		return 0
+	}
+	saved, err := strconv.ParseFloat(strings.TrimPrefix(mw.Status.Cost.EstimatedMonthlySavings, "$"), 64)
+	if err != nil {
+		return 0
+	}
+	return saved
 }
 
 // judgePaused describes a workload Hybernate has paused, priced on what it
@@ -387,10 +444,7 @@ func judgePaused(w *Workload, mw *v1alpha1.ManagedWorkload, now time.Time) {
 // judgeManaged reads the activity clock Hybernate keeps for the workload,
 // which already combines every activity source it's configured with.
 func judgeManaged(w *Workload, mw *v1alpha1.ManagedWorkload, now time.Time, threshold int) {
-	idleAfter := defaultIdleAfter
-	if p := mw.Spec.IdlePolicy; p != nil && p.IdleAfter != nil && p.IdleAfter.Duration > 0 {
-		idleAfter = p.IdleAfter.Duration
-	}
+	idleAfter := idleAfterFor(mw, ClusterOptions{})
 	a := mw.Status.Activity
 	since := now.Sub(a.LastActivityTime.Time)
 	switch {
@@ -399,7 +453,7 @@ func judgeManaged(w *Workload, mw *v1alpha1.ManagedWorkload, now time.Time, thre
 	case since < idleAfter:
 		w.State, w.Reason = StateActive, fmt.Sprintf("active %s (%s)", ago(since), a.LastActivitySource)
 	case w.CPUPercent != nil && *w.CPUPercent >= threshold:
-		w.State, w.Reason = StateActive, fmt.Sprintf("CPU %d%%", *w.CPUPercent)
+		w.State, w.Reason = StateActive, cpuReason(*w)
 	default:
 		w.State, w.Reason = StateIdle, "no activity for "+duration(since)
 		if meta.IsStatusConditionTrue(mw.Status.Conditions, "HeldByDependents") {
@@ -410,9 +464,40 @@ func judgeManaged(w *Workload, mw *v1alpha1.ManagedWorkload, now time.Time, thre
 
 // judgeUnmanaged applies the activity clock's sources a scan can see
 // without Hybernate: activity annotations, a recent rollout, and CPU.
-func judgeUnmanaged(w *Workload, obj client.Object, now time.Time, threshold int) {
+// idleAfterFor is how long without activity makes a workload idle: its own
+// setting when Hybernate manages it, otherwise the scan's.
+func idleAfterFor(mw *v1alpha1.ManagedWorkload, opts ClusterOptions) time.Duration {
+	if mw != nil {
+		if p := mw.Spec.IdlePolicy; p != nil && p.IdleAfter != nil && p.IdleAfter.Duration > 0 {
+			return p.IdleAfter.Duration
+		}
+		return defaultIdleAfter
+	}
+	if opts.IdleAfter > 0 {
+		return opts.IdleAfter
+	}
+	return defaultIdleAfter
+}
+
+// thresholdFor is the CPU use, as a percentage of requests, at which a
+// workload counts as active: its own setting when Hybernate manages it,
+// otherwise the scan's.
+func thresholdFor(mw *v1alpha1.ManagedWorkload, opts ClusterOptions) int {
+	if mw != nil {
+		if p := mw.Spec.IdlePolicy; p != nil && p.Activity != nil && p.Activity.CPUThreshold > 0 {
+			return p.Activity.CPUThreshold
+		}
+		return defaultCPUThreshold
+	}
+	if opts.CPUThreshold > 0 {
+		return opts.CPUThreshold
+	}
+	return defaultCPUThreshold
+}
+
+func judgeUnmanaged(w *Workload, obj client.Object, now time.Time, threshold int, idleAfter time.Duration) {
 	if w.CPUPercent != nil && *w.CPUPercent >= threshold {
-		w.State, w.Reason = StateActive, fmt.Sprintf("CPU %d%%", *w.CPUPercent)
+		w.State, w.Reason = StateActive, cpuReason(*w)
 		return
 	}
 	annotations := obj.GetAnnotations()
@@ -421,16 +506,29 @@ func judgeUnmanaged(w *Workload, obj client.Object, now time.Time, threshold int
 		return
 	}
 	if last, err := time.Parse(time.RFC3339, annotations[v1alpha1.AnnotationLastActivity]); err == nil &&
-		now.Sub(last) < defaultIdleAfter {
+		now.Sub(last) < idleAfter {
 		w.State, w.Reason = StateActive, "activity annotation "+ago(now.Sub(last))
 		return
 	}
-	if w.LastDeployed != nil && now.Sub(*w.LastDeployed) < defaultIdleAfter {
+	if w.LastDeployed != nil && now.Sub(*w.LastDeployed) < idleAfter {
 		w.State, w.Reason = StateActive, "deployed "+ago(now.Sub(*w.LastDeployed))
 		return
 	}
 	if w.CPUPercent != nil {
-		w.State, w.Reason = StateIdle, fmt.Sprintf("CPU %d%%", *w.CPUPercent)
+		w.State, w.Reason = StateIdle, cpuReason(*w)
+	}
+}
+
+// cpuReason says how much CPU a workload uses against what it requests, so
+// a little use that rounds to 0% doesn't read as a broken measurement.
+func cpuReason(w Workload) string {
+	switch {
+	case w.CPUMillisUsed == 0:
+		return "no CPU use"
+	case *w.CPUPercent == 0:
+		return "CPU under 1% of its request"
+	default:
+		return fmt.Sprintf("CPU %d%% of its request", *w.CPUPercent)
 	}
 }
 
@@ -529,7 +627,7 @@ func clues(w Workload, now time.Time) []string {
 	var out []string
 	if w.LastDeployed != nil {
 		if age := now.Sub(*w.LastDeployed); age >= staleAfter {
-			out = append(out, fmt.Sprintf("not deployed in %d days", int(age.Hours()/24)))
+			out = append(out, fmt.Sprintf("last deployed %d days ago", int(age.Hours()/24)))
 		}
 	}
 	return out
@@ -545,7 +643,18 @@ func totals(workloads []Workload) Totals {
 	var t Totals
 	for _, w := range workloads {
 		t.Workloads++
-		if h := w.History; h != nil && (!w.Managed || w.DryRun) {
+		switch {
+		case w.Measured != nil:
+			t.DryRun++
+			t.Measured.Pauses += w.Measured.Pauses
+			t.Measured.SleptHours += w.Measured.SleptHours
+			t.Measured.Freed += w.Measured.Freed
+			t.Measured.MonthlyFreed += w.Measured.MonthlyFreed
+		case w.Managed && !w.DryRun:
+			t.Live++
+			t.SavedThisMonth += w.SavedThisMonth
+		}
+		if h := w.History; h != nil && !w.Managed {
 			t.Replayed.Workloads++
 			if h.SleepHours > 0 {
 				t.Replayed.Sleepers++
@@ -554,6 +663,10 @@ func totals(workloads []Workload) Totals {
 			t.Replayed.Wakes += h.Wakes
 			t.Replayed.Freed += h.Freed
 			t.Replayed.MonthlyFreed += h.MonthlyFreed
+		}
+		if w.ScaledByHand {
+			t.ScaledToZero++
+			continue
 		}
 		if w.State == StatePaused {
 			t.Paused++

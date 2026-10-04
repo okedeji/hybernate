@@ -42,19 +42,19 @@ func measuring(extra map[string]string) map[string]string {
 }
 
 func enableNamespaceObj(labels, annotations map[string]string) *corev1.Namespace {
-	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Labels: labels, Annotations: annotations}}
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "dev", Labels: labels, Annotations: annotations}}
 }
 
 func enableDeployment(name string, labels, annotations map[string]string) *appsv1.Deployment {
 	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
-		Name: name, Namespace: "sandbox", Labels: labels, Annotations: annotations,
+		Name: name, Namespace: "dev", Labels: labels, Annotations: annotations,
 	}}
 }
 
 func dryRunOf(t *testing.T, c client.Client, name string) (string, bool) {
 	t.Helper()
 	var d appsv1.Deployment
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: name}, &d))
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: "dev", Name: name}, &d))
 	v, ok := d.Annotations[v1alpha1.AnnotationDryRun]
 	return v, ok
 }
@@ -82,7 +82,7 @@ func TestEnable_Workload(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.ns, tt.workload).Build()
 			var out bytes.Buffer
 
-			require.NoError(t, enableWorkload(context.Background(), c, "sandbox", "api", enableOptions{}, &out))
+			require.NoError(t, enableWorkload(context.Background(), c, "dev", "api", enableOptions{}, &out))
 
 			value, set := dryRunOf(t, c, "api")
 			assert.Equal(t, tt.wantSet, set)
@@ -96,7 +96,7 @@ func TestEnable_NotOptedIn(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(enableNamespaceObj(nil, nil), enableDeployment("api", nil, measuring(nil))).Build()
 
-	err := enableWorkload(context.Background(), c, "sandbox", "api", enableOptions{}, &bytes.Buffer{})
+	err := enableWorkload(context.Background(), c, "dev", "api", enableOptions{}, &bytes.Buffer{})
 
 	assert.ErrorContains(t, err, "label it hybernate.io/managed=true first")
 }
@@ -104,14 +104,14 @@ func TestEnable_NotOptedIn(t *testing.T) {
 // Git owns a GitOps-managed workload's annotations, so enable says what to
 // change there instead of changing the cluster behind its back.
 func TestEnable_GitOpsManaged(t *testing.T) {
-	argo := measuring(map[string]string{"argocd.argoproj.io/tracking-id": "shop:apps/Deployment:sandbox/api"})
+	argo := measuring(map[string]string{"argocd.argoproj.io/tracking-id": "shop:apps/Deployment:dev/api"})
 
 	t.Run("prints the change for Git", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(enableNamespaceObj(nil, nil), enableDeployment("api", optedIn, argo)).Build()
 		var out bytes.Buffer
 
-		err := enableWorkload(context.Background(), c, "sandbox", "api", enableOptions{}, &out)
+		err := enableWorkload(context.Background(), c, "dev", "api", enableOptions{}, &out)
 
 		assert.ErrorIs(t, err, errManagedByGit)
 		assert.Contains(t, out.String(), "managed by Argo CD application shop")
@@ -124,7 +124,7 @@ func TestEnable_GitOpsManaged(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(enableNamespaceObj(nil, nil), enableDeployment("api", optedIn, argo)).Build()
 
-		err := enableWorkload(context.Background(), c, "sandbox", "api", enableOptions{force: true}, &bytes.Buffer{})
+		err := enableWorkload(context.Background(), c, "dev", "api", enableOptions{force: true}, &bytes.Buffer{})
 		require.NoError(t, err)
 
 		_, set := dryRunOf(t, c, "api")
@@ -133,7 +133,7 @@ func TestEnable_GitOpsManaged(t *testing.T) {
 }
 
 func TestEnable_Namespace(t *testing.T) {
-	flux := map[string]string{v1alpha1.LabelManaged: "true", "kustomize.toolkit.fluxcd.io/name": "sandboxes"}
+	flux := map[string]string{v1alpha1.LabelManaged: "true", "kustomize.toolkit.fluxcd.io/name": "previews"}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		enableNamespaceObj(optedIn, map[string]string{v1alpha1.AnnotationDryRun: "true"}),
 		enableDeployment("web", nil, measuring(nil)),
@@ -142,18 +142,18 @@ func TestEnable_Namespace(t *testing.T) {
 	).Build()
 	var out bytes.Buffer
 
-	err := enableNamespace(context.Background(), c, "sandbox", enableOptions{all: true}, &out)
+	err := enableNamespace(context.Background(), c, "dev", enableOptions{all: true}, &out)
 
 	assert.ErrorIs(t, err, errManagedByGit, "one workload needs a change in Git")
 	var ns corev1.Namespace
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "sandbox"}, &ns))
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "dev"}, &ns))
 	assert.NotContains(t, ns.Annotations, v1alpha1.AnnotationDryRun)
 	_, set := dryRunOf(t, c, "web")
 	assert.False(t, set)
 	value, _ := dryRunOf(t, c, "api")
 	assert.Equal(t, "true", value)
-	assert.Contains(t, out.String(), "1 workload in sandbox: dry-run ended")
-	assert.Contains(t, out.String(), "deployment/api (Flux Kustomization sandboxes)")
+	assert.Contains(t, out.String(), "1 workload in dev: dry-run ended")
+	assert.Contains(t, out.String(), "deployment/api (Flux Kustomization previews)")
 }
 
 func TestWorkloadArg(t *testing.T) {

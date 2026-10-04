@@ -35,7 +35,7 @@ const (
 	LabelFromLabel = "hybernate.io/from-label"
 
 	// AnnotationLastActivity records activity seen by another tool, such as a
-	// sandbox UI or CI pipeline, as an RFC 3339 time. Set on the ManagedWorkload
+	// developer portal or CI pipeline, as an RFC 3339 time. Set on the ManagedWorkload
 	// or its target. A newer value wakes a paused workload.
 	AnnotationLastActivity = "hybernate.io/last-activity"
 

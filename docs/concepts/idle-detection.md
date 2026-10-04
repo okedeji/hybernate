@@ -36,7 +36,7 @@ CPU is measured for the containers in the target's pod template, including nativ
 Set either annotation on the ManagedWorkload or on its target Deployment or StatefulSet. Values are RFC 3339 times.
 
 ```bash
-# Record activity now, e.g. from a sandbox UI when a developer opens an environment
+# Record activity now, e.g. from a developer portal when someone opens an environment
 kubectl annotate deployment my-api -n staging --overwrite \
   hybernate.io/last-activity="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -100,7 +100,7 @@ status:
 A paused workload wakes when:
 
 - A request reaches one of its Services. The request is held while the workload starts, then answered; see [Wake on Request](wake-on-request.md).
-- A `hybernate.io/last-activity` annotation is set to a time after the pause, or an `active-until` hold is in the future. This is how a "start environment" button in a sandbox UI works.
+- A `hybernate.io/last-activity` annotation is set to a time after the pause, or an `active-until` hold is in the future. This is how a "start environment" button in a developer portal works.
 - `autoResume: true` is set and a confident forecast predicts demand above `cpuThreshold` for the current hour, or for the next hour once it's 15 minutes away, so the workload is ready before people arrive.
 - `pause.expireAfter` elapses with `expireAction: resume`, or `desiredState` is set to `Running`.
 

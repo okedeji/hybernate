@@ -58,13 +58,13 @@ says what to change there instead.
 
 Examples:
   # Start pausing a Deployment
-  kubectl hybernate enable checkout-api -n sandbox-42
+  kubectl hybernate enable checkout-api -n preview-42
 
   # A StatefulSet
-  kubectl hybernate enable statefulset/postgres -n sandbox-42
+  kubectl hybernate enable statefulset/postgres -n preview-42
 
   # Everything in a namespace
-  kubectl hybernate enable --all -n sandbox-42`,
+  kubectl hybernate enable --all -n preview-42`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if opts.all != (len(args) == 0) {
 				return errors.New("name one workload, or pass --all for the namespace")
