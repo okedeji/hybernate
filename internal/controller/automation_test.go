@@ -741,9 +741,9 @@ func TestAutoResume_LearnsToWakeBeforePeopleArrive(t *testing.T) {
 	}, day(1), "the first Tuesday, people wake it as they arrive")
 
 	for d := 35; d < 40; d++ {
-		events := day(d)
-		require.Len(t, events, 2, "%s of the last week: woken once and paused once, got %v", at(d, 0).Weekday(), events)
-		wake, pause := events[0], events[1]
+		got := day(d)
+		require.Len(t, got, 2, "%s of the last week: woken once and paused once, got %v", at(d, 0).Weekday(), got)
+		wake, pause := got[0], got[1]
 		assert.Equal(t, ReasonAutoResume, wake.reason, "%s", wake.at)
 		assert.Equal(t, at(d, 9*time.Hour-autoResumeLead), wake.at, "awake before people arrive at 09:10")
 		assert.Equal(t, ReasonPaused, pause.reason)

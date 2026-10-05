@@ -69,17 +69,14 @@ func newForecastReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, c c
 	return fr
 }
 
-// reconcile runs automation and writes status the way Reconcile does, and
-// reports whether status was written.
-func (fr *forecastReconciler) reconcile(t *testing.T, workload *v1alpha1.ManagedWorkload) bool {
+// reconcile runs automation and writes status the way Reconcile does.
+func (fr *forecastReconciler) reconcile(t *testing.T, workload *v1alpha1.ManagedWorkload) {
 	t.Helper()
 	require.NoError(t, fr.Get(context.Background(), client.ObjectKeyFromObject(workload), workload))
-	before := workload.ResourceVersion
 	observed := workload.Status.DeepCopy()
 	_, err := fr.reconcileAutomation(context.Background(), workload, nil)
 	require.NoError(t, err)
 	require.NoError(t, fr.persistStatus(context.Background(), workload, observed))
-	return workload.ResourceVersion != before
 }
 
 func forecastWorkload() *v1alpha1.ManagedWorkload {
