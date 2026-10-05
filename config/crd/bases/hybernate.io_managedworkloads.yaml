@@ -154,7 +154,7 @@ spec:
                           CPUThreshold is the CPU utilization, as a percentage of the workload's
                           CPU requests, above which the workload counts as active.
                         maximum: 100
-                        minimum: 0
+                        minimum: 1
                         type: integer
                       prometheus:
                         description: |-
@@ -211,8 +211,10 @@ spec:
                 - confidence
                 type: object
               target:
-                description: Target identifies the workload to manage (e.g. a Deployment
-                  or StatefulSet).
+                description: |-
+                  Target identifies the workload to manage (e.g. a Deployment or
+                  StatefulSet). It can't be changed, since a paused target would be left
+                  at zero: create another ManagedWorkload to manage another workload.
                 properties:
                   kind:
                     default: Deployment
@@ -227,6 +229,10 @@ spec:
                 - kind
                 - name
                 type: object
+                x-kubernetes-validations:
+                - message: target is immutable; create another ManagedWorkload to
+                    manage another workload
+                  rule: self == oldSelf
               wake:
                 description: |-
                   Wake configures waking the workload when a request reaches it while
@@ -776,10 +782,14 @@ spec:
                 - from
                 type: object
               pause:
-                description: Pause holds state while the workload is paused.
+                description: |-
+                  Pause records what pausing changed, from before the workload is scaled
+                  to zero until it's running again.
                 properties:
                   pausedAt:
-                    description: PausedAt is when the workload was paused.
+                    description: |-
+                      PausedAt is when the workload was scaled to zero. Unset while the
+                      pause is under way.
                     format: date-time
                     type: string
                   previousReplicas:
@@ -824,6 +834,27 @@ spec:
                       ScaledObject is the KEDA ScaledObject held at zero while the workload
                       is paused, so KEDA doesn't scale it up. Resuming releases it.
                     type: string
+                  scaledObjectPausedReplicas:
+                    description: |-
+                      ScaledObjectPausedReplicas is the ScaledObject's own
+                      autoscaling.keda.sh/paused-replicas annotation from before the pause,
+                      put back when it's released. Unset when it had none.
+                    type: string
+                  wakeAnnotations:
+                    description: |-
+                      WakeAnnotations are the activity annotations as the pause began. One
+                      that has changed since wakes the workload whatever time it states, so
+                      a clock behind the operator's can't lose a wake.
+                    properties:
+                      target:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      workload:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    type: object
                 required:
                 - previousReplicas
                 type: object
