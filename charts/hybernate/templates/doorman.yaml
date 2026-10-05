@@ -26,7 +26,11 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "hybernate.doormanName" . }}
-      terminationGracePeriodSeconds: 30
+      {{- /*
+      The 5s preStop sleep, then up to 25s for held and proxied
+      connections to finish, with room to exit before SIGKILL.
+      */}}
+      terminationGracePeriodSeconds: 40
       securityContext:
         runAsNonRoot: true
         seccompProfile:
