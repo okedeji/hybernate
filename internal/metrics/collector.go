@@ -115,9 +115,18 @@ var (
 // --- Doorman ---
 
 var (
+	// DoormanWakes counts connections the doorman accepted for a paused
+	// workload, by how each ended: success (passed to a Ready pod), page (a
+	// browser got the waking-up page), timeout (no Ready pod within maxWait),
+	// error (Ready pods couldn't be reached, or the wake couldn't be
+	// stamped), canceled (the caller left, or the doorman shut down, while
+	// it was held), ignored (a health check, a scrape, or a connection that
+	// sent nothing), limited (refused by a cap on held connections or
+	// wakes), and refused (the route is draining and nothing is Ready).
 	DoormanWakes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_doorman_wakes_total",
-		Help: "Connections the doorman held for a paused workload, by result (success, timeout, error).",
+		Help: "Connections the doorman accepted for a paused workload, by result " +
+			"(success, page, timeout, error, canceled, ignored, limited, refused).",
 	}, []string{"namespace", "workload", "result"})
 
 	DoormanWaitSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -128,7 +137,17 @@ var (
 
 	DoormanHeldConnections = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "hybernate_doorman_held_connections",
-		Help: "Connections the doorman is holding or proxying right now.",
+		Help: "Connections the doorman is holding while their workload wakes.",
+	})
+
+	DoormanProxiedConnections = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_doorman_proxied_connections",
+		Help: "Connections the doorman has passed to a woken workload and is still carrying.",
+	})
+
+	DoormanPortConflicts = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_doorman_port_conflicts",
+		Help: "Doorman ports claimed by more than one route, which the doorman refuses to serve.",
 	})
 )
 
@@ -159,6 +178,8 @@ func init() {
 		DoormanWakes,
 		DoormanWaitSeconds,
 		DoormanHeldConnections,
+		DoormanProxiedConnections,
+		DoormanPortConflicts,
 	)
 }
 
