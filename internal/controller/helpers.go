@@ -20,10 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"github.com/prometheus/client_golang/prometheus"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -49,6 +46,7 @@ const (
 	ReasonGitOpsConflictResolved = "GitOpsConflictResolved"
 	ReasonRegimeChange           = "RegimeChange"
 	ReasonTargetNotFound         = "TargetNotFound"
+	ReasonForecastReset          = "ForecastReset"
 )
 
 // Actions populate the events.k8s.io/v1 Action field, which the API server
@@ -81,39 +79,48 @@ func dryRunPrefix(dryRun bool) string {
 	return ""
 }
 
-func (r *Reconciler) predictionState(ctx context.Context, workload *v1alpha1.ManagedWorkload) *string {
-	var cm corev1.ConfigMap
-	key := client.ObjectKey{
-		Namespace: workload.Namespace,
-		Name:      predictionConfigMapName(workload.Name),
+// forecastEngine is the workload's forecast engine, with the settings it
+// asks for applied. The first time, it is restored from the state in the
+// workload's status; state that can't be restored is discarded, and the
+// engine starts learning again.
+func (r *Reconciler) forecastEngine(workload *v1alpha1.ManagedWorkload) forecaster {
+	var state string
+	if p := workload.Status.Prediction; p != nil {
+		state = p.State
 	}
-	if err := r.Get(ctx, key, &cm); err != nil {
-		return nil
+	settings := forecast.Settings{Threshold: workload.Spec.Prediction.Confidence, Location: r.Timezone}
+	engine, err := r.engines.getOrCreate(workload.UID, settings, state)
+	if err != nil {
+		r.emitEvent(workload, false, "Warning", ReasonForecastReset, actionForecast,
+			"the forecast's saved state can't be read, so it starts learning again: %v", err)
 	}
-	if s, ok := cm.Data["state"]; ok {
-		return &s
-	}
-	return nil
+	return engine
 }
 
-func predictionConfigMapName(workloadName string) string {
-	return workloadName + "-prediction-state"
-}
-
+// updatePredictionStatus publishes the engine's phase and confidence, and
+// the state it has learned. The state only changes when an hour is
+// observed, so it is written once an hour; a write that fails is made again
+// from the engine on the next reconcile.
 func (r *Reconciler) updatePredictionStatus(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster) {
 	phase := engine.GetPhase()
 	dailyPhase, weeklyPhase := seasonPhases(phase)
 
-	workload.Status.Prediction = &v1alpha1.PredictionStatus{
+	status := &v1alpha1.PredictionStatus{
 		DailyPhase:       dailyPhase,
 		DailyConfidence:  engine.DailyConfidence(),
 		WeeklyPhase:      weeklyPhase,
 		WeeklyConfidence: engine.WeeklyConfidence(),
 	}
-
-	if data, err := engine.Export(); err == nil {
-		r.savePredictionState(ctx, workload, string(data))
+	state, err := engine.Export()
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "saving forecast state, keeping the state last saved",
+			"workload", workload.Name, "namespace", workload.Namespace)
+		if last := workload.Status.Prediction; last != nil {
+			state = last.State
+		}
 	}
+	status.State = state
+	workload.Status.Prediction = status
 
 	ns, name := workload.Namespace, workload.Name
 	opmetrics.PredictionConfidence.WithLabelValues("daily", ns, name).Set(float64(engine.DailyConfidence()))
@@ -122,23 +129,15 @@ func (r *Reconciler) updatePredictionStatus(ctx context.Context, workload *v1alp
 	opmetrics.PredictionDataPoints.WithLabelValues(ns, name).Set(float64(engine.GetDataPoints()))
 }
 
-func (r *Reconciler) savePredictionState(ctx context.Context, workload *v1alpha1.ManagedWorkload, state string) {
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      predictionConfigMapName(workload.Name),
-			Namespace: workload.Namespace,
-		},
-	}
-	_, err := ctrlutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		if cm.Data == nil {
-			cm.Data = make(map[string]string)
-		}
-		cm.Data["state"] = state
-		return ctrlutil.SetOwnerReference(workload, cm, r.Scheme)
-	})
-	if err != nil {
-		logf.FromContext(ctx).Error(err, "saving prediction state", "configmap", cm.Name)
-	}
+// forgetForecast drops a deleted workload's engine and its metric series.
+func (r *Reconciler) forgetForecast(workload *v1alpha1.ManagedWorkload) {
+	r.engines.forget(workload.UID)
+	labels := prometheus.Labels{"namespace": workload.Namespace, "workload": workload.Name}
+	opmetrics.PredictionConfidence.DeletePartialMatch(labels)
+	opmetrics.PredictionPhase.DeletePartialMatch(labels)
+	opmetrics.PredictionDataPoints.DeletePartialMatch(labels)
+	opmetrics.PredictionAnomalies.DeletePartialMatch(labels)
+	opmetrics.PredictionRegimeChanges.DeletePartialMatch(labels)
 }
 
 const (

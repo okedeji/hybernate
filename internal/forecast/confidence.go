@@ -18,86 +18,80 @@ package forecast
 
 import "math"
 
-const defaultWindow = 24
+const (
+	dailyWindow  = DailySeason
+	weeklyWindow = WeeklySeason
+)
 
-// Scorer tracks rolling prediction accuracy using Mean Absolute Percentage
-// Error (MAPE). Confidence is 1 - MAPE, clamped to [0, 1]. A confidence of
-// 0.85 means predictions are on average within 15% of actual values.
+// Scorer keeps the forecast errors of the last week of observations and
+// scores accuracy over the last day or the whole week.
+//
+// Accuracy is 1 - WAPE: the total absolute error over the window divided by
+// the total demand, clamped to [0, 1]. Unlike MAPE it is defined when demand
+// is zero, and an hour of zero demand forecast as zero adds nothing to
+// either side rather than counting as a perfect hour. The denominator is
+// never less than floor per hour, so a workload that is idle all day is
+// judged by how far its forecasts stray from zero compared with that floor.
 type Scorer struct {
-	window int
-	errors []float64
-	pos    int
-	full   bool
+	absErr [weeklyWindow]float64
+	actual [weeklyWindow]float64
+	next   int
+	count  int
 }
 
-func NewScorer() *Scorer {
-	return &Scorer{
-		window: defaultWindow,
-		errors: make([]float64, defaultWindow),
-	}
-}
-
-// Record computes the absolute percentage error between forecast and actual,
-// and adds it to the rolling window.
+// Record adds the error of one hourly forecast.
 func (s *Scorer) Record(forecast, actual float64) {
-	var ape float64
-	if actual != 0 {
-		ape = math.Abs(forecast-actual) / math.Abs(actual)
-	} else if forecast != 0 {
-		ape = 1.0
-	}
-
-	s.errors[s.pos] = ape
-	s.pos = (s.pos + 1) % s.window
-	if s.pos == 0 {
-		s.full = true
-	}
+	s.push(math.Abs(forecast-actual), math.Abs(actual))
 }
 
-// Confidence returns 1 - MAPE over the rolling window.
-// Returns 0 if fewer than window data points have been recorded.
-func (s *Scorer) Confidence() float64 {
-	if !s.full {
+func (s *Scorer) push(absErr, actual float64) {
+	s.absErr[s.next] = absErr
+	s.actual[s.next] = actual
+	s.next = (s.next + 1) % weeklyWindow
+	s.count = min(s.count+1, weeklyWindow)
+}
+
+// Ready reports whether a full window of errors has been recorded.
+func (s *Scorer) Ready(window int) bool {
+	return s.count >= window
+}
+
+// Confidence is 1 - WAPE over the last window hours, or 0 before the window
+// is full.
+func (s *Scorer) Confidence(window int, floor float64) float64 {
+	if !s.Ready(window) {
 		return 0
 	}
-
-	var sum float64
-	for _, e := range s.errors {
-		sum += e
+	var errSum, actualSum float64
+	for k := 1; k <= window; k++ {
+		i := (s.next - k + weeklyWindow) % weeklyWindow
+		errSum += s.absErr[i]
+		actualSum += s.actual[i]
 	}
-	mape := sum / float64(s.window)
-
-	c := 1.0 - mape
-	if c < 0 {
+	denominator := math.Max(actualSum, float64(window)*floor)
+	if denominator <= 0 {
+		if errSum == 0 {
+			return 1
+		}
 		return 0
 	}
-	return c
+	return math.Max(0, 1-errSum/denominator)
 }
 
-// Ready returns true when enough data has been recorded to produce
-// a meaningful confidence score.
-func (s *Scorer) Ready() bool {
-	return s.full
+// Reset discards every recorded error, so confidence is earned again.
+func (s *Scorer) Reset() {
+	*s = Scorer{}
 }
 
-func (s *Scorer) export() ScorerState {
-	errs := make([]float64, len(s.errors))
-	copy(errs, s.errors)
-	return ScorerState{
-		Window: s.window,
-		Errors: errs,
-		Pos:    s.pos,
-		Full:   s.full,
+// ordered returns the recorded errors and actuals, oldest first.
+func (s *Scorer) ordered() (absErr, actual []float64) {
+	absErr = make([]float64, s.count)
+	actual = make([]float64, s.count)
+	start := (s.next - s.count + weeklyWindow) % weeklyWindow
+	for k := range s.count {
+		i := (start + k) % weeklyWindow
+		absErr[k] = s.absErr[i]
+		actual[k] = s.actual[i]
 	}
-}
-
-func importScorer(st ScorerState) *Scorer {
-	errs := make([]float64, len(st.Errors))
-	copy(errs, st.Errors)
-	return &Scorer{
-		window: st.Window,
-		errors: errs,
-		pos:    st.Pos,
-		full:   st.Full,
-	}
+	return absErr, actual
 }

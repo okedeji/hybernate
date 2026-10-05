@@ -47,28 +47,39 @@ type stubForecaster struct {
 	predictByHour    map[int]float64 // overrides predictValue for an hour ahead
 	observed         []float64
 	observeCalls     int
+	observeErr       error
+	fed              bool
 	regimeChanged    bool
 	anomalyDetected  bool
+	state            string
+	exportErr        error
+	settings         forecast.Settings
 }
 
-func (f *stubForecaster) Observe(actual float64, _ time.Time) float64 {
+func (f *stubForecaster) Observe(actual float64, _ time.Time) (float64, error) {
+	if f.observeErr != nil {
+		return 0, f.observeErr
+	}
 	f.observeCalls++
 	f.observed = append(f.observed, actual)
-	return f.predictValue
+	f.fed = true
+	return f.predictValue, nil
 }
+func (f *stubForecaster) Observed(time.Time) bool { return f.fed }
 func (f *stubForecaster) Predict(h int, _ time.Time) float64 {
 	if v, ok := f.predictByHour[h]; ok {
 		return v
 	}
 	return f.predictValue
 }
-func (f *stubForecaster) Export() ([]byte, error)  { return []byte("{}"), nil }
-func (f *stubForecaster) GetPhase() forecast.Phase { return f.phase }
-func (f *stubForecaster) DailyConfidence() int     { return f.dailyConfidence }
-func (f *stubForecaster) WeeklyConfidence() int    { return f.weeklyConfidence }
-func (f *stubForecaster) GetDataPoints() int       { return f.dataPoints }
-func (f *stubForecaster) RegimeChanged() bool      { return f.regimeChanged }
-func (f *stubForecaster) AnomalyDetected() bool    { return f.anomalyDetected }
+func (f *stubForecaster) Export() (string, error)              { return f.state, f.exportErr }
+func (f *stubForecaster) Configure(settings forecast.Settings) { f.settings = settings }
+func (f *stubForecaster) GetPhase() forecast.Phase             { return f.phase }
+func (f *stubForecaster) DailyConfidence() int                 { return f.dailyConfidence }
+func (f *stubForecaster) WeeklyConfidence() int                { return f.weeklyConfidence }
+func (f *stubForecaster) GetDataPoints() int                   { return f.dataPoints }
+func (f *stubForecaster) RegimeChanged() bool                  { return f.regimeChanged }
+func (f *stubForecaster) AnomalyDetected() bool                { return f.anomalyDetected }
 
 type stubMetrics struct {
 	cpuMillis        float64
@@ -111,14 +122,13 @@ func newAutomationReconciler(t *testing.T, workload *v1alpha1.ManagedWorkload, e
 		builder = builder.WithObjects(workload)
 	}
 
-	reg := newEngineRegistry(func(_ int) forecaster { return engine })
+	reg := newEngineRegistry(func() forecaster { return engine })
 	// Pre-populate the engine so getOrCreate returns our stub.
-	key := workload.Namespace + "/" + workload.Name
-	reg.engines[key] = engine
+	reg.engines[workload.UID] = engine
 	// Mark as just fed so the reconciler doesn't try to read metrics
 	// (unless the test explicitly wants to test feeding).
 	if !opts.needsFeed {
-		reg.lastFed[key] = fixedTime
+		engine.fed = true
 	}
 
 	r := &Reconciler{

@@ -78,6 +78,11 @@ type Reconciler struct {
 	// each, or every namespace when empty.
 	WatchNamespaces []string
 
+	// Timezone is where the forecast counts hours of the day and days of
+	// the week, so that business hours stay in their slots through daylight
+	// saving changes. Nil means UTC.
+	Timezone *time.Location
+
 	pauser        lifecyclePauser
 	metrics       metricsReader
 	prices        listPricer
@@ -99,7 +104,7 @@ type lifecyclePauser interface {
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments/scale;statefulsets/scale,verbs=get;update
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
@@ -382,6 +387,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 		return fmt.Errorf("removing finalizer: %w", err)
 	}
 	r.activityMemo.forget(workload.UID)
+	r.forgetForecast(workload)
 	labels := prometheus.Labels{"namespace": workload.Namespace, "workload": workload.Name}
 	metrics.WorkloadPhase.DeletePartialMatch(labels)
 	metrics.IdleSeconds.DeletePartialMatch(labels)
@@ -699,8 +705,8 @@ func (r *Reconciler) initDefaults() {
 		}
 	}
 	if r.engines == nil {
-		r.engines = newEngineRegistry(func(threshold int) forecaster {
-			return forecast.NewEngine(forecast.DefaultParams(), threshold)
+		r.engines = newEngineRegistry(func() forecaster {
+			return forecast.NewEngine(forecast.DefaultParams(), forecast.Settings{})
 		})
 	}
 	r.prometheusURL = r.PrometheusURL

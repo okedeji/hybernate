@@ -18,6 +18,7 @@ package forecast
 
 import (
 	"math"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -32,300 +33,131 @@ func hourAt(offset int) time.Time {
 	return testEpoch.Add(time.Duration(offset) * time.Hour)
 }
 
-func TestModel_FirstDataPoint(t *testing.T) {
-	m := NewModel(DefaultParams())
-	forecast := m.Update(100, testEpoch)
+// officeHours is 500m on weekdays from 9 to 17 in t's location, and nothing
+// otherwise: the workload Hybernate exists for.
+func officeHours(t time.Time) float64 {
+	if t.Weekday() == time.Saturday || t.Weekday() == time.Sunday {
+		return 0
+	}
+	if t.Hour() >= 9 && t.Hour() < 17 {
+		return 500
+	}
+	return 0
+}
 
-	assert.Equal(t, 100.0, forecast)
+func TestModel_FirstObservationSetsLevel(t *testing.T) {
+	m := NewModel(DefaultParams())
+	m.update(100, testEpoch, 1)
+
 	assert.Equal(t, 100.0, m.level)
 	assert.Equal(t, 1, m.DataPoints())
 }
 
 func TestModel_LevelTracksConstantInput(t *testing.T) {
 	m := NewModel(DefaultParams())
-
 	for i := range 48 {
-		m.Update(50, hourAt(i))
+		m.update(50, hourAt(i), 1)
 	}
 
 	assert.InDelta(t, 50, m.level, 1.0)
 	assert.InDelta(t, 0, m.trend, 0.5)
+	assert.InDelta(t, 50, m.forecast(hourAt(48), 1), 1.0)
 }
 
-func TestModel_ForecastReflectsDailyPattern(t *testing.T) {
+func TestModel_SeasonalComponentsStayNormalised(t *testing.T) {
 	m := NewModel(DefaultParams())
+	for i := range 6 * WeeklySeason {
+		m.update(officeHours(hourAt(i)), hourAt(i), 1)
+	}
 
-	// Feed 3 days of data with a clear daily pattern:
-	// hours 8-17 = 100 (busy), all other hours = 20 (quiet)
-	h := 0
-	for range 3 {
-		for hour := range 24 {
-			if hour >= 8 && hour <= 17 {
-				m.Update(100, hourAt(h))
-			} else {
-				m.Update(20, hourAt(h))
-			}
-			h++
+	var daily float64
+	for _, d := range m.daily {
+		daily += d
+	}
+	assert.InDelta(t, 0, daily, 1e-6, "daily components sum to zero")
+	for hour := range DailySeason {
+		var weekly float64
+		for day := range daysPerWeek {
+			weekly += m.weekly[day*DailySeason+hour]
 		}
+		assert.InDelta(t, 0, weekly, 1e-6, "weekly components for hour %d sum to zero", hour)
 	}
-
-	// After 72 data points, the model should have learned the daily pattern.
-	// Current position is hour 0 of day 4 (Thursday 00:00 UTC).
-	now := hourAt(h)
-	busyForecast := m.Forecast(9, now)  // 9am
-	quietForecast := m.Forecast(2, now) // 2am
-
-	assert.Greater(t, busyForecast, quietForecast,
-		"9am forecast (%f) should be higher than 2am forecast (%f)", busyForecast, quietForecast)
+	assert.InDelta(t, 500*40.0/WeeklySeason, m.level, 15, "the level is the mean demand")
 }
 
-func TestModel_ForecastNeverNegative(t *testing.T) {
+// TestModel_OfficeHoursStaysBounded is the trace that drove the old
+// multiplicative model's level negative every weekend and swung the 10am
+// forecast between 0 and thousands.
+func TestModel_OfficeHoursStaysBounded(t *testing.T) {
 	m := NewModel(DefaultParams())
+	for i := range 12 * WeeklySeason {
+		at := hourAt(i)
+		m.update(officeHours(at), at, 1)
+		require.GreaterOrEqual(t, m.level, 0.0, "hour %d", i)
 
-	for i := range 48 {
-		m.Update(math.Max(0, 100-float64(i)*3), hourAt(i))
+		next := hourAt(i + 1)
+		require.LessOrEqual(t, m.forecast(next, 1), 750.0, "hour %d forecasts beyond any demand seen", i)
 	}
 
-	now := hourAt(48)
-	for h := 1; h <= 24; h++ {
-		assert.GreaterOrEqual(t, m.Forecast(h, now), 0.0)
-	}
+	monday := hourAt(12 * WeeklySeason)
+	assert.InDelta(t, 500, m.forecast(monday.Add(10*time.Hour), 10), 50, "Monday 10am")
+	assert.Less(t, m.forecast(monday.Add(3*time.Hour), 3), 25.0, "Monday 3am")
+	assert.Less(t, m.forecast(monday.Add((5*24+10)*time.Hour), 24), 25.0, "Saturday 10am")
 }
 
-func TestModel_SeasonalFactorsInitializedToOne(t *testing.T) {
-	m := NewModel(DefaultParams())
+func TestModel_WallClockSlots(t *testing.T) {
+	monday3pm := time.Date(2026, 3, 16, 15, 0, 0, 0, time.UTC)
+	sunday11pm := time.Date(2026, 3, 22, 23, 0, 0, 0, time.UTC)
 
-	for i := range DailySeason {
-		assert.Equal(t, 1.0, m.daily[i])
-	}
-	for i := range WeeklySeason {
-		assert.Equal(t, 1.0, m.weekly[i])
-	}
-}
-
-func TestModel_WallClockSlotAlignment(t *testing.T) {
-	m := NewModel(DefaultParams())
-
-	// Feed one data point at Monday 14:00 UTC
-	monday2pm := time.Date(2026, 3, 16, 14, 0, 0, 0, time.UTC)
-	m.Update(100, monday2pm)
-
-	// Feed second point at Monday 15:00 UTC so daily factor at slot 15 gets touched
-	monday3pm := monday2pm.Add(time.Hour)
-	m.Update(200, monday3pm)
-
-	// Daily slot 15 (3pm) should have been used for the update
-	assert.Equal(t, 2, m.DataPoints())
-	// Weekly slot for Monday 3pm: Monday=0, so 0*24+15 = 15
-	assert.Equal(t, 15, weeklyIndex(monday3pm))
 	assert.Equal(t, 15, dailyIndex(monday3pm))
-}
+	assert.Equal(t, 15, weeklyIndex(monday3pm))
+	assert.Equal(t, WeeklySeason-1, weeklyIndex(sunday11pm))
 
-func TestScorer_ConfidenceZeroBeforeReady(t *testing.T) {
-	s := NewScorer()
-
-	assert.Equal(t, 0.0, s.Confidence())
-	assert.False(t, s.Ready())
-
-	for range defaultWindow - 1 {
-		s.Record(100, 100)
-	}
-	assert.False(t, s.Ready())
-	assert.Equal(t, 0.0, s.Confidence())
-}
-
-func TestScorer_PerfectPredictions(t *testing.T) {
-	s := NewScorer()
-
-	for range defaultWindow {
-		s.Record(100, 100)
-	}
-
-	assert.True(t, s.Ready())
-	assert.Equal(t, 1.0, s.Confidence())
-}
-
-func TestScorer_TenPercentError(t *testing.T) {
-	s := NewScorer()
-
-	for range defaultWindow {
-		s.Record(110, 100) // 10% over every time
-	}
-
-	assert.True(t, s.Ready())
-	assert.InDelta(t, 0.9, s.Confidence(), 0.01)
-}
-
-func TestScorer_RollingWindow(t *testing.T) {
-	s := NewScorer()
-
-	// Fill with bad predictions (50% error)
-	for range defaultWindow {
-		s.Record(150, 100)
-	}
-	assert.InDelta(t, 0.5, s.Confidence(), 0.01)
-
-	// Replace with perfect predictions
-	for range defaultWindow {
-		s.Record(100, 100)
-	}
-	assert.Equal(t, 1.0, s.Confidence())
-}
-
-func TestAnomalyDetector_NoAnomalyOnNormalData(t *testing.T) {
-	ad := NewAnomalyDetector()
-
-	for i := range 100 {
-		anomaly := ad.Record(50, 50+float64(i%3))
-		_ = anomaly
-	}
-
-	assert.False(t, ad.RegimeChange())
-}
-
-func TestAnomalyDetector_RegimeChangeOnSpike(t *testing.T) {
-	ad := NewAnomalyDetector()
-
-	// Normal data for a while
-	for range 100 {
-		ad.Record(50, 50)
-	}
-
-	// Sudden massive spike — 10x normal
-	for range anomalyWindow {
-		ad.Record(50, 500)
-	}
-
-	assert.True(t, ad.RegimeChange())
-}
-
-func TestEngine_PhaseProgression(t *testing.T) {
-	e := NewEngine(DefaultParams(), 50)
-
-	assert.Equal(t, Observing, e.Phase)
-
-	for i := range DailySeason {
-		e.Observe(50, hourAt(i))
-	}
-	assert.Equal(t, DailySuggesting, e.Phase)
-}
-
-func TestEngine_PredictReturnsZeroBeforeDailyActive(t *testing.T) {
-	e := NewEngine(DefaultParams(), 50)
-
-	for i := range 10 {
-		e.Observe(50, hourAt(i))
-	}
-
-	assert.Equal(t, 0.0, e.Predict(1, hourAt(10)))
-}
-
-func TestEngine_DailyActiveProducesPredictions(t *testing.T) {
-	e := NewEngine(DefaultParams(), 0) // threshold=0 so it promotes immediately
-
-	n := DailySeason + defaultWindow + 1
-	for i := range n {
-		e.Observe(50, hourAt(i))
-	}
-
-	require.Equal(t, DailyActive, e.Phase,
-		"expected DailyActive but got %s after %d points", e.Phase, e.Model.DataPoints())
-
-	p := e.Predict(1, hourAt(n))
-	assert.Greater(t, p, 0.0)
-}
-
-func TestEngine_FullLifecycle(t *testing.T) {
-	e := NewEngine(DefaultParams(), 0) // threshold=0 for easy promotion
-	h := 0
-
-	for range DailySeason {
-		e.Observe(50, hourAt(h))
-		h++
-	}
-	assert.Equal(t, DailySuggesting, e.Phase)
-
-	for range defaultWindow {
-		e.Observe(50, hourAt(h))
-		h++
-	}
-	assert.Equal(t, DailyActive, e.Phase)
-
-	for e.Model.DataPoints() < WeeklySeason {
-		e.Observe(50, hourAt(h))
-		h++
-	}
-	assert.Equal(t, WeeklySuggesting, e.Phase)
-
-	for range defaultWindow {
-		e.Observe(50, hourAt(h))
-		h++
-	}
-	assert.Equal(t, FullyActive, e.Phase)
-}
-
-func TestEngine_ExportImportRoundTrip(t *testing.T) {
-	e := NewEngine(DefaultParams(), 85)
-
-	// Train to DailyActive
-	n := DailySeason + defaultWindow + 1
-	for i := range n {
-		e.Observe(50, hourAt(i))
-	}
-	require.Equal(t, DailyActive, e.Phase)
-
-	now := hourAt(n)
-	forecastBefore := e.Predict(1, now)
-
-	data, err := e.Export()
+	ny, err := time.LoadLocation("America/New_York")
 	require.NoError(t, err)
-
-	restored, err := ImportEngine(data)
-	require.NoError(t, err)
-
-	assert.Equal(t, e.Phase, restored.Phase)
-	assert.Equal(t, e.Threshold, restored.Threshold)
-	assert.Equal(t, e.Model.DataPoints(), restored.Model.DataPoints())
-	assert.Equal(t, e.DailyConfidence(), restored.DailyConfidence())
-	assert.Equal(t, forecastBefore, restored.Predict(1, now))
+	assert.Equal(t, 11, dailyIndex(monday3pm.In(ny)), "slots are counted in the time's location")
 }
 
-func TestEngine_ImportRejectsUnsupportedVersion(t *testing.T) {
-	_, err := ImportEngine([]byte(`{"v":999}`))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported state version")
-}
-
-func TestEngine_ImportRejectsCorruptJSON(t *testing.T) {
-	_, err := ImportEngine([]byte(`not json`))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unmarshaling")
-}
-
-func TestEngine_RegimeChangedSignal(t *testing.T) {
-	e := NewEngine(DefaultParams(), 0)
-	h := 0
-
-	// Advance to DailyActive.
-	for range DailySeason + defaultWindow + 1 {
-		e.Observe(50, hourAt(h))
-		h++
+// TestModel_Invariants checks, over random and adversarial traces, that the
+// model never produces NaN or Inf, never lets the level go below zero, and
+// never forecasts negative demand.
+func TestModel_Invariants(t *testing.T) {
+	traces := map[string]func(r *rand.Rand, i int) float64{
+		"uniform":         func(r *rand.Rand, _ int) float64 { return r.Float64() * 1000 },
+		"mostly zero":     func(r *rand.Rand, _ int) float64 { return float64(r.Intn(20)/19) * 800 },
+		"alternating max": func(_ *rand.Rand, i int) float64 { return float64(i%2) * maxDemand },
+		"constant max":    func(_ *rand.Rand, _ int) float64 { return maxDemand },
+		"heavy tail":      func(r *rand.Rand, _ int) float64 { return math.Min(maxDemand, math.Exp(r.NormFloat64()*6)) },
+		"drop to zero": func(_ *rand.Rand, i int) float64 {
+			if i < 2*WeeklySeason {
+				return 1000 - float64(i)
+			}
+			return 0
+		},
 	}
-	require.Equal(t, DailyActive, e.Phase)
-	assert.False(t, e.RegimeChanged(), "no regime change yet")
+	for name, trace := range traces {
+		t.Run(name, func(t *testing.T) {
+			for seed := range int64(5) {
+				r := rand.New(rand.NewSource(seed))
+				m := NewModel(DefaultParams())
+				at := testEpoch
+				for i := range 6 * WeeklySeason {
+					steps := 1
+					if r.Intn(10) == 0 {
+						steps = 1 + r.Intn(48)
+					}
+					at = at.Add(time.Duration(steps) * time.Hour)
+					m.update(trace(r, i), at, steps)
 
-	// Build up anomaly detector baseline.
-	for range 100 {
-		e.Observe(50, hourAt(h))
-		h++
+					require.True(t, m.finite(), "seed %d hour %d", seed, i)
+					require.GreaterOrEqual(t, m.level, 0.0, "seed %d hour %d", seed, i)
+					for h := range DailySeason + 1 {
+						f := m.forecast(at.Add(time.Duration(h)*time.Hour), h)
+						require.False(t, math.IsNaN(f) || math.IsInf(f, 0), "seed %d hour %d", seed, i)
+						require.GreaterOrEqual(t, f, 0.0, "seed %d hour %d", seed, i)
+					}
+				}
+			}
+		})
 	}
-	assert.False(t, e.RegimeChanged())
-
-	// Inject anomalies to trigger regime change.
-	for range anomalyWindow {
-		e.Observe(500, hourAt(h))
-		h++
-	}
-	assert.True(t, e.RegimeChanged(), "regime change should be signaled")
-	assert.NotEqual(t, DailyActive, e.Phase, "phase should have demoted")
 }

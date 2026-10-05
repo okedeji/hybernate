@@ -25,6 +25,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -39,9 +40,11 @@ import (
 // interfaces (defined at point of consumption) ---
 
 type forecaster interface {
-	Observe(actual float64, now time.Time) float64
+	Observe(actual float64, now time.Time) (float64, error)
+	Observed(now time.Time) bool
 	Predict(h int, now time.Time) float64
-	Export() ([]byte, error)
+	Export() (string, error)
+	Configure(settings forecast.Settings)
 	GetPhase() forecast.Phase
 	DailyConfidence() int
 	WeeklyConfidence() int
@@ -68,56 +71,64 @@ type listPricer interface {
 	ListRates(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cost.Rates, bool, error)
 }
 
-// engineRegistry manages forecast engines per workload.
+// engineRegistry holds each workload's forecast engine between reconciles.
+// The engine in memory is the authority while the operator runs; the state
+// it exports to the workload's status is where a restarted operator, or a
+// new leader, picks up. Engines are keyed by UID, so a workload deleted and
+// created again under the same name starts afresh.
 type engineRegistry struct {
-	mu      sync.Mutex
-	engines map[string]forecaster
-	lastFed map[string]time.Time
-	factory func(threshold int) forecaster
+	mu        sync.Mutex
+	engines   map[types.UID]forecaster
+	newEngine func() forecaster
+	restore   func(state string) (forecaster, error)
 }
 
-func newEngineRegistry(factory func(threshold int) forecaster) *engineRegistry {
+func newEngineRegistry(newEngine func() forecaster) *engineRegistry {
 	return &engineRegistry{
-		engines: make(map[string]forecaster),
-		lastFed: make(map[string]time.Time),
-		factory: factory,
+		engines:   make(map[types.UID]forecaster),
+		newEngine: newEngine,
+		restore: func(state string) (forecaster, error) {
+			e, err := forecast.ImportEngine(state, forecast.Settings{})
+			if err != nil {
+				return nil, err
+			}
+			return e, nil
+		},
 	}
 }
 
-func (reg *engineRegistry) getOrCreate(key string, threshold int, state *string) forecaster {
+// getOrCreate returns the workload's engine with settings applied, restoring
+// it from state the first time. State that can't be restored is discarded
+// for a new engine, and the error says why.
+func (reg *engineRegistry) getOrCreate(uid types.UID, settings forecast.Settings, state string) (forecaster, error) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 
-	if e, ok := reg.engines[key]; ok {
-		return e
-	}
-
-	if state != nil {
-		if restored, err := forecast.ImportEngine([]byte(*state)); err == nil {
-			reg.engines[key] = restored
-			return restored
-		}
-	}
-
-	e := reg.factory(threshold)
-	reg.engines[key] = e
-	return e
-}
-
-func (reg *engineRegistry) shouldFeed(key string, now time.Time) bool {
-	reg.mu.Lock()
-	defer reg.mu.Unlock()
-
-	last, ok := reg.lastFed[key]
+	e, ok := reg.engines[uid]
+	var restoreErr error
 	if !ok {
-		return true
+		e, restoreErr = reg.load(state)
+		reg.engines[uid] = e
 	}
-	return now.Sub(last) >= 1*time.Hour
+	e.Configure(settings)
+	return e, restoreErr
 }
 
-func (reg *engineRegistry) markFed(key string, now time.Time) {
+func (reg *engineRegistry) load(state string) (forecaster, error) {
+	if state == "" {
+		return reg.newEngine(), nil
+	}
+	e, err := reg.restore(state)
+	if err != nil {
+		return reg.newEngine(), fmt.Errorf("restoring forecast state: %w", err)
+	}
+	return e, nil
+}
+
+// forget drops a workload's engine, once the workload is gone.
+func (reg *engineRegistry) forget(uid types.UID) {
 	reg.mu.Lock()
-	reg.lastFed[key] = now
+	delete(reg.engines, uid)
 	reg.mu.Unlock()
 }
 
@@ -137,29 +148,16 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	}
 
 	logger := log.FromContext(ctx)
-	key := workload.Namespace + "/" + workload.Name
-	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, r.predictionState(ctx, workload))
+	engine := r.forecastEngine(workload)
 
 	// Feed engine hourly — prediction learns regardless of desiredState.
-	if r.metrics != nil && r.engines.shouldFeed(key, r.now()) {
+	if now := r.now(); r.metrics != nil && !engine.Observed(now) {
 		metric, err := r.observedCPU(ctx, workload)
 		if err != nil {
 			return r.reportMetricsUnavailable(ctx, workload, err)
 		}
 		r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionTrue, "MetricsReported", "")
-		prediction := engine.Observe(metric, r.now())
-		r.engines.markFed(key, r.now())
-		r.emitEvent(workload, false, "Normal", ReasonPredictionFed, actionForecast,
-			"fed %.0fm CPU, forecast %.0fm, phase %s", metric, prediction, engine.GetPhase())
-
-		if engine.RegimeChanged() {
-			opmetrics.PredictionRegimeChanges.WithLabelValues(workload.Namespace, workload.Name).Inc()
-			r.emitEvent(workload, false, "Warning", ReasonRegimeChange, actionForecast,
-				"regime change detected, prediction engine demoted to %s", engine.GetPhase())
-		}
-		if engine.AnomalyDetected() {
-			opmetrics.PredictionAnomalies.WithLabelValues(workload.Namespace, workload.Name).Inc()
-		}
+		r.observeHour(ctx, workload, engine, metric, now)
 	}
 
 	// Always update prediction status so the user sees progress.
@@ -202,9 +200,9 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 		return r.handleResume(ctx, workload)
 	}
 
-	key := workload.Namespace + "/" + workload.Name
-	engine := r.engines.getOrCreate(key, workload.Spec.Prediction.Confidence, r.predictionState(ctx, workload))
-	r.observePausedHour(ctx, workload, key, engine)
+	engine := r.forecastEngine(workload)
+	r.observePausedHour(ctx, workload, engine)
+	r.updatePredictionStatus(ctx, workload, engine)
 
 	if workload.Spec.IdlePolicy == nil || !workload.Spec.IdlePolicy.AutoResume {
 		return nil, nil
@@ -256,17 +254,36 @@ func untilNextHour(now time.Time) time.Duration {
 // workload is paused behind the doorman: any request would have woken it,
 // so an hour paused is an hour nobody asked for it. Without the doorman,
 // demand while paused can't be seen, and nothing is recorded.
-func (r *Reconciler) observePausedHour(ctx context.Context, workload *v1alpha1.ManagedWorkload, key string, engine forecaster) {
+func (r *Reconciler) observePausedHour(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster) {
 	if !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionWakeOnRequest) {
 		return
 	}
-	now := r.now()
-	if !r.engines.shouldFeed(key, now) {
+	if now := r.now(); !engine.Observed(now) {
+		r.observeHour(ctx, workload, engine, 0, now)
+	}
+}
+
+// observeHour feeds the forecast the demand seen this hour. A rejected
+// observation is logged and the hour tried again on the next reconcile:
+// it means a bad metric, which mustn't hold up the workload's automation.
+func (r *Reconciler) observeHour(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, demand float64, now time.Time) {
+	prediction, err := engine.Observe(demand, now)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "feeding the forecast",
+			"workload", workload.Name, "namespace", workload.Namespace, "cpu_millis", demand)
 		return
 	}
-	engine.Observe(0, now)
-	r.engines.markFed(key, now)
-	r.updatePredictionStatus(ctx, workload, engine)
+	r.emitEvent(workload, false, "Normal", ReasonPredictionFed, actionForecast,
+		"fed %.0fm CPU, forecast %.0fm, phase %s", demand, prediction, engine.GetPhase())
+
+	if engine.RegimeChanged() {
+		opmetrics.PredictionRegimeChanges.WithLabelValues(workload.Namespace, workload.Name).Inc()
+		r.emitEvent(workload, false, "Warning", ReasonRegimeChange, actionForecast,
+			"regime change detected, prediction engine demoted to %s", engine.GetPhase())
+	}
+	if engine.AnomalyDetected() {
+		opmetrics.PredictionAnomalies.WithLabelValues(workload.Namespace, workload.Name).Inc()
+	}
 }
 
 // observedCPU reads total CPU usage to feed the forecast. A target scaled to

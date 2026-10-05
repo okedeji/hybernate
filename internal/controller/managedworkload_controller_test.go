@@ -105,7 +105,7 @@ func newTestReconcilerWithReplicas(t *testing.T, workload *v1alpha1.ManagedWorkl
 		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		pauser:   pauser,
-		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		engines:  newEngineRegistry(func() forecaster { return &stubForecaster{} }),
 		clock:    func() time.Time { return fixedTime },
 	}
 }
@@ -138,7 +138,7 @@ func newTestReconcilerWithTarget(t *testing.T, workload *v1alpha1.ManagedWorkloa
 		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		pauser:   pauser,
-		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		engines:  newEngineRegistry(func() forecaster { return &stubForecaster{} }),
 		clock:    func() time.Time { return fixedTime },
 	}
 }
@@ -361,7 +361,7 @@ func TestReconcileDelete_RestoresAPausedWorkload(t *testing.T) {
 			c := builder.Build()
 			r := &Reconciler{Client: c, Scheme: testScheme(t), Recorder: events.NewFakeRecorder(10),
 				pauser:  lifecycle.NewPauser(c, autoscaler.NewFinder(c)),
-				engines: newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+				engines: newEngineRegistry(func() forecaster { return &stubForecaster{} }),
 				clock:   func() time.Time { return fixedTime }}
 
 			_, err := r.Reconcile(context.Background(), reconcileFor("api"))
@@ -524,7 +524,7 @@ func TestReconcile_DuplicateTargetBlocksNewer(t *testing.T) {
 		Scheme:   scheme,
 		Recorder: recorder,
 		pauser:   &stubPauser{},
-		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		engines:  newEngineRegistry(func() forecaster { return &stubForecaster{} }),
 		clock:    func() time.Time { return fixedTime },
 	}
 
@@ -596,7 +596,7 @@ func TestReconcile_DuplicateTargetAllowsOlder(t *testing.T) {
 		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		pauser:   &stubPauser{},
-		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		engines:  newEngineRegistry(func() forecaster { return &stubForecaster{} }),
 		clock:    func() time.Time { return fixedTime },
 	}
 
@@ -650,7 +650,7 @@ func TestReconcile_DuplicateTargetClearsWhenResolved(t *testing.T) {
 		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		pauser:   &stubPauser{},
-		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		engines:  newEngineRegistry(func() forecaster { return &stubForecaster{} }),
 		clock:    func() time.Time { return fixedTime },
 	}
 
@@ -696,7 +696,7 @@ func newSharedTargetReconciler(t *testing.T, objs ...client.Object) (*Reconciler
 		Scheme:   scheme,
 		Recorder: recorder,
 		pauser:   &stubPauser{},
-		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{} }),
+		engines:  newEngineRegistry(func() forecaster { return &stubForecaster{} }),
 		clock:    func() time.Time { return fixedTime },
 	}, recorder
 }

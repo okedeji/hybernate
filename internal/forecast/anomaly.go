@@ -16,113 +16,84 @@ limitations under the License.
 
 package forecast
 
-import "math"
+import (
+	"math"
+	"math/bits"
+)
 
 const (
 	zScoreThreshold       = 3.0
 	regimeChangeThreshold = 3
 	anomalyWindow         = 24
+	anomalyWindowMask     = 1<<anomalyWindow - 1
+
+	// anomalyMemory is how many hours the error statistics effectively
+	// remember: a week, so that a weekday/weekend pattern's errors are all
+	// part of what is normal.
+	anomalyMemory = WeeklySeason
 )
 
-// AnomalyDetector identifies regime changes by tracking z-score anomalies
-// in a rolling window. When anomalies cluster (3+ in 24 hours), the model's
-// learned patterns are no longer valid.
+// AnomalyDetector flags forecast errors that are far outside the errors
+// seen recently, and declares a regime change when they cluster: 3 or more
+// in the last 24 observations.
+//
+// The error is signed (actual - forecast) and the z-score two-sided,
+// |error - mean| / stddev, so a sudden surge and a sudden disappearance of
+// demand both count. The mean and variance are exponentially weighted, so
+// the detector follows the model as it improves, and each error is clipped
+// to 3 standard deviations before it updates them, so one spike doesn't
+// widen what counts as normal for a week.
+//
+// For the first day after it starts or resets nothing is flagged or
+// clipped, so the errors of a new regime are learned in full.
 type AnomalyDetector struct {
-	errors []float64
-	pos    int
-	full   bool
 	mean   float64
-	m2     float64
+	vari   float64
 	count  int
-	recent []bool
-	rPos   int
-	rFull  bool
+	recent uint32
 }
 
-func NewAnomalyDetector() *AnomalyDetector {
-	return &AnomalyDetector{
-		errors: make([]float64, anomalyWindow),
-		recent: make([]bool, anomalyWindow),
-	}
-}
-
-// Record checks whether the error between forecast and actual is anomalous.
-// Uses Welford's online algorithm for running mean and variance.
-func (a *AnomalyDetector) Record(forecast, actual float64) bool {
+// Record scores one forecast error. It reports whether the error is
+// anomalous, and returns the error clipped to 3 standard deviations: what
+// the model should learn from, so one outlier doesn't distort it for weeks.
+// floor is the smallest standard deviation errors are judged against, so a
+// workload whose forecast has been exact (zero demand, forecast zero) isn't
+// alarmed by a single millicore.
+func (a *AnomalyDetector) Record(forecast, actual, floor float64) (anomaly bool, clipped float64) {
 	err := actual - forecast
+	stddev := math.Max(math.Sqrt(a.vari), floor)
 
-	a.count++
-	delta := err - a.mean
-	a.mean += delta / float64(a.count)
-	delta2 := err - a.mean
-	a.m2 += delta * delta2
-
-	anomaly := false
-	if a.count > anomalyWindow {
-		stddev := math.Sqrt(a.m2 / float64(a.count-1))
-		if stddev > 0 {
-			z := math.Abs(err-a.mean) / stddev
-			anomaly = z > zScoreThreshold
-		}
+	if a.count >= anomalyWindow && stddev > 0 {
+		anomaly = math.Abs(err-a.mean)/stddev > zScoreThreshold
 	}
 
-	a.recent[a.rPos] = anomaly
-	a.rPos = (a.rPos + 1) % anomalyWindow
-	if a.rPos == 0 {
-		a.rFull = true
+	clipped = err
+	if a.count >= anomalyWindow {
+		limit := zScoreThreshold * stddev
+		clipped = math.Max(a.mean-limit, math.Min(a.mean+limit, err))
 	}
+	a.count = min(a.count+1, anomalyMemory)
+	weight := 1 / float64(a.count)
+	delta := clipped - a.mean
+	a.mean += weight * delta
+	a.vari = (1 - weight) * (a.vari + weight*delta*delta)
 
-	return anomaly
+	a.recent = (a.recent << 1) & anomalyWindowMask
+	if anomaly {
+		a.recent |= 1
+	}
+	return anomaly, clipped
 }
 
-// RegimeChange returns true when anomalies cluster, indicating the model's
+// RegimeChange reports whether anomalies have clustered, meaning the
 // learned patterns no longer match reality.
 func (a *AnomalyDetector) RegimeChange() bool {
-	if !a.rFull {
-		return false
-	}
-
-	count := 0
-	for _, v := range a.recent {
-		if v {
-			count++
-		}
-	}
-	return count >= regimeChangeThreshold
+	return bits.OnesCount32(a.recent) >= regimeChangeThreshold
 }
 
-func (a *AnomalyDetector) export() AnomalyState {
-	errs := make([]float64, len(a.errors))
-	copy(errs, a.errors)
-	recent := make([]bool, len(a.recent))
-	copy(recent, a.recent)
-	return AnomalyState{
-		Errors: errs,
-		Pos:    a.pos,
-		Full:   a.full,
-		Mean:   a.mean,
-		M2:     a.m2,
-		Count:  a.count,
-		Recent: recent,
-		RPos:   a.rPos,
-		RFull:  a.rFull,
-	}
-}
-
-func importAnomalyDetector(st AnomalyState) *AnomalyDetector {
-	errs := make([]float64, len(st.Errors))
-	copy(errs, st.Errors)
-	recent := make([]bool, len(st.Recent))
-	copy(recent, st.Recent)
-	return &AnomalyDetector{
-		errors: errs,
-		pos:    st.Pos,
-		full:   st.Full,
-		mean:   st.Mean,
-		m2:     st.M2,
-		count:  st.Count,
-		recent: recent,
-		rPos:   st.RPos,
-		rFull:  st.RFull,
-	}
+// Reset forgets the error statistics and the recent anomalies, so the
+// errors of a new regime become the new normal rather than one long string
+// of anomalies.
+func (a *AnomalyDetector) Reset() {
+	*a = AnomalyDetector{}
 }

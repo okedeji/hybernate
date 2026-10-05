@@ -88,7 +88,7 @@ func depReconciler(t *testing.T, pauser *stubPauser, objs ...client.Object) *Rec
 		Recorder: events.NewFakeRecorder(20),
 		pauser:   pauser,
 		metrics:  &metrics,
-		engines:  newEngineRegistry(func(_ int) forecaster { return &stubForecaster{phase: forecast.Observing} }),
+		engines:  newEngineRegistry(func() forecaster { return &stubForecaster{phase: forecast.Observing} }),
 		clock:    func() time.Time { return fixedTime },
 	}
 }
@@ -504,7 +504,7 @@ func TestDependencies_UnwatchedNamespaceDoesNotBlock(t *testing.T) {
 	r := &Reconciler{Client: cached, Scheme: scheme, Recorder: events.NewFakeRecorder(20),
 		WatchNamespaces: []string{"default"}, pauser: pauser, metrics: &metrics,
 		clock:   func() time.Time { return fixedTime },
-		engines: newEngineRegistry(func(_ int) forecaster { return &stubForecaster{phase: forecast.Observing} })}
+		engines: newEngineRegistry(func() forecaster { return &stubForecaster{phase: forecast.Observing} })}
 
 	var w v1alpha1.ManagedWorkload
 	require.Eventually(t, func() bool {
