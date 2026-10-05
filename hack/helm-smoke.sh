@@ -23,7 +23,7 @@ REPLICAS=2
 WEB_IMAGE=registry.k8s.io/e2e-test-images/agnhost:2.52
 CURL_IMAGE=curlimages/curl:8.7.1
 METRICS_SERVER_IMAGE=registry.k8s.io/metrics-server/metrics-server:v0.7.2
-METRICS_SERVER_MANIFEST=https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
+METRICS_SERVER_MANIFEST="$(dirname "$0")/../test/e2e/testdata/metrics-server-v0.7.2.yaml"
 
 if "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   echo "kind cluster $CLUSTER already exists; set KIND_CLUSTER to a new name" >&2
@@ -89,6 +89,20 @@ not_empty() {
   [ -n "$(kubectl get "$object" -n "$ns" -o "jsonpath=$path")" ]
 }
 
+# The EndpointSlices the operator writes to route the workload's Services
+# to the doorman. Their names are hashed, so they're found by label.
+DOORMAN_SLICES="endpointslice.kubernetes.io/managed-by=doorman.hybernate.io,hybernate.io/managed-workload=$APP"
+
+routed() {
+  [ -n "$(kubectl get endpointslices -n "$WATCHED" -l "$DOORMAN_SLICES" -o 'jsonpath={.items[*].endpoints[*].addresses[0]}')" ]
+}
+
+unrouted() {
+  local slices
+  slices=$(kubectl get endpointslices -n "$WATCHED" -l "$DOORMAN_SLICES" -o 'jsonpath={.items[*].metadata.name}') &&
+    [ -z "$slices" ]
+}
+
 "$KIND" create cluster --name "$CLUSTER" --wait 2m
 make docker-build IMG="$IMG"
 make load-test-e2e-images KIND_CLUSTER="$CLUSTER" E2E_IMAGES="$WEB_IMAGE $CURL_IMAGE $METRICS_SERVER_IMAGE"
@@ -150,8 +164,7 @@ eventually 60 "the Deployment to scale to 0" is deployment/$APP "$WATCHED" '{.sp
 eventually 60 "the Service to be routed to the doorman" \
   is managedworkload/$APP "$WATCHED" '{.status.conditions[?(@.type=="WakeOnRequest")].reason}' DoormanRouted
 is managedworkload/$APP "$WATCHED" '{.status.conditions[?(@.type=="WakeOnRequest")].status}' True
-eventually 60 "the doorman's EndpointSlice" \
-  not_empty endpointslice/$APP-hybernate-doorman "$WATCHED" '{.endpoints[*].addresses[0]}'
+eventually 60 "the doorman's EndpointSlices" routed
 
 echo "sending a request to the paused workload's Service"
 # kube-proxy programs the doorman's endpoints a moment after they're
@@ -160,7 +173,7 @@ echo "sending a request to the paused workload's Service"
 kubectl run curl -n "$WATCHED" --restart=Never --image="$CURL_IMAGE" --image-pull-policy=IfNotPresent --command -- \
   curl -sS --fail-with-body --max-time 150 --retry 10 --retry-delay 1 --retry-connrefused "http://$APP/hostname"
 eventually 200 "the request to finish" is pod/curl "$WATCHED" '{.status.phase}' Succeeded
-answer=$(kubectl logs curl -n "$WATCHED")
+answer=$(kubectl logs curl -n "$WATCHED" | tail -n 1)
 case "$answer" in
   "$APP"-*) echo "answered by $answer" ;;
   *)
@@ -173,8 +186,7 @@ echo "checking the request woke it with all its replicas"
 eventually 120 "the workload to be Running" is managedworkload/$APP "$WATCHED" '{.status.phase}' Running
 is managedworkload/$APP "$WATCHED" '{.status.activity.lastActivitySource}' request
 eventually 120 "$REPLICAS ready replicas" is deployment/$APP "$WATCHED" '{.status.readyReplicas}' "$REPLICAS"
-eventually 60 "the doorman's EndpointSlice to be removed" \
-  sh -c "! kubectl get endpointslice $APP-hybernate-doorman -n $WATCHED"
+eventually 60 "the doorman's EndpointSlices to be removed" unrouted
 
 echo "checking the unwatched namespace was left alone"
 if kubectl get managedworkload "$APP" -n "$UNWATCHED" >/dev/null 2>&1; then
