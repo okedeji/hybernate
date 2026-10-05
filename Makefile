@@ -129,7 +129,7 @@ test-alerts: ## Unit-test the chart's and config/prometheus's alert rules with p
 	go run ./hack/promrules < config/prometheus/alerts.yaml > "$$dir/kustomize.rules.yaml"; \
 	helm template hybernate charts/hybernate --set metrics.prometheusRule.enabled=true \
 		--show-only templates/prometheusrule.yaml | go run ./hack/promrules > "$$dir/chart.rules.yaml"; \
-	$(CONTAINER_TOOL) run --rm -v "$$dir:/rules" -w /rules --entrypoint promtool $(PROMETHEUS_IMAGE) \
+	$(CONTAINER_TOOL) run --rm --user "$$(id -u):$$(id -g)" -v "$$dir:/rules" -w /rules --entrypoint promtool $(PROMETHEUS_IMAGE) \
 		test rules $$(cd "$$dir" && ls *_test.yaml)
 
 .PHONY: check-chart
