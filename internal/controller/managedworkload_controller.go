@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -101,14 +102,16 @@ type Reconciler struct {
 	// saving changes. Nil means UTC.
 	Timezone *time.Location
 
-	pauser        lifecyclePauser
-	metrics       metricsReader
-	prices        listPricer
-	autoscalers   *autoscaler.Finder
-	engines       *engineRegistry
-	activityMemo  activityMemo
-	prometheusURL string
-	clock         func() time.Time
+	pauser          lifecyclePauser
+	metrics         metricsReader
+	prices          listPricer
+	autoscalers     *autoscaler.Finder
+	engines         *engineRegistry
+	activityMemo    activityMemo
+	doormanPorts    portAllocator
+	doormanFailures failureBackoff
+	prometheusURL   string
+	clock           func() time.Time
 }
 
 type lifecyclePauser interface {
@@ -136,14 +139,19 @@ type lifecyclePauser interface {
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile evaluates the current state of a ManagedWorkload and acts on it.
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, retErr error) {
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 	defer cancel()
 	logger := log.FromContext(ctx)
 
+	var doormanRetry time.Duration
 	defer func() {
 		if retErr != nil {
 			metrics.ReconcileErrors.WithLabelValues("managedworkload").Inc()
+			return
+		}
+		if doormanRetry > 0 && (res.RequeueAfter == 0 || res.RequeueAfter > doormanRetry) {
+			res.RequeueAfter = doormanRetry
 		}
 	}()
 
@@ -208,9 +216,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 	// --- Wake on request ---
 
-	if err := r.reconcileDoorman(ctx, &workload, target); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling doorman routes: %w", err)
-	}
+	doormanRetry = r.routeDoorman(ctx, &workload, target)
 
 	// --- In-flight transitions ---
 
@@ -487,6 +493,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 			"restored to %d replicas: no longer managed", pause.PreviousReplicas)
 	}
 	r.activityMemo.forget(workload.UID)
+	r.doormanFailures.reset(workload.UID)
 	r.forgetForecast(workload)
 	metrics.DeleteWorkload(workload.Namespace, workload.Name)
 	return nil
@@ -496,20 +503,23 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 // deletion, the ignore label and a protected namespace. A paused target, or
 // one being paused or resumed, is handed back as it was, scaled back up and
 // released from KEDA without waiting for it to be Ready, and the dependencies
-// it needs are woken. It reports whether there was a pause to undo. The
-// record is cleared by the caller's transition to Running, which settles the
-// paused time's cost from it first.
+// it needs are woken. Its Services stop routing to the doorman. It reports
+// whether there was a pause to undo. The record is cleared by the caller's
+// transition to Running, which settles the paused time's cost from it first.
 func (r *Reconciler) releaseTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error) {
-	if workload.Status.Pause == nil {
-		return false, nil
+	paused := workload.Status.Pause != nil
+	if paused {
+		if err := r.pauser.Restore(ctx, workload); err != nil {
+			return false, fmt.Errorf("restoring the paused target: %w", err)
+		}
+		if err := r.wakeDependencies(ctx, workload); err != nil {
+			return false, err
+		}
 	}
-	if err := r.pauser.Restore(ctx, workload); err != nil {
-		return false, fmt.Errorf("restoring the paused target: %w", err)
+	if err := r.removeDoorman(ctx, workload); err != nil {
+		return false, fmt.Errorf("removing doorman routes: %w", err)
 	}
-	if err := r.wakeDependencies(ctx, workload); err != nil {
-		return false, err
-	}
-	return true, nil
+	return paused, nil
 }
 
 // reconcileIgnored stops managing a target labelled hybernate.io/ignore,
@@ -521,6 +531,7 @@ func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.Ma
 		fmt.Sprintf("%s %s has %s label", ref.Kind, ref.Name, v1alpha1.LabelIgnore))
 
 	pause := workload.Status.Pause
+	routed := len(workload.Status.Doorman) > 0
 	released, err := r.releaseTarget(ctx, workload)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -530,7 +541,7 @@ func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.Ma
 		if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "TargetIgnored"); err != nil {
 			return ctrl.Result{}, err
 		}
-	case !reported:
+	case !reported || routed:
 		if err := r.Status().Update(ctx, workload); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating target condition: %w", err)
 		}
@@ -854,7 +865,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findRelatedWorkloads)).
 		Watches(&appsv1.Deployment{}, targetHandler).
 		Watches(&appsv1.StatefulSet{}, targetHandler).
-		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForDoorman)).
+		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForEndpoints),
+			builder.WithPredicates(r.endpointsChanged())).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.findPausedWorkloadsInNamespace)).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsInNamespace)).
 		Named("managedworkload").

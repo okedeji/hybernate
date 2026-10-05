@@ -17,22 +17,23 @@ limitations under the License.
 package doorman
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -48,36 +49,39 @@ const (
 	// gap is refused, as it would be without the doorman.
 	routeSyncInterval = 2 * time.Second
 
-	// backendPollInterval is how often a held connection checks for a Ready
-	// pod to pass it to.
-	backendPollInterval = 250 * time.Millisecond
+	// backendPollInterval is how often held connections look for a Ready
+	// pod when nothing tells the doorman that endpoints changed. With an
+	// informer, backendResyncInterval is only a safety net.
+	backendPollInterval   = 250 * time.Millisecond
+	backendResyncInterval = 5 * time.Second
 
-	// wakeStampInterval stops a burst of connections from patching the
-	// ManagedWorkload once each; one stamp is enough to start the wake.
-	wakeStampInterval = 10 * time.Second
+	// readyStaleness is how long the doorman stays Ready without loading its
+	// routes. Past it, it's serving routes that may be gone or wrong.
+	readyStaleness = 30 * time.Second
 
-	// unservedEventInterval keeps a burst of timed-out connections, all
-	// waiting on the same slow wake, to one warning event.
-	unservedEventInterval = time.Minute
+	// shutdownGrace is how long connections are kept after the doorman
+	// stops accepting new ones. It fits in the manager's 30s graceful
+	// shutdown and the pod's termination grace period.
+	shutdownGrace = 25 * time.Second
 
-	dialTimeout = 5 * time.Second
-
-	// peekTimeout bounds how long the doorman waits for a caller's first
-	// bytes to tell a browser from other clients. Some protocols wait for
-	// the server to speak first and send nothing; they're held as usual.
-	// The wake is already underway, so the wait doesn't delay it.
-	peekTimeout = 500 * time.Millisecond
-
-	// maxPeek is enough for any browser's request line and headers.
-	maxPeek = 16 << 10
-
-	// routeDrain keeps a port open after its workload is Running and its
-	// route is gone. Proxies and kube-proxy take a moment to stop sending
-	// there; without it, a browser's last refresh of the waking-up page
-	// would land on a closed port and show the proxy's error page, which
-	// doesn't refresh.
-	routeDrain = 30 * time.Second
+	acceptRetry = 100 * time.Millisecond
 )
+
+// Informers is the part of a controller-runtime cache the doorman uses to
+// hear the moment a Service's endpoints change.
+type Informers interface {
+	GetInformer(ctx context.Context, obj client.Object, opts ...cache.InformerGetOption) (cache.Informer, error)
+}
+
+// Options configure a Server.
+type Options struct {
+	// Host is the address to listen on; every interface when empty.
+	Host string
+
+	// Informers, when set, wake held connections as soon as their
+	// workload's endpoints change instead of at the next poll.
+	Informers Informers
+}
 
 // route is what the doorman knows about one listening port.
 type route struct {
@@ -87,98 +91,205 @@ type route struct {
 	maxWait  time.Duration
 	page     bool
 
-	// drainUntil is set once the route has left status: the workload is
-	// awake, so connections are passed straight to it until then.
+	// drainUntil is set once the route has left status. Until then, the
+	// port passes connections to the workload's Ready pods, if any, without
+	// waking it.
 	drainUntil time.Time
+}
+
+func (r route) draining() bool { return !r.drainUntil.IsZero() }
+
+func (r route) backendKey() backendKey {
+	return backendKey{service: serviceRef{namespace: r.workload.Namespace, name: r.service}, portName: r.portName}
 }
 
 // Server listens on every allocated doorman port. It reads routes and the
 // workloads' real endpoints from the cache, and wakes a workload by stamping
-// its last-activity annotation, the same path a developer portal uses.
+// its last-request annotation, the same path a developer portal uses.
 type Server struct {
-	client   client.Client
-	recorder events.EventRecorder
-	host     string
-	now      func() time.Time
+	client    client.Client
+	recorder  events.EventRecorder
+	host      string
+	informers Informers
+	now       func() time.Time
+	grace     time.Duration
+	pollEvery time.Duration
+	silent    time.Duration
+
+	backends  *backends
+	admission *admission
 
 	mu        sync.Mutex
 	routes    map[int32]route
+	conflicts map[int32]bool
 	listeners map[int32]net.Listener
 	conns     map[net.Conn]struct{}
-	lastWake  map[types.NamespacedName]time.Time
+	wakeCalls map[types.NamespacedName]*wakeCall
+	stamped   map[types.NamespacedName]stampRecord
 	lastWarn  map[types.NamespacedName]time.Time
+	closed    bool
 
-	wg     sync.WaitGroup
-	synced atomic.Bool
+	accepting sync.WaitGroup
+	handling  sync.WaitGroup
+	lastSync  atomic.Int64
+	stopping  atomic.Bool
 }
 
-// NewServer returns a doorman that listens on host, all interfaces if empty.
-func NewServer(c client.Client, recorder events.EventRecorder, host string) *Server {
+// NewServer returns a doorman that reads and writes through c.
+func NewServer(c client.Client, recorder events.EventRecorder, opts Options) *Server {
 	return &Server{
 		client:    c,
 		recorder:  recorder,
-		host:      host,
+		host:      opts.Host,
+		informers: opts.Informers,
 		now:       time.Now,
+		grace:     shutdownGrace,
+		pollEvery: backendPollInterval,
+		silent:    silentWake,
+		backends:  newBackends(c),
+		admission: newAdmission(defaultLimits),
 		routes:    map[int32]route{},
+		conflicts: map[int32]bool{},
 		listeners: map[int32]net.Listener{},
 		conns:     map[net.Conn]struct{}{},
-		lastWake:  map[types.NamespacedName]time.Time{},
+		wakeCalls: map[types.NamespacedName]*wakeCall{},
+		stamped:   map[types.NamespacedName]stampRecord{},
 		lastWarn:  map[types.NamespacedName]time.Time{},
 	}
 }
 
-// Start runs until ctx is done, then closes every listener and connection
-// and waits for their goroutines.
+// Start serves until ctx is done. Then it stops accepting connections,
+// gives those it has up to the grace period to finish, closes the rest, and
+// waits for their goroutines.
 func (s *Server) Start(ctx context.Context) error {
-	logger := log.FromContext(ctx).WithName("doorman")
-	ticker := time.NewTicker(routeSyncInterval)
-	defer ticker.Stop()
-	defer s.shutdown()
+	// Connections outlive ctx by the grace period, so they get their own.
+	connCtx, cancelConns := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelConns()
 
-	for {
-		if err := s.syncRoutes(ctx); err != nil {
-			logger.Error(err, "syncing doorman routes")
-		} else {
-			s.synced.Store(true)
+	poll := s.pollEvery
+	if s.informers != nil {
+		stop, err := s.watchEndpoints(ctx)
+		if err != nil {
+			return err
 		}
+		defer stop()
+		poll = backendResyncInterval
+	}
+	syncTicker := time.NewTicker(routeSyncInterval)
+	defer syncTicker.Stop()
+	pollTicker := time.NewTicker(poll)
+	defer pollTicker.Stop()
+
+	s.sync(ctx, connCtx)
+	for {
 		select {
 		case <-ctx.Done():
+			s.shutdown(cancelConns)
 			return nil
-		case <-ticker.C:
+		case <-pollTicker.C:
+			s.backends.changedAll()
+		case <-syncTicker.C:
+			s.sync(ctx, connCtx)
 		}
 	}
 }
 
-// Ready reports whether routes have been loaded. Until then the doorman pod
-// stays out of its Service, so it isn't sent connections it can't route.
+func (s *Server) sync(ctx, connCtx context.Context) {
+	if err := s.syncRoutes(ctx, connCtx); err != nil {
+		log.FromContext(ctx).WithName("doorman").Error(err, "syncing doorman routes")
+	}
+	s.admission.prune(s.now())
+}
+
+// watchEndpoints wakes the connections held for a Service whenever one of
+// its EndpointSlices changes.
+func (s *Server) watchEndpoints(ctx context.Context) (func(), error) {
+	informer, err := s.informers.GetInformer(ctx, &discoveryv1.EndpointSlice{})
+	if err != nil {
+		return nil, fmt.Errorf("getting the endpointslice informer: %w", err)
+	}
+	changed := func(obj any) {
+		if tombstone, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
+			obj = tombstone.Obj
+		}
+		if slice, ok := obj.(*discoveryv1.EndpointSlice); ok {
+			s.backends.changed(serviceRef{namespace: slice.Namespace, name: slice.Labels[discoveryv1.LabelServiceName]})
+		}
+	}
+	registration, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+		AddFunc:    changed,
+		UpdateFunc: func(_, obj any) { changed(obj) },
+		DeleteFunc: changed,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("watching endpointslices: %w", err)
+	}
+	return func() { _ = informer.RemoveEventHandler(registration) }, nil // the informer stops with the cache anyway
+}
+
+// Ready reports whether the doorman's routes are current. A doorman that
+// can't load them, or is shutting down, leaves its Service, and the operator
+// stops sending paused workloads' traffic to it.
 func (s *Server) Ready(_ *http.Request) error {
-	if !s.synced.Load() {
+	if s.stopping.Load() {
+		return errors.New("doorman is shutting down")
+	}
+	last := s.lastSync.Load()
+	if last == 0 {
 		return errors.New("doorman routes not loaded yet")
+	}
+	if age := s.now().Sub(time.Unix(0, last)); age > readyStaleness {
+		return fmt.Errorf("doorman routes last loaded %s ago", age.Round(time.Second))
 	}
 	return nil
 }
 
-func (s *Server) shutdown() {
+func (s *Server) shutdown(cancelConns context.CancelFunc) {
+	s.stopping.Store(true)
 	s.mu.Lock()
 	for port, l := range s.listeners {
-		_ = l.Close() // closing ends its accept loop; nothing to do if it fails
+		_ = l.Close() // ends its accept loop; nothing to do if it fails
 		delete(s.listeners, port)
 	}
+	s.mu.Unlock()
+	s.accepting.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		s.handling.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(s.grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+	}
+
+	cancelConns()
+	s.mu.Lock()
+	s.closed = true
 	for c := range s.conns {
 		_ = c.Close() // ends its proxy copies; the client sees the connection drop
 	}
 	s.mu.Unlock()
-	s.wg.Wait()
+	<-done
 }
 
 // syncRoutes opens a listener for every route and closes listeners whose
 // route is gone. Closing a listener doesn't affect connections it accepted.
-func (s *Server) syncRoutes(ctx context.Context) error {
+// A port claimed by more than one route is served for none of them: picking
+// one would send another workload's traffic to it.
+func (s *Server) syncRoutes(ctx, connCtx context.Context) error {
 	var list v1alpha1.ManagedWorkloadList
 	if err := s.client.List(ctx, &list); err != nil {
 		return fmt.Errorf("listing managed workloads: %w", err)
 	}
-	routes := map[int32]route{}
+	now := s.now()
+	s.lastSync.Store(now.UnixNano())
+
+	claims := map[int32][]route{}
 	for _, w := range list.Items {
 		maxWait := defaultMaxWait
 		if w.Spec.Wake != nil && w.Spec.Wake.MaxWait != nil && w.Spec.Wake.MaxWait.Duration > 0 {
@@ -186,36 +297,66 @@ func (s *Server) syncRoutes(ctx context.Context) error {
 		}
 		page := w.Spec.Wake == nil || w.Spec.Wake.Page == nil || *w.Spec.Wake.Page
 		for _, r := range w.Status.Doorman {
-			routes[r.DoormanPort] = route{
+			claims[r.DoormanPort] = append(claims[r.DoormanPort], route{
 				workload: types.NamespacedName{Namespace: w.Namespace, Name: w.Name},
 				service:  r.Service,
 				portName: r.PortName,
 				maxWait:  maxWait,
 				page:     page,
-			}
+			})
 		}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
-	for port, old := range s.routes {
-		if _, ok := routes[port]; ok {
+	routes := map[int32]route{}
+	conflicts := map[int32][]route{}
+	for port, rs := range claims {
+		if len(rs) > 1 {
+			conflicts[port] = rs
 			continue
 		}
-		if old.drainUntil.IsZero() {
-			old.drainUntil = now.Add(routeDrain)
-		}
-		if now.Before(old.drainUntil) {
-			routes[port] = old
-		}
+		routes[port] = rs[0]
 	}
+	for port, old := range s.routes {
+		if _, ok := conflicts[port]; ok {
+			continue
+		}
+		current, ok := routes[port]
+		if ok && current.workload == old.workload {
+			continue
+		}
+		if !old.draining() {
+			old.drainUntil = now.Add(RouteDrain)
+			s.backends.changed(old.backendKey().service)
+		}
+		if !now.Before(old.drainUntil) {
+			continue
+		}
+		if ok {
+			conflicts[port] = []route{old, current}
+			delete(routes, port)
+			continue
+		}
+		routes[port] = old
+	}
+	s.reportConflicts(ctx, conflicts)
 	s.routes = routes
+
+	keep := map[serviceRef]bool{}
+	for _, rt := range routes {
+		keep[rt.backendKey().service] = true
+	}
+	s.backends.retain(keep)
+
 	for port, l := range s.listeners {
 		if _, ok := routes[port]; !ok {
 			_ = l.Close() // stops accepting; held connections continue
 			delete(s.listeners, port)
 		}
+	}
+	if s.stopping.Load() {
+		return nil
 	}
 	var errs []error
 	for port := range routes {
@@ -228,25 +369,72 @@ func (s *Server) syncRoutes(ctx context.Context) error {
 			continue
 		}
 		s.listeners[port] = l
-		s.wg.Go(func() { s.accept(ctx, port, l) })
+		s.accepting.Go(func() { s.accept(connCtx, port, l) })
 	}
 	return errors.Join(errs...)
+}
+
+// reportConflicts logs each port newly claimed twice, once, and keeps the
+// gauge of ports in conflict current. s.mu must be held.
+func (s *Server) reportConflicts(ctx context.Context, conflicts map[int32][]route) {
+	logger := log.FromContext(ctx).WithName("doorman")
+	current := map[int32]bool{}
+	for port, rs := range conflicts {
+		current[port] = true
+		if s.conflicts[port] {
+			continue
+		}
+		claimants := make([]string, 0, len(rs))
+		for _, rt := range rs {
+			claimants = append(claimants, rt.workload.String()+" service "+rt.service)
+		}
+		slices.Sort(claimants)
+		logger.Error(errors.New("doorman port claimed more than once"), "not serving the port",
+			"port", port, "claimants", strings.Join(claimants, ", "))
+	}
+	s.conflicts = current
+	opmetrics.DoormanPortConflicts.Set(float64(len(current)))
 }
 
 func (s *Server) accept(ctx context.Context, port int32, l net.Listener) {
 	for {
 		conn, err := l.Accept()
-		if err != nil {
+		if errors.Is(err, net.ErrClosed) {
 			return
 		}
+		if err != nil {
+			// Out of file descriptors, most likely; held connections
+			// closing will free some.
+			time.Sleep(acceptRetry)
+			continue
+		}
 		s.mu.Lock()
-		s.conns[conn] = struct{}{}
+		rt, ok := s.routes[port]
+		if ok {
+			s.conns[conn] = struct{}{}
+		}
 		s.mu.Unlock()
-		s.wg.Go(func() {
+		if !ok {
+			_ = conn.Close() // the route went between accept and here
+			continue
+		}
+		s.handling.Go(func() {
 			defer s.forget(conn)
-			s.handle(ctx, port, conn)
+			s.handle(ctx, port, rt, conn)
 		})
 	}
+}
+
+// track registers a connection to the workload, so shutdown can close it.
+// One dialled as shutdown closes everything is closed at once.
+func (s *Server) track(conn net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		_ = conn.Close() // the proxy then ends at once
+		return
+	}
+	s.conns[conn] = struct{}{}
 }
 
 func (s *Server) forget(conn net.Conn) {
@@ -256,287 +444,17 @@ func (s *Server) forget(conn net.Conn) {
 	s.mu.Unlock()
 }
 
-// handle holds one connection: it wakes the workload, waits for a Ready pod,
-// and proxies the connection to it, or closes it once maxWait runs out.
-func (s *Server) handle(ctx context.Context, port int32, conn net.Conn) {
+// currentRoute is the route now on port for the workload a connection was
+// accepted for. A port that has gone, or gone to another workload, counts as
+// draining: the connection must not wake anything.
+func (s *Server) currentRoute(port int32, accepted route) route {
 	s.mu.Lock()
-	rt, ok := s.routes[port]
-	s.mu.Unlock()
-	if !ok {
-		return
+	defer s.mu.Unlock()
+	if rt, ok := s.routes[port]; ok && rt.workload == accepted.workload && rt.service == accepted.service {
+		return rt
 	}
-	logger := log.FromContext(ctx).WithName("doorman").WithValues(
-		"workload", rt.workload.Name, "namespace", rt.workload.Namespace, "service", rt.service)
-	ns, name := rt.workload.Namespace, rt.workload.Name
-	draining := !rt.drainUntil.IsZero()
-
-	opmetrics.DoormanHeldConnections.Inc()
-	defer opmetrics.DoormanHeldConnections.Dec()
-	start := s.now()
-
-	waitCtx, cancel := context.WithTimeout(ctx, rt.maxWait)
-	defer cancel()
-
-	if !draining {
-		if err := s.wake(waitCtx, rt, conn.RemoteAddr()); err != nil {
-			logger.Error(err, "waking workload")
-		}
+	if !accepted.draining() {
+		accepted.drainUntil = s.now()
 	}
-
-	var head []byte
-	if rt.page && !draining {
-		head = peek(conn)
-		if req, ok := isPageLoad(head); ok {
-			s.servePage(ctx, conn, rt, req)
-			opmetrics.DoormanWakes.WithLabelValues(ns, name, "page").Inc()
-			opmetrics.DoormanWaitSeconds.WithLabelValues("page").Observe(s.now().Sub(start).Seconds())
-			return
-		}
-	}
-
-	backend, err := s.waitForBackend(waitCtx, rt)
-	if err != nil {
-		result := "error"
-		if errors.Is(err, context.DeadlineExceeded) {
-			result = "timeout"
-		}
-		waited := s.now().Sub(start)
-		opmetrics.DoormanWakes.WithLabelValues(ns, name, result).Inc()
-		opmetrics.DoormanWaitSeconds.WithLabelValues(result).Observe(waited.Seconds())
-		logger.Info("closing held connection", "result", result, "waited", waited.Round(time.Millisecond).String())
-		s.warnUnserved(ctx, rt, result, waited)
-		return
-	}
-
-	upstream, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", backend)
-	if err != nil {
-		opmetrics.DoormanWakes.WithLabelValues(ns, name, "error").Inc()
-		logger.Error(err, "connecting to woken workload", "backend", backend)
-		s.warnUnserved(ctx, rt, "error", s.now().Sub(start))
-		return
-	}
-	opmetrics.DoormanWakes.WithLabelValues(ns, name, "success").Inc()
-	opmetrics.DoormanWaitSeconds.WithLabelValues("success").Observe(s.now().Sub(start).Seconds())
-
-	s.mu.Lock()
-	s.conns[upstream] = struct{}{}
-	s.mu.Unlock()
-	defer s.forget(upstream)
-	if len(head) > 0 {
-		if _, err := upstream.Write(head); err != nil {
-			logger.Error(err, "passing held bytes to woken workload", "backend", backend)
-			return
-		}
-	}
-	proxy(conn, upstream)
-}
-
-// peek reads what the caller has sent so far, up to the end of an HTTP
-// request's headers, for at most peekTimeout. The bytes are passed on to the
-// workload if the connection is held.
-func peek(conn net.Conn) []byte {
-	_ = conn.SetReadDeadline(time.Now().Add(peekTimeout)) // a failure just means no deadline
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-	buf := make([]byte, 0, 4<<10)
-	chunk := make([]byte, 4<<10)
-	for len(buf) < maxPeek && !bytes.Contains(buf, []byte("\r\n\r\n")) {
-		n, err := conn.Read(chunk)
-		buf = append(buf, chunk[:n]...)
-		if err != nil {
-			break
-		}
-	}
-	return buf
-}
-
-// servePage answers a browser with the waking-up page, showing how far the
-// wake has got.
-func (s *Server) servePage(ctx context.Context, conn net.Conn, rt route, req *http.Request) {
-	data := pageData{
-		Address:   pageAddress(req, rt.workload.Namespace, rt.service),
-		Service:   rt.service,
-		Workload:  rt.workload.Name,
-		Namespace: rt.workload.Namespace,
-	}
-	now := s.now()
-	var w v1alpha1.ManagedWorkload
-	if err := s.client.Get(ctx, rt.workload, &w); err == nil {
-		data.Workload = w.Spec.Target.Name
-		if w.Status.Phase == v1alpha1.PhaseResuming && w.Status.LastTransitionTime != nil {
-			data.Elapsed = sinceLabel(now.Sub(w.Status.LastTransitionTime.Time))
-		}
-		if p := w.Status.Pause; p != nil && p.PausedAt != nil {
-			data.PausedAgo = agoLabel(now.Sub(p.PausedAt.Time))
-		}
-	}
-	if addr, err := s.readyBackend(ctx, rt); err == nil && addr != "" {
-		data.Ready = true
-	}
-	_ = conn.SetWriteDeadline(time.Now().Add(dialTimeout)) // a failure just means no deadline
-	if err := writePage(conn, req, data); err != nil {
-		log.FromContext(ctx).V(1).Info("writing waking-up page", "error", err.Error(),
-			"workload", rt.workload.Name, "namespace", rt.workload.Namespace)
-	}
-}
-
-// wake stamps the workload's last-request annotation, at most once per
-// wakeStampInterval, which wakes it through the operator's annotation path,
-// and where the request came from, so the operator can learn what depends
-// on the workload.
-func (s *Server) wake(ctx context.Context, rt route, from net.Addr) error {
-	now := s.now()
-	s.mu.Lock()
-	if last, ok := s.lastWake[rt.workload]; ok && now.Sub(last) < wakeStampInterval {
-		s.mu.Unlock()
-		return nil
-	}
-	s.lastWake[rt.workload] = now
-	s.mu.Unlock()
-
-	var w v1alpha1.ManagedWorkload
-	if err := s.client.Get(ctx, rt.workload, &w); err != nil {
-		return fmt.Errorf("getting managed workload: %w", err)
-	}
-	// Every doorman replica can see the same burst of requests. One that
-	// already sees a recent stamp leaves it there.
-	if stamped, err := time.Parse(time.RFC3339, w.Annotations[v1alpha1.AnnotationLastRequest]); err == nil &&
-		now.Sub(stamped) < wakeStampInterval {
-		return nil
-	}
-	original := w.DeepCopy()
-	if w.Annotations == nil {
-		w.Annotations = map[string]string{}
-	}
-	w.Annotations[v1alpha1.AnnotationLastRequest] = now.UTC().Format(time.RFC3339)
-	if host, _, err := net.SplitHostPort(from.String()); err == nil {
-		w.Annotations[v1alpha1.AnnotationLastRequestFrom] = host
-	}
-	// The stamp is locked to the version this replica read, so when two
-	// stamp at once, only the first to land reports the wake. A conflict
-	// means the workload changed a moment ago, most likely the other
-	// replica's stamp; the stamp is repeated unlocked so the wake is never
-	// lost, and the event is left to whoever won.
-	err := s.client.Patch(ctx, &w, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{}))
-	won := err == nil
-	if apierrors.IsConflict(err) {
-		err = s.client.Patch(ctx, &w, client.MergeFrom(original))
-	}
-	if err != nil {
-		return fmt.Errorf("stamping last request: %w", err)
-	}
-	if s.recorder != nil && won {
-		s.recorder.Eventf(&w, nil, "Normal", "WokenByRequest", "Wake",
-			"request on Service %s, waking", rt.service)
-	}
-	return nil
-}
-
-// warnUnserved emits a warning event on the workload for a held connection
-// that was closed without reaching it, at most once per unservedEventInterval.
-// The metrics count every one; the event is what shows in kubectl describe.
-func (s *Server) warnUnserved(ctx context.Context, rt route, result string, waited time.Duration) {
-	if s.recorder == nil || ctx.Err() != nil {
-		return
-	}
-	now := s.now()
-	s.mu.Lock()
-	if last, ok := s.lastWarn[rt.workload]; ok && now.Sub(last) < unservedEventInterval {
-		s.mu.Unlock()
-		return
-	}
-	s.lastWarn[rt.workload] = now
-	s.mu.Unlock()
-
-	// The connection's context may be what ran out, so the lookup gets its own.
-	getCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dialTimeout)
-	defer cancel()
-	var w v1alpha1.ManagedWorkload
-	if err := s.client.Get(getCtx, rt.workload, &w); err != nil {
-		log.FromContext(ctx).Error(err, "getting managed workload for event",
-			"workload", rt.workload.Name, "namespace", rt.workload.Namespace)
-		return
-	}
-	reason := "the workload wasn't Ready within maxWait; the wake continues"
-	if result != "timeout" {
-		reason = "the workload couldn't be reached"
-	}
-	s.recorder.Eventf(&w, nil, "Warning", "RequestNotServed", "Wake",
-		"a request on Service %s was closed after %s: %s", rt.service, waited.Round(time.Second), reason)
-}
-
-// waitForBackend polls until the Service has a Ready pod, and returns its
-// address. It reads the Service's real EndpointSlices, never the doorman's,
-// so it can't route a connection back to itself.
-func (s *Server) waitForBackend(ctx context.Context, rt route) (string, error) {
-	ticker := time.NewTicker(backendPollInterval)
-	defer ticker.Stop()
-	for {
-		addr, err := s.readyBackend(ctx, rt)
-		if err != nil {
-			return "", err
-		}
-		if addr != "" {
-			return addr, nil
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-ticker.C:
-		}
-	}
-}
-
-func (s *Server) readyBackend(ctx context.Context, rt route) (string, error) {
-	var list discoveryv1.EndpointSliceList
-	if err := s.client.List(ctx, &list, client.InNamespace(rt.workload.Namespace),
-		client.MatchingLabels{discoveryv1.LabelServiceName: rt.service}); err != nil {
-		return "", fmt.Errorf("listing endpoints for service %s: %w", rt.service, err)
-	}
-	for _, slice := range list.Items {
-		if slice.Labels[discoveryv1.LabelManagedBy] == ManagedBy {
-			continue
-		}
-		port, ok := slicePort(slice, rt.portName)
-		if !ok {
-			continue
-		}
-		for _, ep := range slice.Endpoints {
-			if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
-				continue
-			}
-			if len(ep.Addresses) > 0 {
-				return net.JoinHostPort(ep.Addresses[0], strconv.Itoa(int(port))), nil
-			}
-		}
-	}
-	return "", nil
-}
-
-func slicePort(slice discoveryv1.EndpointSlice, name string) (int32, bool) {
-	for _, p := range slice.Ports {
-		if p.Port == nil {
-			continue
-		}
-		if (p.Name == nil && name == "") || (p.Name != nil && *p.Name == name) {
-			return *p.Port, true
-		}
-	}
-	return 0, false
-}
-
-// proxy copies in both directions until either side is done. Closing the
-// write half on EOF lets the other direction finish its response.
-func proxy(downstream, upstream net.Conn) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	pipe := func(dst, src net.Conn) {
-		defer wg.Done()
-		_, _ = io.Copy(dst, src) // an error just ends this direction
-		if tcp, ok := dst.(*net.TCPConn); ok {
-			_ = tcp.CloseWrite() // signals EOF; nothing to do if already closed
-		}
-	}
-	go pipe(upstream, downstream)
-	go pipe(downstream, upstream)
-	wg.Wait()
+	return accepted
 }

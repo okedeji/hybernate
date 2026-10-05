@@ -1,0 +1,126 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package doorman
+
+import (
+	"net/netip"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+// limits bound what callers can make one doorman pod do. A held connection
+// costs two goroutines and its first bytes, about 20KiB, so maxHeld keeps
+// held connections well inside the pod's memory. An ingress controller
+// sends every user's traffic from one address, so the per-source limits
+// leave room for it to wake many environments at once.
+type limits struct {
+	maxHeld          int
+	maxHeldPerSource int
+
+	sourceWakeEvery time.Duration
+	sourceWakeBurst int
+	wakeEvery       time.Duration
+	wakeBurst       int
+}
+
+var defaultLimits = limits{
+	maxHeld:          2048,
+	maxHeldPerSource: 512,
+	sourceWakeEvery:  2 * time.Second,
+	sourceWakeBurst:  30,
+	wakeEvery:        100 * time.Millisecond,
+	wakeBurst:        200,
+}
+
+// sourceIdle is how long a source with nothing held is remembered. Its wake
+// allowance has long refilled by then.
+const sourceIdle = 10 * time.Minute
+
+type source struct {
+	held  int
+	wakes *rate.Limiter
+	seen  time.Time
+}
+
+// admission counts held connections and wakes, overall and per source.
+type admission struct {
+	limits limits
+
+	mu      sync.Mutex
+	held    int
+	sources map[netip.Addr]*source
+	wakes   *rate.Limiter
+}
+
+func newAdmission(l limits) *admission {
+	return &admission{
+		limits:  l,
+		sources: map[netip.Addr]*source{},
+		wakes:   rate.NewLimiter(rate.Every(l.wakeEvery), l.wakeBurst),
+	}
+}
+
+func (a *admission) source(addr netip.Addr, now time.Time) *source {
+	s, ok := a.sources[addr]
+	if !ok {
+		s = &source{wakes: rate.NewLimiter(rate.Every(a.limits.sourceWakeEvery), a.limits.sourceWakeBurst)}
+		a.sources[addr] = s
+	}
+	s.seen = now
+	return s
+}
+
+// hold admits one more held connection from addr, unless a cap is reached.
+func (a *admission) hold(addr netip.Addr, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.source(addr, now)
+	if a.held >= a.limits.maxHeld || s.held >= a.limits.maxHeldPerSource {
+		return false
+	}
+	a.held++
+	s.held++
+	return true
+}
+
+// release ends a held connection hold admitted.
+func (a *admission) release(addr netip.Addr, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.held--
+	a.source(addr, now).held--
+}
+
+// allowWake reports whether addr may start another wake now.
+func (a *admission) allowWake(addr netip.Addr, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.source(addr, now).wakes.AllowN(now, 1) && a.wakes.AllowN(now, 1)
+}
+
+// prune forgets sources with nothing held that haven't been seen lately.
+func (a *admission) prune(now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for addr, s := range a.sources {
+		if s.held == 0 && now.Sub(s.seen) > sourceIdle {
+			delete(a.sources, addr)
+		}
+	}
+}

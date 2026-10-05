@@ -48,62 +48,109 @@ const Mark = "M20.79,13.95L18.46,14.57L16.46,12.57L18.46,10.57L20.79,11.19C21.15
 	"16.19L18.1,18.5C18.19,18.87 18.56,19.09 18.91,19C19.27,18.92 19.5,18.55 19.41,18.19L18.79,15.87L21.11,15.25C21.47," +
 	"15.17 21.69,14.8 21.6,14.44C21.52,14.08 21.15,13.86 20.79,13.95Z"
 
-// pageRefresh is how often the page reloads while the workload starts.
-// Once it's Ready, the page reloads at once into the app.
-const (
-	pageRefresh      = 3 * time.Second
-	pageReadyRefresh = time.Second
-)
+// pageRefresh is how often the page reloads while the workload starts. The
+// reload that finds it Ready is passed straight through to it.
+const pageRefresh = 3 * time.Second
 
+// pageData is all the page shows. It's served to whoever reaches the
+// Service, so it names nothing inside the cluster: no namespace, workload,
+// or Service name, and not when the workload was paused.
 type pageData struct {
-	// Address is what the browser asked for, so the page reads as part of
-	// the environment the person opened rather than as another site.
-	Address   string
-	Service   string
-	Workload  string
-	Namespace string
-	Ready     bool
-	Elapsed   string
-	PausedAgo string
-	Refresh   int
-	Mark      string
+	// Address is the host the browser asked for, so the page reads as part
+	// of what the person opened rather than as another site.
+	Address string
+	Elapsed string
+	Refresh int
+	Mark    string
 }
 
-// pageAddress is the host the browser asked for, without its port, or the
-// Service when the request has no host.
-func pageAddress(req *http.Request, namespace, service string) string {
+// pageAddress is the host the browser asked for, without its port.
+func pageAddress(req *http.Request) string {
 	host := req.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if host == "" {
-		return namespace + "/" + service
-	}
 	return host
 }
 
-// isPageLoad reports whether head, the first bytes of a held connection, is
-// a browser loading a page: an HTTP GET or HEAD for a document, not a fetch
-// from a script, an API client, or a protocol upgrade. Those still get held,
-// since a page is no answer to them.
-func isPageLoad(head []byte) (*http.Request, bool) {
+// httpMethods are the request lines that mark a connection as HTTP/1.x, or
+// as the HTTP/2 preface.
+var httpMethods = []string{"GET ", "HEAD ", "POST ", "PUT ", "DELETE ", "OPTIONS ", "PATCH ", "CONNECT ", "TRACE ", "PRI "}
+
+func looksLikeHTTP(head []byte) bool {
+	for _, m := range httpMethods {
+		if bytes.HasPrefix(head, []byte(m)) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRequest parses head, the first bytes of a connection, as an HTTP
+// request, if it is one whose headers have all arrived.
+func parseRequest(head []byte) (*http.Request, bool) {
+	if !looksLikeHTTP(head) {
+		return nil, false
+	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(head)))
 	if err != nil {
 		return nil, false
 	}
+	return req, true
+}
+
+// healthCheckAgents are the User-Agent prefixes of load balancer health
+// checks, kubelet probes and metrics scrapers. They reach a paused
+// workload's Service on a schedule, so a request from one never wakes it.
+var healthCheckAgents = []string{
+	"kube-probe/",
+	"Prometheus/",
+	"vm_promscrape",
+	"GrafanaAgent/",
+	"Alloy/",
+	"ELB-HealthChecker/",
+	"GoogleHC/",
+	"Envoy/HC",
+}
+
+// isHealthCheck reports whether req comes from a health checker or scraper.
+func isHealthCheck(req *http.Request) bool {
+	agent := req.UserAgent()
+	for _, prefix := range healthCheckAgents {
+		if strings.HasPrefix(agent, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeUnavailable answers a health check: the workload is paused, so it
+// isn't healthy, and it stays paused.
+func writeUnavailable(w io.Writer) error {
+	_, err := io.WriteString(w, "HTTP/1.1 503 Service Unavailable\r\n"+
+		"Content-Length: 0\r\n"+
+		"Cache-Control: no-store\r\n"+
+		"Connection: close\r\n\r\n")
+	return err
+}
+
+// isPageLoad reports whether req is a browser loading a page: a GET or HEAD
+// for a document, not a fetch from a script, an API client, or a protocol
+// upgrade. Those still get held, since a page is no answer to them.
+func isPageLoad(req *http.Request) bool {
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
-		return nil, false
+		return false
 	}
 	if req.Header.Get("Upgrade") != "" {
-		return nil, false
+		return false
 	}
 	// Browsers since 2020 send Sec-Fetch-Mode on every request, and only a
 	// top-level or frame navigation is "navigate". Older ones are judged by
 	// asking for HTML.
 	if mode := req.Header.Get("Sec-Fetch-Mode"); mode != "" {
-		return req, mode == "navigate"
+		return mode == "navigate"
 	}
-	return req, strings.Contains(req.Header.Get("Accept"), "text/html")
+	return strings.Contains(req.Header.Get("Accept"), "text/html")
 }
 
 // writePage answers a page load with the waking-up page. It's a 503 so that
@@ -111,11 +158,7 @@ func isPageLoad(head []byte) (*http.Request, bool) {
 // after it.
 func writePage(w io.Writer, req *http.Request, data pageData) error {
 	data.Mark = Mark
-	refresh := pageRefresh
-	if data.Ready {
-		refresh = pageReadyRefresh
-	}
-	data.Refresh = int(refresh.Seconds())
+	data.Refresh = int(pageRefresh.Seconds())
 	var body bytes.Buffer
 	if err := pageTemplate.Execute(&body, data); err != nil {
 		return fmt.Errorf("rendering page: %w", err)
@@ -137,26 +180,6 @@ func writePage(w io.Writer, req *http.Request, data pageData) error {
 		return fmt.Errorf("writing page: %w", err)
 	}
 	return nil
-}
-
-// agoLabel says how long ago the workload was paused, for the page.
-func agoLabel(d time.Duration) string {
-	plural := func(n int, unit string) string {
-		if n == 1 {
-			return fmt.Sprintf("1 %s ago", unit)
-		}
-		return fmt.Sprintf("%d %ss ago", n, unit)
-	}
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		return plural(int(d.Minutes()), "minute")
-	case d < 48*time.Hour:
-		return plural(int(d.Hours()), "hour")
-	default:
-		return plural(int(d.Hours()/24), "day")
-	}
 }
 
 // sinceLabel says how long ago the wake started, for the page.

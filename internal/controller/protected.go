@@ -62,6 +62,7 @@ func (r *Reconciler) reconcileProtected(ctx context.Context, workload *v1alpha1.
 			workload.Namespace, v1alpha1.LabelAllowProtected, v1alpha1.True))
 
 	pause := workload.Status.Pause
+	routed := len(workload.Status.Doorman) > 0
 	released, err := r.releaseTarget(ctx, workload)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -71,7 +72,7 @@ func (r *Reconciler) reconcileProtected(ctx context.Context, workload *v1alpha1.
 		if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Protected"); err != nil {
 			return ctrl.Result{}, err
 		}
-	case !reported:
+	case !reported || routed:
 		if err := r.Status().Update(ctx, workload); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating status of a protected workload: %w", err)
 		}

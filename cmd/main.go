@@ -173,7 +173,7 @@ func main() {
 	c := client.WithFieldOwner(mgr.GetClient(), v1alpha1.FieldManager)
 	readyz := healthz.Ping
 	if runDoorman {
-		server := doorman.NewServer(c, mgr.GetEventRecorder("hybernate-doorman"), "")
+		server := doorman.NewServer(c, mgr.GetEventRecorder("hybernate-doorman"), doorman.Options{Informers: mgr.GetCache()})
 		if err := mgr.Add(server); err != nil {
 			setupLog.Error(err, "unable to add doorman")
 			os.Exit(1)
