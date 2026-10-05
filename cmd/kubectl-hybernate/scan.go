@@ -194,7 +194,7 @@ Examples:
 	cmd.Flags().StringSliceVar(&opts.exclude, "exclude-namespaces", discovery.SystemNamespaces, "Namespaces to skip")
 	addOutputFlag(cmd, &opts.output)
 	cmd.Flags().IntVar(&opts.limit, "limit", 25,
-		"Workloads to list in the table, most savings first (0 for all)")
+		"Workloads to list in the table, idle first, then by what pausing could save (0 for all)")
 	cmd.Flags().IntVar(&opts.cpuThreshold, "cpu-threshold", defaultCPUThreshold,
 		"CPU use, as a percentage of requests, at which a workload counts as active; managed workloads use their own")
 	cmd.Flags().Float64Var(&opts.cpuPrice, "cpu-price", opts.cpuPrice, "Your price per vCPU-hour, in dollars")
