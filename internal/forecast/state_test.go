@@ -177,8 +177,40 @@ func exercise(t *testing.T, e *Engine) {
 	}
 	require.True(t, e.Model.finite())
 	require.GreaterOrEqual(t, e.Model.level, 0.0)
-	_, err := e.Export()
+	state, err := e.Export()
 	require.NoError(t, err)
+	_, err = ImportEngine(state, Settings{Threshold: 85})
+	require.NoError(t, err, "an engine imports what it exported")
+}
+
+// An engine restored from state at the edge of what import accepts mustn't
+// learn its way past it: the next restart would discard everything.
+func TestState_ExtremeStateStaysImportable(t *testing.T) {
+	for _, sign := range []float64{1, -1} {
+		st := engineState{
+			Version:  stateVersion,
+			Phase:    int(FullyActive),
+			N:        1000,
+			LastHour: testEpoch.Unix(),
+			Level:    maxMagnitude,
+			Trend:    sign * maxMagnitude,
+			AnMean:   sign * maxMagnitude,
+			AnVar:    maxMagnitude * maxMagnitude,
+			AnCount:  anomalyMemory,
+		}
+		for i := range st.Daily {
+			st.Daily[i] = float32(sign * maxMagnitude * 0.99)
+		}
+		for i := range st.Weekly {
+			st.Weekly[i] = float32(-sign * maxMagnitude * 0.99)
+		}
+		data, err := json.Marshal(st)
+		require.NoError(t, err)
+		e, err := decodeEngine(data, Settings{Threshold: 85})
+		require.NoError(t, err)
+
+		exercise(t, e)
+	}
 }
 
 func FuzzDecodeEngine(f *testing.F) {

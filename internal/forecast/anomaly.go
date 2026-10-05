@@ -75,8 +75,8 @@ func (a *AnomalyDetector) Record(forecast, actual, floor float64) (anomaly bool,
 	a.count = min(a.count+1, anomalyMemory)
 	weight := 1 / float64(a.count)
 	delta := clipped - a.mean
-	a.mean += weight * delta
-	a.vari = (1 - weight) * (a.vari + weight*delta*delta)
+	a.mean = clampMagnitude(a.mean + weight*delta)
+	a.vari = math.Min(maxMagnitude*maxMagnitude, (1-weight)*(a.vari+weight*delta*delta))
 
 	a.recent = (a.recent << 1) & anomalyWindowMask
 	if anomaly {

@@ -131,7 +131,7 @@ func NewModel(params Params) *Model {
 func (m *Model) forecast(t time.Time, steps int) float64 {
 	steps = min(steps, maxTrendSteps)
 	f := m.level + float64(steps)*m.trend + m.daily[dailyIndex(t)] + m.weekly[weeklyIndex(t)]
-	return math.Max(0, f)
+	return math.Min(maxMagnitude, math.Max(0, f))
 }
 
 // update fits an observation y made at t, steps hours after the previous
@@ -156,7 +156,26 @@ func (m *Model) update(y float64, t time.Time, steps int) {
 	newW := p.Gamma2*(y-m.level-newD) + (1-p.Gamma2)*w
 	m.setDaily(di, newD)
 	m.setWeekly(wi, newW)
+	m.bound()
 	m.n++
+}
+
+// bound holds every component within what persisted state may hold. Only a
+// model restored from state at those limits comes near them, but one that
+// learned its way past them couldn't be restored again.
+func (m *Model) bound() {
+	m.level = math.Min(m.level, maxMagnitude)
+	m.trend = clampMagnitude(m.trend)
+	for i := range m.daily {
+		m.daily[i] = clampMagnitude(m.daily[i])
+	}
+	for i := range m.weekly {
+		m.weekly[i] = clampMagnitude(m.weekly[i])
+	}
+}
+
+func clampMagnitude(v float64) float64 {
+	return math.Max(-maxMagnitude, math.Min(maxMagnitude, v))
 }
 
 func (m *Model) setDaily(i int, v float64) {
