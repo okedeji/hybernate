@@ -99,6 +99,11 @@ func (a *AnomalyDetector) Record(forecast, actual, floor float64, slot int) (ano
 	return false, err
 }
 
+// Pending reports whether any anomaly is in the window.
+func (a *AnomalyDetector) Pending() bool {
+	return a.recent != 0
+}
+
 // RegimeChange reports whether anomalies have clustered, meaning the
 // learned patterns no longer match reality.
 func (a *AnomalyDetector) RegimeChange() bool {

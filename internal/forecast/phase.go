@@ -116,6 +116,12 @@ type Engine struct {
 	// or last saw its patterns break.
 	coverage weekSlots
 
+	// phaseBeforeAnomalies is the highest phase held since the oldest
+	// anomaly still in the anomaly window: what a regime change demotes
+	// from, so that the anomalies leading up to it, which may already have
+	// cost the engine its confidence, don't demote it a second time.
+	phaseBeforeAnomalies Phase
+
 	lastRegimeChange bool
 	lastAnomaly      bool
 }
@@ -176,6 +182,12 @@ func (e *Engine) Observe(actual float64, now time.Time) (float64, error) {
 
 	saved := *e
 	model, scorer, anomaly := *e.Model, *e.Scorer, *e.Anomaly
+
+	if e.Anomaly.Pending() {
+		e.phaseBeforeAnomalies = max(e.phaseBeforeAnomalies, e.Phase)
+	} else {
+		e.phaseBeforeAnomalies = e.Phase
+	}
 
 	steps := e.hoursSinceLast(t)
 	forecast, fit := actual, actual
@@ -305,18 +317,19 @@ func (e *Engine) advancePhase() {
 	}
 }
 
-// handleRegimeChange demotes the engine one step and discards the evidence
-// its confidence rested on, so that confidence is earned again on the new
-// pattern. Clearing the anomalies means one regime change demotes once,
-// not once for every hour the anomalies stay in the window.
+// handleRegimeChange demotes the engine one step from the phase it held
+// before the anomalies began, and discards the evidence its confidence
+// rested on, so that confidence is earned again on the new pattern.
+// Clearing the anomalies means one regime change demotes once, not once for
+// every hour the anomalies stay in the window.
 func (e *Engine) handleRegimeChange() {
 	e.lastRegimeChange = true
-	switch e.Phase {
+	switch e.phaseBeforeAnomalies {
 	case FullyActive:
 		e.Phase = WeeklySuggesting
 	case WeeklySuggesting, DailyActive:
 		e.Phase = DailySuggesting
-	case DailySuggesting:
+	default:
 		e.Phase = Observing
 	}
 	e.Scorer.Reset()

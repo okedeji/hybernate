@@ -69,6 +69,7 @@ type engineState struct {
 	AnRecent uint32                `json:"ar"`
 	AnAbove  weekSlots             `json:"aa"`
 	AnBelow  weekSlots             `json:"ab"`
+	PrePhase int                   `json:"pp"`
 }
 
 // Export encodes what the engine has learned as compact text: gzipped JSON
@@ -89,6 +90,7 @@ func (e *Engine) Export() (string, error) {
 		AnRecent: e.Anomaly.recent,
 		AnAbove:  e.Anomaly.above,
 		AnBelow:  e.Anomaly.below,
+		PrePhase: int(e.phaseBeforeAnomalies),
 	}
 	for i, v := range e.Model.daily {
 		st.Daily[i] = float32(v)
@@ -168,6 +170,7 @@ func decodeEngine(data []byte, settings Settings) (*Engine, error) {
 	e.Anomaly.recent = st.AnRecent
 	e.Anomaly.above = st.AnAbove
 	e.Anomaly.below = st.AnBelow
+	e.phaseBeforeAnomalies = Phase(st.PrePhase)
 	return e, nil
 }
 
@@ -177,6 +180,8 @@ func (st *engineState) validate() error {
 		return fmt.Errorf("unsupported version %d (expected %d)", st.Version, stateVersion)
 	case st.Phase < int(Observing) || st.Phase > int(FullyActive):
 		return fmt.Errorf("phase %d out of range", st.Phase)
+	case st.PrePhase < int(Observing) || st.PrePhase > int(FullyActive):
+		return fmt.Errorf("phase before anomalies %d out of range", st.PrePhase)
 	case st.N < 0:
 		return fmt.Errorf("negative data points %d", st.N)
 	case (st.N == 0) != (st.LastHour == 0):

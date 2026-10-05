@@ -247,6 +247,23 @@ func TestEngine_RegimeChangeDemotesOnce(t *testing.T) {
 		"FullyActive again only after a full week of evidence")
 }
 
+// The anomalies leading up to a regime change can cost the engine its
+// confidence before they add up to one. The regime change demotes one level
+// from where the engine was before them, not one more from where they left
+// it.
+func TestEngine_RegimeChangeDemotesOneLevelInAll(t *testing.T) {
+	e := newTestEngine()
+	run(t, e, 0, 6*WeeklySeason, office)
+	require.Equal(t, FullyActive, e.Phase)
+
+	evenings := func(_ int, at time.Time) float64 { return officeHours(at.Add(8 * time.Hour)) }
+	log := run(t, e, 6*WeeklySeason, DailySeason, evenings)
+
+	require.Len(t, log.regimeChanges, 1)
+	assert.Equal(t, WeeklySuggesting, log.changes[log.regimeChanges[0]], "one level below FullyActive")
+	assert.Equal(t, WeeklySuggesting, e.Phase)
+}
+
 // A large spike that recurs every week is a pattern, not an outlier. It is
 // learned within weeks rather than a few percent at a time, and stops
 // knocking the engine's confidence once it is.
