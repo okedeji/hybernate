@@ -334,7 +334,7 @@ func (r *Reconciler) prometheusActive(ctx context.Context, workload *v1alpha1.Ma
 		return false, nil
 	}
 	for _, q := range p.Activity.Prometheus {
-		res, err := signal.NewPrometheus(r.prometheusURL, q.PromQL).Check(ctx, workload.Namespace, workload.Name)
+		res, err := signal.NewPrometheus(r.prometheusURL, q.PromQL).Check(ctx)
 		if err != nil {
 			return false, fmt.Errorf("evaluating %q: %w", q.PromQL, err)
 		}

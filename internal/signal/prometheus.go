@@ -74,7 +74,7 @@ func NewPrometheus(endpoint, query string) *Prometheus {
 	}
 }
 
-func (p *Prometheus) Check(ctx context.Context, _, _ string) (Result, error) {
+func (p *Prometheus) Check(ctx context.Context) (Result, error) {
 	if p.Endpoint == "" {
 		return Result{}, ErrEndpointNotConfigured
 	}

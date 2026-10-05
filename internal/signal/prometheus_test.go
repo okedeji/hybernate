@@ -45,7 +45,7 @@ func TestPrometheus_Confirms(t *testing.T) {
 	defer srv.Close()
 
 	p := NewPrometheus(srv.URL, `rate(http_requests_total[5m])`)
-	res, err := p.Check(context.Background(), "staging", "api")
+	res, err := p.Check(context.Background())
 
 	require.NoError(t, err)
 	assert.True(t, res.Confirm)
@@ -65,7 +65,7 @@ func TestPrometheus_DeniesZeroValue(t *testing.T) {
 	defer srv.Close()
 
 	p := NewPrometheus(srv.URL, `rate(http_requests_total[5m])`)
-	res, err := p.Check(context.Background(), "staging", "api")
+	res, err := p.Check(context.Background())
 
 	require.NoError(t, err)
 	assert.False(t, res.Confirm)
@@ -85,7 +85,7 @@ func TestPrometheus_DeniesEmptyResult(t *testing.T) {
 	defer srv.Close()
 
 	p := NewPrometheus(srv.URL, `rate(http_requests_total[5m])`)
-	res, err := p.Check(context.Background(), "staging", "api")
+	res, err := p.Check(context.Background())
 
 	require.NoError(t, err)
 	assert.False(t, res.Confirm)
@@ -99,7 +99,7 @@ func TestPrometheus_QueryError(t *testing.T) {
 	defer srv.Close()
 
 	p := NewPrometheus(srv.URL, `bad{`)
-	_, err := p.Check(context.Background(), "staging", "api")
+	_, err := p.Check(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prometheus query failed")
@@ -112,7 +112,7 @@ func TestPrometheus_ServerError(t *testing.T) {
 	defer srv.Close()
 
 	p := NewPrometheus(srv.URL, `up`)
-	_, err := p.Check(context.Background(), "staging", "api")
+	_, err := p.Check(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "returned status 500")
@@ -120,7 +120,7 @@ func TestPrometheus_ServerError(t *testing.T) {
 
 func TestPrometheus_Unreachable(t *testing.T) {
 	p := NewPrometheus("http://localhost:1", `up`)
-	_, err := p.Check(context.Background(), "staging", "api")
+	_, err := p.Check(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "querying prometheus")
@@ -128,7 +128,7 @@ func TestPrometheus_Unreachable(t *testing.T) {
 
 func TestPrometheus_EndpointNotConfigured(t *testing.T) {
 	p := NewPrometheus("", `up`)
-	_, err := p.Check(context.Background(), "staging", "api")
+	_, err := p.Check(context.Background())
 
 	require.ErrorIs(t, err, ErrEndpointNotConfigured)
 }
@@ -141,7 +141,7 @@ func TestPrometheus_PreservesEndpointPathPrefix(t *testing.T) {
 	defer srv.Close()
 
 	p := NewPrometheus(srv.URL+"/prometheus", `up`)
-	_, err := p.Check(context.Background(), "staging", "api")
+	_, err := p.Check(context.Background())
 
 	require.NoError(t, err)
 }
@@ -153,7 +153,7 @@ func TestPrometheus_InvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	p := NewPrometheus(srv.URL, `up`)
-	_, err := p.Check(context.Background(), "staging", "api")
+	_, err := p.Check(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decoding prometheus response")
@@ -197,7 +197,7 @@ func TestPrometheus_Results(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res, err := serving(t, tt.body).Check(context.Background(), "staging", "api")
+			res, err := serving(t, tt.body).Check(context.Background())
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantConfirm, res.Confirm)
 			assert.Contains(t, res.Reason, tt.wantReason)
@@ -208,7 +208,7 @@ func TestPrometheus_Results(t *testing.T) {
 func TestPrometheus_RejectsRangeVectors(t *testing.T) {
 	body := `{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":[[1,"5"]]}]}}`
 
-	_, err := serving(t, body).Check(context.Background(), "staging", "api")
+	_, err := serving(t, body).Check(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"matrix"`)
@@ -221,7 +221,7 @@ func TestPrometheus_ReportsTheQueryErrorOnABadRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewPrometheus(srv.URL, `bad{`).Check(context.Background(), "staging", "api")
+	_, err := NewPrometheus(srv.URL, `bad{`).Check(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse error at char 4")
@@ -235,7 +235,7 @@ func TestPrometheus_BoundsTheResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewPrometheus(srv.URL, `up`).Check(context.Background(), "staging", "api")
+	_, err := NewPrometheus(srv.URL, `up`).Check(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "larger than")
@@ -254,7 +254,7 @@ func TestPrometheus_HonoursTheCallersDeadline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := NewPrometheus(srv.URL, `up`).Check(ctx, "staging", "api")
+	_, err := NewPrometheus(srv.URL, `up`).Check(ctx)
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
@@ -268,6 +268,6 @@ func TestPrometheus_EncodesTheQuery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewPrometheus(srv.URL, query).Check(context.Background(), "staging", "api")
+	_, err := NewPrometheus(srv.URL, query).Check(context.Background())
 	require.NoError(t, err)
 }
