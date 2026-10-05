@@ -83,10 +83,21 @@ type ClusterReport struct {
 	// Notes say what the scan couldn't see and how that limits it.
 	Notes []string `json:"notes,omitempty"`
 	// Incomplete are the namespaces the scan couldn't read all it should
-	// have of, for a reason other than the user's access, such as a timeout.
-	// Their workloads are missing or judged on less than they should be.
-	Incomplete []string `json:"incomplete,omitempty"`
-	Totals     Totals   `json:"totals"`
+	// have of, by why; nil when it read them all.
+	Incomplete *Incomplete `json:"incomplete,omitempty"`
+	Totals     Totals      `json:"totals"`
+}
+
+// Incomplete are the namespaces a scan couldn't read all it should have
+// of. Their workloads are missing or judged on less than they should be.
+type Incomplete struct {
+	// Missing were named to scan but don't exist.
+	Missing []string `json:"missing,omitempty"`
+	// Denied were named to scan, but the user's access doesn't allow
+	// reading their workloads.
+	Denied []string `json:"denied,omitempty"`
+	// Failed couldn't be read for another reason, such as a timeout.
+	Failed []string `json:"failed,omitempty"`
 }
 
 // Workload is one Deployment or StatefulSet as a scan sees it.

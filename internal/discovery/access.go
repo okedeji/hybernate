@@ -106,25 +106,24 @@ var readingOrder = []reading{readingWorkloads, readingPods, readingMetrics, read
 // incomplete. named says the user named the namespaces, so being denied one,
 // or one not existing, is a failure to scan what was asked for, not a limit
 // of their access or a namespace deleted since it was listed.
-func problemNotes(problems []readProblem, named bool) (notes, incomplete []string) {
+func problemNotes(problems []readProblem, named bool) (notes []string, incomplete *Incomplete) {
 	denied := map[reading][]string{}
-	var failed, missing []string
+	var failed, missing, deniedNamed, failedIn []string
 	for _, p := range problems {
 		if p.what == readingNamespace && apierrors.IsNotFound(p.err) {
 			if named {
 				missing = append(missing, p.namespace)
-				incomplete = append(incomplete, p.namespace)
 			}
 			continue
 		}
 		if apierrors.IsForbidden(p.err) && p.what != readingHistory {
 			denied[p.what] = append(denied[p.what], p.namespace)
 			if named && p.what == readingWorkloads {
-				incomplete = append(incomplete, p.namespace)
+				deniedNamed = append(deniedNamed, p.namespace)
 			}
 			continue
 		}
-		incomplete = append(incomplete, p.namespace)
+		failedIn = append(failedIn, p.namespace)
 		failed = append(failed, fmt.Sprintf("%s in %s (%v)", p.what, p.namespace, p.err))
 	}
 	for _, what := range readingOrder {
@@ -142,7 +141,11 @@ func problemNotes(problems []readProblem, named bool) (notes, incomplete []strin
 	if len(failed) > 0 {
 		notes = append(notes, fmt.Sprintf("the scan is incomplete: it couldn't read %s", listSome(failed)))
 	}
-	return notes, uniqueSorted(incomplete)
+	if len(missing) == 0 && len(deniedNamed) == 0 && len(failedIn) == 0 {
+		return notes, nil
+	}
+	return notes, &Incomplete{Missing: uniqueSorted(missing), Denied: uniqueSorted(deniedNamed),
+		Failed: uniqueSorted(failedIn)}
 }
 
 // isUnavailable says an API isn't served at all: its group isn't

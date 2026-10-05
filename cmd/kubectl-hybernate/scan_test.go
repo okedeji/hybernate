@@ -29,7 +29,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -652,11 +657,44 @@ func TestIncompleteError(t *testing.T) {
 	result := sampleCluster()
 	assert.NoError(t, incompleteError(result))
 
-	result.Incomplete = []string{"payments", "orders"}
+	result.Incomplete = &discovery.Incomplete{Failed: []string{"orders", "payments"}}
 	err := incompleteError(result)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "the scan of staging is incomplete: 2 namespaces couldn't be read in full")
+	assert.Contains(t, err.Error(), "pass a longer --timeout")
+}
+
+// A namespace named with -n that doesn't exist, or that the user can't
+// read, won't be read by trying again or waiting longer, so the advice is
+// for what will.
+func TestCLI_ScanIncompleteAdvice(t *testing.T) {
+	denied := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+		opts ...client.ListOption) error {
+		if _, ok := list.(*appsv1.DeploymentList); ok {
+			return apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "", nil)
+		}
+		return c.List(ctx, list, opts...)
+	}}
+	tests := []struct {
+		name string
+		c    client.Client
+		want string
+	}{
+		{name: "missing", c: newStatusClient(t, interceptor.Funcs{}),
+			want: "the scan of hanging is incomplete: 1 namespace named with -n doesn't exist: nope; check the names"},
+		{name: "denied", c: newStatusClient(t, denied, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "nope"}}),
+			want: "the scan of hanging is incomplete: your access doesn't allow reading workloads in nope; ask an " +
+				"admin for list on Deployments and StatefulSets there, or leave it out of -n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := runCLI(t, tt.c, "scan", "-n", "nope", "--window", "0", "-o", "json")
+
+			require.Error(t, err)
+			assert.Equal(t, tt.want, err.Error())
+		})
+	}
 }
 
 // An empty cluster says so, rather than pointing at notes it doesn't have.

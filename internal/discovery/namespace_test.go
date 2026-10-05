@@ -317,14 +317,28 @@ func TestScanCluster_DeniedNamespacesAreOneNote(t *testing.T) {
 // Namespaces the user named are what they asked to scan, so being denied
 // one leaves the scan incomplete.
 func TestScanCluster_DeniedNamedNamespaceIsIncomplete(t *testing.T) {
-	c := failingIn(nil, func(client.ObjectList, string) error { return forbidden("deployments") })
+	payments := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "payments"}}
+	c := failingIn([]runtime.Object{payments}, func(client.ObjectList, string) error { return forbidden("deployments") })
 	opts := scanOptions("payments")
 	opts.NamedNamespaces = true
 
 	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"payments"}, report.Incomplete)
+	assert.Equal(t, &Incomplete{Denied: []string{"payments"}}, report.Incomplete)
+}
+
+// A namespace the user named that doesn't exist leaves the scan incomplete,
+// for that reason.
+func TestScanCluster_MissingNamedNamespaceIsIncomplete(t *testing.T) {
+	c := failingIn(nil, func(client.ObjectList, string) error { return nil })
+	opts := scanOptions("nope")
+	opts.NamedNamespaces = true
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	assert.Equal(t, &Incomplete{Missing: []string{"nope"}}, report.Incomplete)
 }
 
 // A read that fails for any reason but access, such as client-go's rate
@@ -345,7 +359,7 @@ func TestScanCluster_FailedReadIsIncomplete(t *testing.T) {
 	report, err := NewScanner(c, c).ScanCluster(context.Background(), scanOptions("fine", "slow"))
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"slow"}, report.Incomplete)
+	assert.Equal(t, &Incomplete{Failed: []string{"slow"}}, report.Incomplete)
 	assert.Contains(t, strings.Join(report.Notes, "\n"),
 		"the scan is incomplete: it couldn't read pods in slow (client rate limiter Wait returned an error")
 }

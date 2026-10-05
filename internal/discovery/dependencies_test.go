@@ -371,14 +371,14 @@ func TestScanCluster_DependencyReadsThatFail(t *testing.T) {
 		name           string
 		err            error
 		wantNote       string
-		wantIncomplete []string
+		wantIncomplete *Incomplete
 	}{
 		{name: "denied", err: forbidden("configmaps"),
 			wantNote: "your access doesn't allow reading ConfigMaps in 1 namespace, so dependencies set in them " +
 				"aren't found: " + testNamespace},
 		{name: "failed", err: errors.New("connection reset"),
 			wantNote:       "the scan is incomplete: it couldn't read ConfigMaps in " + testNamespace,
-			wantIncomplete: []string{testNamespace}},
+			wantIncomplete: &Incomplete{Failed: []string{testNamespace}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

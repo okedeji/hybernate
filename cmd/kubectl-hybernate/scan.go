@@ -327,14 +327,31 @@ func scanFailed(ctx context.Context, err error, timeout time.Duration) error {
 
 // incompleteError fails a scan that couldn't read all it should have, once
 // its report is written, so a script sees the exit code and a person still
-// gets what it did read.
+// gets what it did read. The advice is for why each namespace wasn't read.
 func incompleteError(result scanResult) error {
-	if result.ClusterReport == nil || len(result.Incomplete) == 0 {
+	if result.ClusterReport == nil || result.Incomplete == nil {
 		return nil
 	}
-	return fmt.Errorf("the scan of %s is incomplete: %s couldn't be read in full, as the notes say; run it again, "+
-		"scan fewer namespaces with -n, or pass a longer --timeout", result.Cluster,
-		plural(len(result.Incomplete), "namespace", "namespaces"))
+	in := result.Incomplete
+	var why []string
+	if len(in.Missing) > 0 {
+		exist := "don't exist"
+		if len(in.Missing) == 1 {
+			exist = "doesn't exist"
+		}
+		why = append(why, fmt.Sprintf("%s named with -n %s: %s; check the names",
+			plural(len(in.Missing), "namespace", "namespaces"), exist, strings.Join(in.Missing, ", ")))
+	}
+	if len(in.Denied) > 0 {
+		why = append(why, fmt.Sprintf("your access doesn't allow reading workloads in %s; ask an admin for list on "+
+			"Deployments and StatefulSets there, or leave %s out of -n", strings.Join(in.Denied, ", "),
+			pronounObject(len(in.Denied))))
+	}
+	if len(in.Failed) > 0 {
+		why = append(why, fmt.Sprintf("%s couldn't be read in full, as the notes say; run it again, scan fewer "+
+			"namespaces with -n, or pass a longer --timeout", plural(len(in.Failed), "namespace", "namespaces")))
+	}
+	return fmt.Errorf("the scan of %s is incomplete: %s", result.Cluster, strings.Join(why, "; "))
 }
 
 // parseWindow reads a duration that may be in days, which

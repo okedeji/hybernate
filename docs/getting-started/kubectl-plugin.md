@@ -201,7 +201,7 @@ The source is shown in the report with any password in its URL hidden.
 
 The scan exits 0 when it read everything your access allows. Namespaces or resources your access doesn't allow (a `403`) are explained in the notes, and don't change the exit status, unless you named the namespace with `-n`.
 
-It exits 1, after writing the report, when it couldn't read something it should have: a timeout, throttling, a server error, a failed Prometheus query, or a `403` or missing namespace among those you named with `-n`. The notes say what was missed, and JSON and YAML list the namespaces in `incomplete`. JSON and YAML also give the number of namespaces read in `namespaces`, and `"workloads": []` for a cluster with none.
+It exits 1, after writing the report, when it couldn't read something it should have: a timeout, throttling, a server error, a failed Prometheus query, or a `403` or missing namespace among those you named with `-n`. The notes say what was missed, the error says what to do about it (check a namespace's name, ask for access, or try again with a longer `--timeout`), and JSON and YAML list the namespaces in `incomplete`, by why: `missing`, `denied`, or `failed`. JSON and YAML also give the number of namespaces read in `namespaces`, and `"workloads": []` for a cluster with none.
 
 Workloads someone else already scaled to zero count toward nothing the scan says could be saved: they cost nothing now, and the headline counts them apart.
 
