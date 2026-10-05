@@ -147,7 +147,11 @@ func getWorkload(ctx context.Context, c client.Client, namespace, arg string) (c
 		}
 	}
 	var s appsv1.StatefulSet
-	return &s, wrapNotFound(c.Get(ctx, key, &s), kindStatefulSet, key)
+	err = c.Get(ctx, key, &s)
+	if kind == "" && apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("no Deployment or StatefulSet in %s is named %s: %w", namespace, name, err)
+	}
+	return &s, wrapNotFound(err, kindStatefulSet, key)
 }
 
 func wrapNotFound(err error, kind string, key client.ObjectKey) error {

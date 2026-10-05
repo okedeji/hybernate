@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -171,6 +172,29 @@ func TestEnable_NotOptedIn(t *testing.T) {
 			err := enableWorkload(context.Background(), c, "dev", "api", enableOptions{}, &bytes.Buffer{})
 
 			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+// A bare name that's neither kind says so, rather than that no StatefulSet
+// has it, which reads as though a Deployment would have been found.
+func TestEnable_NotFound(t *testing.T) {
+	tests := []struct {
+		arg, want string
+	}{
+		{arg: "nope", want: "no Deployment or StatefulSet in dev is named nope"},
+		{arg: "deployment/nope", want: "getting deployment dev/nope"},
+		{arg: "statefulset/nope", want: "getting statefulset dev/nope"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.arg, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(enableNamespaceObj(nil, nil)).Build()
+
+			err := enableWorkload(context.Background(), c, "dev", tt.arg, enableOptions{}, &bytes.Buffer{})
+
+			require.Error(t, err)
+			assert.True(t, apierrors.IsNotFound(err))
+			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
 }
