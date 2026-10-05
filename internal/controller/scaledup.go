@@ -64,6 +64,14 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 	if replicas == 0 {
 		return nil
 	}
+	// Hybernate's own resume scales it up too, and the cache can still hold
+	// the workload as Paused once that has begun. Releasing KEDA then would
+	// let it scale the workload back down while it starts.
+	if phase, err := r.livePhase(ctx, workload); err != nil {
+		return err
+	} else if phase != v1alpha1.PhasePaused {
+		return nil
+	}
 
 	// Someone else woke it, so it's only released, never scaled.
 	if _, err := r.pauser.Restore(ctx, workload); err != nil {
@@ -178,6 +186,19 @@ func (r *Reconciler) liveReplicas(ctx context.Context, target client.Object) (in
 		return 0, fmt.Errorf("reading the target's replicas: %w", err)
 	}
 	return scale.Spec.Replicas, nil
+}
+
+// livePhase reads the workload's phase from the API server, past the cache.
+func (r *Reconciler) livePhase(ctx context.Context, workload *v1alpha1.ManagedWorkload) (v1alpha1.WorkloadPhase, error) {
+	reader := r.PodReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var live v1alpha1.ManagedWorkload
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(workload), &live); err != nil {
+		return "", fmt.Errorf("reading the workload's phase: %w", err)
+	}
+	return live.Status.Phase, nil
 }
 
 func scaledUpBy(w gitops.Writer) string {

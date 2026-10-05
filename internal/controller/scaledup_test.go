@@ -400,3 +400,21 @@ func TestHandBack_KeepsAWorkloadThatWasAtZero(t *testing.T) {
 		})
 	}
 }
+
+// A resume of Hybernate's own scales the workload up too. The cache can
+// still hold the workload as Paused once that has begun, which mustn't be
+// taken for someone else waking it: that would release KEDA, which could
+// scale the workload back down while it starts.
+func TestWakeOnScaleUp_StaleCacheDuringAResume(t *testing.T) {
+	pauser := &stubPauser{}
+	r := newTestReconcilerWithReplicas(t, pausedWorkload(v1alpha1.PhaseResuming), pauser, 3)
+	stale := getWorkload(t, r, "api")
+	stale.Status.Phase = v1alpha1.PhasePaused
+
+	require.NoError(t, r.wakeOnScaleUp(context.Background(), stale, scaledBy("hybernate", 3)))
+
+	assert.Zero(t, pauser.restoreCalls, "KEDA is still held")
+	got := getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhaseResuming, got.Status.Phase)
+	assert.Nil(t, got.Status.LastScaledUp)
+}
