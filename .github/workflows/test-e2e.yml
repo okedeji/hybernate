@@ -17,10 +17,10 @@ jobs:
         include:
           # The oldest Kubernetes Hybernate supports, on the last kind
           # release with a node image for it.
-          - kubernetes: "1.26"
-            kind: v0.25.0
-            kind-sha256: b22ff7e5c02b8011e82cc3223d069d178b9e1543f1deb21e936d11764780a3d8
-            node-image: kindest/node:v1.26.15@sha256:c79602a44b4056d7e48dc20f7504350f1e87530fe953428b792def00bc1076dd
+          - kubernetes: "1.30"
+            kind: v0.29.0
+            kind-sha256: c72eda46430f065fb45c5f70e7c957cc9209402ef309294821978677c8fb3284
+            node-image: kindest/node:v1.30.13@sha256:397209b3d947d154f6641f2d0ce8d473732bd91c87d9575ade99049aa33cd648
           - kubernetes: "1.37"
             kind: v0.33.0
             kind-sha256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d

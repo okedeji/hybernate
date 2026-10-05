@@ -119,7 +119,7 @@ One logical change per commit. Generated code gets its own commit.
 - [ ] Alert rules still pass their tests (`make test-alerts`), if you changed them
 - [ ] Documentation updated if user-facing behavior changed
 
-CI also runs the end-to-end tests on Kubernetes 1.26 and 1.37, the Helm smoke test, and `make vulncheck`.
+CI also runs the end-to-end tests on Kubernetes 1.30 and 1.37, the Helm smoke test, and `make vulncheck`.
 
 ## Documentation
 

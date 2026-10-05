@@ -2,7 +2,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.26+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.30+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 
 **Your Kubernetes workloads are running 24/7. Your users aren't.**
 
@@ -55,7 +55,7 @@ helm install hybernate oci://ghcr.io/okedeji/charts/hybernate \
   --create-namespace
 ```
 
-Hybernate supports Kubernetes 1.26 and later, and is tested in CI on 1.26 and 1.37. The chart installs the operator, the doorman that wakes paused workloads on request, and the ManagedWorkload CRD.
+Hybernate supports Kubernetes 1.30 and later, and is tested in CI on 1.30 and 1.37. The chart installs the operator, the doorman that wakes paused workloads on request, and the ManagedWorkload CRD.
 
 **Opt a workload in, measuring first:**
 

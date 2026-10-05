@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- Kubernetes v1.26+ (tested in CI on 1.26 and 1.37)
-- kubectl v1.26+
+- Kubernetes v1.30+ (tested in CI on 1.30 and 1.37)
+- kubectl v1.30+
 - [metrics-server](https://github.com/kubernetes-sigs/metrics-server) installed (Hybernate reads pod CPU via the Kubernetes Metrics API)
 - Helm v3.8+ (if using Helm install), for OCI charts
 

@@ -1,6 +1,6 @@
 # Compatibility
 
-Hybernate supports Kubernetes 1.26 and later, and is tested in CI on 1.26 and 1.37.
+Hybernate supports Kubernetes 1.30 and later, and is tested in CI on 1.30 and 1.37.
 
 [Wake on request](../concepts/wake-on-request.md) adds an EndpointSlice to each Service of a paused workload, one per IP family, pointing at the doorman. Anything that finds a Service's backends through its EndpointSlices sends traffic to the doorman without changes. Each project reads them a little differently, so this page records what's been checked.
 

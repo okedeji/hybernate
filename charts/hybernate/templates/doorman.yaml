@@ -69,16 +69,13 @@ spec:
           {{- /*
           Kube-proxies and load balancers keep sending new connections for
           a few seconds after the pod is marked terminating, until they see
-          its endpoint go. The sleep keeps it listening through that. The
-          sleep action needs no shell, which the image doesn't have, and is
-          on by default from Kubernetes 1.30.
+          its endpoint go. The sleep keeps it listening through that, and
+          needs no shell, which the image doesn't have.
           */}}
-          {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
           lifecycle:
             preStop:
               sleep:
                 seconds: 5
-          {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

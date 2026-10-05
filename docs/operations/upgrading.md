@@ -45,7 +45,7 @@ v0.2.0 is a relaunch with breaking changes to the ManagedWorkload API, and there
 - `desiredState: Destroyed` is gone; `desiredState` is `Running` or `Paused`.
 - `spec.target` can no longer be changed once set.
 
-**Before upgrading**, fix the ManagedWorkloads the new CRD would reject. On Kubernetes older than 1.30, the API server refuses every write to such an object, the operator's status updates included, until it's fixed; 1.30 and later let an unchanged invalid field through. This lists them:
+**Before upgrading**, fix the ManagedWorkloads the new CRD would reject. The API server lets an unchanged invalid field through, but refuses any change to it until it's valid. This lists them:
 
 ```bash
 kubectl get managedworkloads -A -o json | jq -r '.items[]
