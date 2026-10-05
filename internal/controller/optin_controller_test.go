@@ -27,10 +27,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -365,6 +367,37 @@ func TestKindQualifiedName(t *testing.T) {
 	dotted := strings.Repeat("a", 231) + "." + strings.Repeat("b", 20)
 	assert.Empty(t, validation.IsDNS1123Subdomain(kindQualifiedName(dotted, v1alpha1.TargetKindStatefulSet)),
 		"a cut that ends on a dot is still a valid name")
+}
+
+// Settings no annotation controls, such as a desiredState patched in as
+// the pause guide shows, survive the annotations being applied again.
+func TestOptIn_UserSettingsSurvive(t *testing.T) {
+	d := optInDeployment("api", managedLabel, map[string]string{v1alpha1.AnnotationDependsOn: "statefulset/postgres"})
+	r, _ := optInReconciler(t, optInNamespace(nil, nil), d)
+	reconcileOptIn(t, r, "api")
+	mw, _ := managedWorkload(t, r, "api")
+	cpu := resource.MustParse("0.05")
+	mw.Spec.DesiredState = ptr.To(v1alpha1.DesiredStatePaused)
+	mw.Spec.Prediction.Confidence = 70
+	mw.Spec.CostTracking = &v1alpha1.CostTrackingSpec{Rates: &v1alpha1.CostRates{CPUPerHour: &cpu}}
+	mw.Spec.IdlePolicy.Activity.Prometheus = []v1alpha1.PrometheusActivity{{PromQL: "sum(up)"}}
+	mw.Spec.DependsOn[0].WaitForReady = true
+	mw.Spec.DryRun = true
+	require.NoError(t, r.Update(context.Background(), mw))
+
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(d), d))
+	d.Annotations[v1alpha1.AnnotationIdleAfter] = "3h"
+	require.NoError(t, r.Update(context.Background(), d))
+	reconcileOptIn(t, r, "api")
+
+	mw, _ = managedWorkload(t, r, "api")
+	assert.Equal(t, ptr.To(v1alpha1.DesiredStatePaused), mw.Spec.DesiredState)
+	assert.Equal(t, 70, mw.Spec.Prediction.Confidence)
+	assert.NotNil(t, mw.Spec.CostTracking)
+	assert.Equal(t, []v1alpha1.PrometheusActivity{{PromQL: "sum(up)"}}, mw.Spec.IdlePolicy.Activity.Prometheus)
+	assert.True(t, mw.Spec.DependsOn[0].WaitForReady)
+	assert.Equal(t, 3*time.Hour, mw.Spec.IdlePolicy.IdleAfter.Duration, "the annotations still apply")
+	assert.False(t, mw.Spec.DryRun, "dry-run is the annotations' to set")
 }
 
 // Opting in again while the old ManagedWorkload is still restoring the

@@ -216,10 +216,11 @@ func (r *OptInReconciler) release(ctx context.Context, obj client.Object, ours, 
 }
 
 // update brings the label-created ManagedWorkload in line with the
-// annotations.
+// annotations, keeping what they don't control.
 func (r *OptInReconciler) update(ctx context.Context, obj client.Object, ours *v1alpha1.ManagedWorkload,
 	spec v1alpha1.ManagedWorkloadSpec) error {
 	mw := ours.DeepCopy()
+	keepUserSettings(&spec, &ours.Spec)
 	mw.Spec = spec
 	if err := controllerutil.SetOwnerReference(obj, mw, r.Scheme); err != nil {
 		return fmt.Errorf("owning managed workload %s: %w", mw.Name, err)

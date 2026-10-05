@@ -212,6 +212,10 @@ func parseDependency(entry string) (v1alpha1.DependencyRef, bool) {
 // optInSpec is the ManagedWorkload spec for an opted-in workload: for each
 // setting its annotation, then its namespace's, then the cluster default,
 // then what a ManagedWorkload written with no settings would get.
+//
+// The annotations control dryRun, idlePolicy (idleAfter, the CPU threshold
+// and autoResume), which dependencies dependsOn lists, and wake. The rest
+// is the user's to set on the ManagedWorkload; see keepUserSettings.
 func optInSpec(target v1alpha1.WorkloadRef, workload, namespace map[string]string, d OptInDefaults) (
 	v1alpha1.ManagedWorkloadSpec, []settingProblem) {
 	s := &settings{workload: workload, namespace: namespace}
@@ -234,4 +238,28 @@ func optInSpec(target v1alpha1.WorkloadRef, workload, namespace map[string]strin
 		Prediction: v1alpha1.PredictionSpec{Confidence: 85},
 	}
 	return spec, s.problems
+}
+
+// keepUserSettings carries over, from a label-created ManagedWorkload's
+// current spec, everything no annotation sets, so an edit made to it, such
+// as setting desiredState with kubectl patch, isn't undone. Those are
+// desiredState, prediction, costTracking, the Prometheus activity queries,
+// and waitForReady on a dependency the annotation still lists. The target
+// is never changed once the ManagedWorkload exists.
+func keepUserSettings(spec *v1alpha1.ManagedWorkloadSpec, current *v1alpha1.ManagedWorkloadSpec) {
+	spec.Target = current.Target
+	spec.DesiredState = current.DesiredState
+	spec.Prediction = current.Prediction
+	spec.CostTracking = current.CostTracking
+	if current.IdlePolicy != nil && current.IdlePolicy.Activity != nil {
+		spec.IdlePolicy.Activity.Prometheus = current.IdlePolicy.Activity.Prometheus
+	}
+	for i := range spec.DependsOn {
+		dep := &spec.DependsOn[i]
+		for _, have := range current.DependsOn {
+			if have.Namespace == dep.Namespace && have.Kind == dep.Kind && have.Name == dep.Name {
+				dep.WaitForReady = have.WaitForReady
+			}
+		}
+	}
 }
