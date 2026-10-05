@@ -18,13 +18,18 @@ package controller
 
 import (
 	"context"
+	"sync"
+	"testing"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -33,6 +38,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/config"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/autoscaler"
@@ -194,3 +201,114 @@ var _ = ginkgo.Describe("A pause interrupted by a conflict", func() {
 		gomega.Expect(apierrors.IsNotFound(err)).To(gomega.BeTrue())
 	})
 })
+
+func kedaCRD() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apiextensions.k8s.io/v1",
+		"kind":       "CustomResourceDefinition",
+		"metadata":   map[string]any{"name": "scaledobjects.keda.sh"},
+		"spec": map[string]any{
+			"group": "keda.sh",
+			"scope": "Namespaced",
+			"names": map[string]any{"kind": "ScaledObject", "listKind": "ScaledObjectList",
+				"plural": "scaledobjects", "singular": "scaledobject"},
+			"versions": []any{map[string]any{"name": "v1alpha1", "served": true, "storage": true,
+				"schema": map[string]any{"openAPIV3Schema": map[string]any{
+					"type": "object", "x-kubernetes-preserve-unknown-fields": true}}}},
+		},
+	}}
+}
+
+func envtestScaledObject(namespace, target string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "keda.sh/v1alpha1",
+		"kind":       "ScaledObject",
+		"metadata":   map[string]any{"name": target, "namespace": namespace},
+		"spec": map[string]any{"scaleTargetRef": map[string]any{"name": target},
+			"minReplicaCount": int64(0), "maxReplicaCount": int64(10)},
+	}}
+}
+
+// Uninstalling KEDA while the operator runs leaves its RESTMapper still
+// mapping ScaledObject, so listing them answers NotFound rather than no
+// match. Every workload must go on reconciling, and a paused one must still
+// be handed back when its ManagedWorkload is deleted.
+func TestKEDAUninstalledWhileTheOperatorRuns(t *testing.T) {
+	cfg := startEnvtest(t)
+	opScheme := testScheme(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	c, err := client.New(cfg, client.Options{Scheme: opScheme})
+	require.NoError(t, err)
+
+	crd := kedaCRD()
+	require.NoError(t, c.Create(ctx, crd))
+	require.NoError(t, c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}))
+	require.Eventually(t, func() bool {
+		return c.Create(ctx, envtestScaledObject("shop", "api")) == nil
+	}, 30*time.Second, 100*time.Millisecond, "KEDA's CRD is served")
+	require.NoError(t, c.Create(ctx, envtestScaledObject("shop", "web")))
+	for name, replicas := range map[string]int32{"api": 3, "web": 2} {
+		d := envtestDeployment("shop", replicas)
+		d.Name = name
+		require.NoError(t, c.Create(ctx, d))
+		w := envtestWorkload("shop")
+		w.Name, w.Spec.Target.Name = name, name
+		if name == "web" {
+			w.Spec.DesiredState = nil
+		}
+		require.NoError(t, c.Create(ctx, w))
+	}
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: opScheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Controller: config.Controller{SkipNameValidation: ptr.To(true)}})
+	require.NoError(t, err)
+	r := &Reconciler{Client: mgr.GetClient(), Scheme: opScheme, Recorder: events.NewFakeRecorder(1000),
+		PodReader: mgr.GetAPIReader()}
+	require.NoError(t, r.SetupWithManager(mgr))
+	mgrCtx, stop := context.WithCancel(context.Background())
+	var running sync.WaitGroup
+	running.Go(func() { assert.NoError(t, mgr.Start(mgrCtx)) })
+	t.Cleanup(func() {
+		stop()
+		running.Wait()
+	})
+
+	workload := func(name string) *v1alpha1.ManagedWorkload {
+		var w v1alpha1.ManagedWorkload
+		require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: name}, &w))
+		return &w
+	}
+	replicas := func(name string) int32 {
+		var d appsv1.Deployment
+		require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: name}, &d))
+		return *d.Spec.Replicas
+	}
+	autoscaled := func(name string) bool {
+		return meta.FindStatusCondition(workload(name).Status.Conditions, conditionAutoscaled) != nil
+	}
+	require.Eventually(t, func() bool {
+		return workload("api").Status.Phase == v1alpha1.PhasePaused && replicas("api") == 0 && autoscaled("web")
+	}, 30*time.Second, 100*time.Millisecond, "api is paused, and web is seen to be scaled by KEDA")
+
+	require.NoError(t, c.Delete(ctx, crd))
+	require.Eventually(t, func() bool {
+		return apierrors.IsNotFound(c.Get(ctx, client.ObjectKeyFromObject(crd), kedaCRD()))
+	}, 30*time.Second, 100*time.Millisecond, "KEDA's CRD is gone")
+
+	for _, name := range []string{"api", "web"} {
+		w := workload(name)
+		w.Annotations = map[string]string{"poke": "after-keda"}
+		require.NoError(t, c.Update(ctx, w))
+	}
+	assert.Eventually(t, func() bool { return !autoscaled("api") && !autoscaled("web") },
+		30*time.Second, 100*time.Millisecond, "every workload reconciles again, and no longer reports KEDA")
+
+	require.NoError(t, c.Delete(ctx, workload("api")))
+	assert.Eventually(t, func() bool {
+		err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: "api"}, &v1alpha1.ManagedWorkload{})
+		return apierrors.IsNotFound(err)
+	}, 30*time.Second, 100*time.Millisecond, "the paused workload's ManagedWorkload is deleted")
+	assert.Equal(t, int32(3), replicas("api"), "and its workload is handed back at the replicas it had")
+}

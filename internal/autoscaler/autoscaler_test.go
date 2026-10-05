@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -154,6 +155,28 @@ func TestFind_RemembersKEDAIsntInstalled(t *testing.T) {
 	_, _, err = f.Find(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
 	require.NoError(t, err)
 	assert.Equal(t, 3, lookups, "looked for again, in case KEDA was installed since")
+}
+
+// KEDA uninstalled while the operator runs: the client still maps the kind,
+// and the API server answers NotFound for it.
+func TestFind_KEDAUninstalledWhileRunning(t *testing.T) {
+	c := withKEDA(t, hpa("web", "web", nil, 3))
+	c = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch,
+		list client.ObjectList, opts ...client.ListOption) error {
+		if _, ok := list.(*unstructured.UnstructuredList); ok {
+			return apierrors.NewNotFound(schema.GroupResource{Group: "keda.sh", Resource: "scaledobjects"}, "")
+		}
+		return c.List(ctx, list, opts...)
+	}})
+	f := NewFinder(c)
+
+	for _, find := range []func(context.Context, string, v1alpha1.TargetKind, string) (Autoscaler, bool, error){
+		f.Find, f.FindNow} {
+		got, found, err := find(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, HPA, got.Kind, "HPAs are still found")
+	}
 }
 
 func pausedReplicas(t *testing.T, c client.Client) (string, bool) {

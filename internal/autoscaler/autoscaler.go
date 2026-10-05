@@ -145,7 +145,7 @@ func (f *Finder) findScaledObject(ctx context.Context, namespace string, kind v1
 	var list unstructured.UnstructuredList
 	list.SetGroupVersionKind(scaledObjects)
 	if err := f.c.List(ctx, &list, client.InNamespace(namespace)); err != nil {
-		if meta.IsNoMatchError(err) {
+		if kedaMissing(err) {
 			f.mu.Lock()
 			f.noKEDAUntil = f.now().Add(kedaRecheck)
 			f.mu.Unlock()
@@ -208,8 +208,16 @@ func setPausedReplicas(ctx context.Context, c client.Client, namespace, name str
 		return fmt.Errorf("building the ScaledObject patch: %w", err)
 	}
 	err = c.Patch(ctx, so, client.RawPatch(types.MergePatchType, body))
-	if err == nil || apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+	if err == nil || kedaMissing(err) {
 		return nil
 	}
 	return fmt.Errorf("annotating ScaledObject %s/%s: %w", namespace, name, err)
+}
+
+// kedaMissing reports whether err says there's no ScaledObject to be had.
+// KEDA never installed gives no match for the kind; KEDA uninstalled while
+// the operator runs gives NotFound instead, because the client's RESTMapper
+// still maps the kind it saw, and the API server no longer serves it.
+func kedaMissing(err error) bool {
+	return meta.IsNoMatchError(err) || apierrors.IsNotFound(err)
 }
