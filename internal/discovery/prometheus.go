@@ -145,7 +145,7 @@ func NewHTTPClient(o HTTPOptions) (*http.Client, error) {
 
 // NewPrometheusURL reads from a Prometheus API at baseURL, such as Thanos,
 // Mimir, or a managed Prometheus, sending header with every request. A path
-// prefix in the URL is kept, and credentials in it
+// prefix and query parameters in the URL are kept, and credentials in it
 // are sent as basic auth, unless header has an Authorization.
 //
 // Credentials and query parameters, which can hold a token, are left out
@@ -157,9 +157,12 @@ func NewPrometheusURL(baseURL string, httpClient *http.Client, header http.Heade
 	}
 	user := base.User
 	base.User = nil
+	baseQuery := base.Query()
 	get := func(ctx context.Context, path string, params url.Values) ([]byte, error) {
 		u := base.JoinPath(path)
-		u.RawQuery = params.Encode()
+		query := maps.Clone(baseQuery)
+		maps.Copy(query, params)
+		u.RawQuery = query.Encode()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("building request: %w", err)

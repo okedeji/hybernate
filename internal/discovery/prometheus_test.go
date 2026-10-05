@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -391,6 +392,24 @@ func TestPrometheusURL_SendsHeaders(t *testing.T) {
 	assert.Equal(t, "team-a", got.Get("X-Scope-OrgID"))
 	assert.Equal(t, "Bearer t0ken", got.Get("Authorization"))
 	assert.NotContains(t, p.Source, "hidden", "a query string can hold a token")
+}
+
+// A query parameter in the URL, such as a tenant some gateways take there,
+// is sent with every query beside the query's own.
+func TestPrometheusURL_KeepsItsQueryParameters(t *testing.T) {
+	var got url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = io.WriteString(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
+	}))
+	t.Cleanup(server.Close)
+	p, err := NewPrometheusURL(server.URL+"?tenant=team-a", server.Client(), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, p.Check(context.Background()))
+
+	assert.Equal(t, "team-a", got.Get("tenant"))
+	assert.Equal(t, "vector(1)", got.Get("query"))
 }
 
 // A token in the URL's user info is sent as basic auth, as before, but
