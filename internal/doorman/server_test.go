@@ -490,6 +490,20 @@ func TestServer_ProbesAndScrapesDoNotWake(t *testing.T) {
 	}
 }
 
+// Once a pod is Ready, as while a woken workload finishes resuming, a
+// scrape or health check reaches it rather than being told it's down.
+func TestServer_PassesAProbeThroughWhenAPodIsReady(t *testing.T) {
+	port := freePort(t)
+	_, c := startServer(t, pausedWorkload("api", port, time.Minute), readySlice(echoPort(t)))
+	scrape := "GET /metrics HTTP/1.1\r\nHost: 10.0.0.1\r\nUser-Agent: Prometheus/2.53.0\r\n\r\n"
+
+	conn := dial(t, port)
+	send(t, conn, scrape)
+
+	echoed(t, conn, scrape)
+	assert.Empty(t, lastRequest(t, c), "a scrape never wakes the workload")
+}
+
 // Some protocols, such as MySQL, wait for the server to speak first. A
 // client that stays connected without sending anything wakes the workload.
 func TestServer_WakesForAClientWaitingOnTheServer(t *testing.T) {

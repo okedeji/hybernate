@@ -158,18 +158,20 @@ func (h *heldConn) hold(ctx context.Context) (net.Conn, string) {
 	}
 	h.head = head
 	req, isHTTP := parseRequest(head)
-	if isHTTP && isHealthCheck(req) {
-		_ = h.conn.SetWriteDeadline(time.Now().Add(dialTimeout)) // a failure just means no deadline
-		_ = writeUnavailable(h.conn)                             // the caller may already have gone
-		return nil, resultIgnored
-	}
 
 	// A workload with a Ready pod is awake, or its Service is served by
-	// another workload's pods: the connection goes straight through.
+	// another workload's pods: the connection goes straight through, a
+	// health check's included, since what it checks is up.
 	if addrs, _, err := h.backends.get(waitCtx, key); err == nil && len(addrs) > 0 {
 		if upstream := dialAny(waitCtx, addrs); upstream != nil {
 			return upstream, resultSuccess
 		}
+	}
+
+	if isHTTP && isHealthCheck(req) {
+		_ = h.conn.SetWriteDeadline(time.Now().Add(dialTimeout)) // a failure just means no deadline
+		_ = writeUnavailable(h.conn)                             // the caller may already have gone
+		return nil, resultIgnored
 	}
 
 	wakeErr := h.requestWake(waitCtx, h.route, h.from)
