@@ -298,12 +298,20 @@ func (r *Reconciler) reconcileDesiredState(ctx context.Context, workload *v1alph
 		if workload.Spec.DryRun {
 			return nil, r.reportWouldPause(ctx, workload)
 		}
-		if isAwake(workload.Status.Phase) && workload.Status.Phase != v1alpha1.PhasePausing {
+		before := workload.Status.Phase
+		result, err := r.handlePause(ctx, workload, target)
+		if err != nil {
+			return nil, err
+		}
+		// Warned once the pause has begun: one held back, such as after a
+		// GitOps tool undid the last, is tried again on every reconcile.
+		if began := (before == v1alpha1.PhaseRunning || before == v1alpha1.PhaseIdle) &&
+			workload.Status.Phase != before; began {
 			if err := r.warnIfDependentsAwake(ctx, workload); err != nil {
 				return nil, err
 			}
 		}
-		return r.handlePause(ctx, workload, target)
+		return result, nil
 	case v1alpha1.DesiredStateRunning:
 		return r.handleResume(ctx, workload, nil)
 	default:

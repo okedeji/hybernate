@@ -380,6 +380,44 @@ func TestDependencies_ManualPauseWarnsWhenDependentsAwake(t *testing.T) {
 	assert.True(t, warned, "the override is reported")
 }
 
+// A manual pause held back, here after a GitOps tool undid the last, is
+// tried on every reconcile; the override is reported when it begins.
+func TestDependencies_ManualPauseWarnsOnceItBegins(t *testing.T) {
+	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhaseRunning)
+	postgres.Spec.DesiredState = ptr.To(v1alpha1.DesiredStatePaused)
+	postgres.Status.LastScaledUp = &v1alpha1.ScaledUp{At: metav1.NewTime(fixedTime.Add(-10 * time.Minute))}
+	meta.SetStatusCondition(&postgres.Status.Conditions, metav1.Condition{Type: conditionGitOpsConflict,
+		Status: metav1.ConditionTrue, Reason: "PauseUndone"})
+	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, postgresRef())
+	pauser := &stubPauser{pauseDone: true}
+	r := depReconciler(t, pauser, postgres, api, postgresTarget(1, 1))
+	recorder := r.Recorder.(*events.FakeRecorder)
+	warnings := func() int {
+		n := 0
+		for len(recorder.Events) > 0 {
+			if strings.Contains(<-recorder.Events, "DependentsAwake") {
+				n++
+			}
+		}
+		return n
+	}
+
+	for range 3 {
+		_, err := r.reconcileDesiredState(context.Background(), postgres, nil)
+		require.NoError(t, err)
+	}
+	assert.Zero(t, pauser.pauseCalls, "held back")
+	assert.Zero(t, warnings(), "nothing overridden yet")
+
+	r.clock = func() time.Time { return fixedTime.Add(time.Hour) }
+	for range 2 {
+		_, err := r.reconcileDesiredState(context.Background(), postgres, nil)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, pauser.pauseCalls)
+	assert.Equal(t, 1, warnings())
+}
+
 func TestFindRelatedWorkloads_Dependencies(t *testing.T) {
 	api := depWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning,
 		v1alpha1.DependencyRef{Namespace: "default", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres"})
