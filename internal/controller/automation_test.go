@@ -181,20 +181,47 @@ func TestAutomation_SkipsTransitions(t *testing.T) {
 // fires, the forecast never learns its quiet hours, and savings only accrue
 // when something unrelated happens to touch it.
 func TestPausedRecheck(t *testing.T) {
+	kolkata, err := time.LoadLocation("Asia/Kolkata")
+	require.NoError(t, err)
 	tests := []struct {
 		name string
 		at   time.Time
+		loc  *time.Location
 		want time.Duration
 	}{
 		{name: "at the flush interval", at: fixedTime.Add(10 * time.Minute), want: statusFlushInterval},
 		{name: "when autoResume next looks ahead", at: fixedTime.Add(42 * time.Minute), want: 3 * time.Minute},
 		{name: "on the hour", at: fixedTime.Add(58 * time.Minute), want: 2 * time.Minute},
+		{name: "ahead of a local hour at half past in UTC", at: fixedTime.Add(12 * time.Minute), loc: kolkata,
+			want: 3 * time.Minute},
+		{name: "on a local hour at half past in UTC", at: fixedTime.Add(28 * time.Minute), loc: kolkata,
+			want: 2 * time.Minute},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, pausedRecheck(tt.at))
+			r := &Reconciler{Timezone: tt.loc, clock: func() time.Time { return tt.at }}
+			assert.Equal(t, tt.want, r.pausedRecheck())
 		})
 	}
+}
+
+// In a timezone whose hours begin at half past in UTC, the lead before a
+// busy hour is counted to the local hour, which is the hour the forecast
+// predicts.
+func TestAutoResume_LeadIsCountedToTheLocalHour(t *testing.T) {
+	kolkata, err := time.LoadLocation("Asia/Kolkata")
+	require.NoError(t, err)
+	workload := pausedForecastWorkload()
+	engine := &stubForecaster{phase: forecast.DailyActive, predictByHour: map[int]float64{0: 1, 1: 50}}
+	pauser := &stubPauser{resumeDone: true}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{pauser: pauser})
+	r.Timezone = kolkata
+	r.clock = func() time.Time { return fixedTime.Add(20 * time.Minute) } // 17:50 in Kolkata
+
+	_, err = r.reconcileAutomation(context.Background(), workload, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, pauser.resumeCalls, "woken 10 minutes before the busy local hour")
 }
 
 func TestAutomation_PausedIsRequeued(t *testing.T) {

@@ -384,7 +384,7 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 	}
 	metrics.LifecycleActionDuration.WithLabelValues("pause").Observe(took.Seconds())
 	r.emitEvent(workload, false, "Normal", ReasonPaused, actionPause, "paused")
-	return &ctrl.Result{RequeueAfter: pausedRecheck(r.now())}, nil
+	return &ctrl.Result{RequeueAfter: r.pausedRecheck()}, nil
 }
 
 // preparePause records in workload.Status.Pause what the pause will change,

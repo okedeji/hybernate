@@ -209,7 +209,7 @@ func (r *Reconciler) reportManualOverride(ctx context.Context, workload *v1alpha
 // for it, or ahead of the demand a confident forecast predicts. Otherwise
 // it's looked at again when that forecast could next change its mind.
 func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
-	recheck := &ctrl.Result{RequeueAfter: pausedRecheck(r.now())}
+	recheck := &ctrl.Result{RequeueAfter: r.pausedRecheck()}
 	r.clearIdleVeto(workload)
 	if workload.Spec.DesiredState != nil {
 		return recheck, r.reportManualOverride(ctx, workload)
@@ -247,7 +247,7 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 	}
 	now := r.now()
 	predicted, when := engine.Predict(0, now), "this hour"
-	if untilNextHour(now) <= autoResumeLead {
+	if r.untilNextHour(now) <= autoResumeLead {
 		if next := engine.Predict(1, now); next > predicted {
 			predicted, when = next, "next hour"
 		}
@@ -266,17 +266,34 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 // wakes, so it's Ready when people arrive rather than starting as they do.
 const autoResumeLead = 15 * time.Minute
 
-func untilNextHour(now time.Time) time.Duration {
-	return now.Truncate(time.Hour).Add(time.Hour).Sub(now)
+// hourStart is when the forecast's hour containing t began. The forecast
+// counts hours in r.Timezone, where an hour may begin at half or quarter
+// past the hour in UTC. Stepping back to the local hour's start, rather
+// than building it with time.Date, stays exact in the hour a clock change
+// repeats.
+func (r *Reconciler) hourStart(t time.Time) time.Time {
+	loc := r.Timezone
+	if loc == nil {
+		loc = time.UTC
+	}
+	local := t.In(loc)
+	into := time.Duration(local.Minute())*time.Minute +
+		time.Duration(local.Second())*time.Second +
+		time.Duration(local.Nanosecond())
+	return t.Add(-into)
+}
+
+func (r *Reconciler) untilNextHour(now time.Time) time.Duration {
+	return r.hourStart(now).Add(time.Hour).Sub(now)
 }
 
 // pausedRecheck is when a paused workload is next looked at: when autoResume
 // could next decide differently, autoResumeLead before the hour and on it,
 // and at least every statusFlushInterval, so the forecast learns each quiet
 // hour and savings accrue steadily.
-func pausedRecheck(now time.Time) time.Duration {
+func (r *Reconciler) pausedRecheck() time.Duration {
 	wait := statusFlushInterval
-	next := untilNextHour(now)
+	next := r.untilNextHour(r.now())
 	for _, d := range []time.Duration{next - autoResumeLead, next} {
 		if d > 0 && d < wait {
 			wait = d
