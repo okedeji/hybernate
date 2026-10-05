@@ -19,6 +19,7 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -28,7 +29,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
@@ -314,4 +317,86 @@ func TestScanCluster_DependenciesLearnedFromWakes(t *testing.T) {
 
 	assert.Equal(t, []Dependency{{Namespace: testNamespace, Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres",
 		Source: SourceWake, Connected: true}}, got)
+}
+
+// The dependency pass reads only the ConfigMaps workloads take variables
+// from, never every ConfigMap in a namespace.
+func TestScanCluster_ReadsOnlyReferencedConfigMaps(t *testing.T) {
+	objs := []runtime.Object{
+		database("postgres", testNamespace),
+		depService(testNamespace, "postgres", false, map[string]string{"app": "postgres"}),
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "worker-config", Namespace: testNamespace},
+			Data: map[string]string{"PGHOST": "postgres:5432"}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "dashboards", Namespace: testNamespace},
+			Data: map[string]string{"big.json": strings.Repeat("x", 1<<20)}},
+		appWithEnv("worker", nil, []corev1.EnvFromSource{
+			{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "worker-config"}}},
+			{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "optional-missing"}}},
+		}),
+	}
+	var read []string
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.ConfigMapList); ok {
+					t.Error("ConfigMaps listed")
+				}
+				return c.List(ctx, list, opts...)
+			},
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.ConfigMap); ok {
+					read = append(read, key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), scanOptions(testNamespace))
+
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"optional-missing", "worker-config"}, read)
+	require.Len(t, byName(report)["worker"].Dependencies, 1)
+	assert.Empty(t, report.Incomplete, "a referenced ConfigMap that doesn't exist isn't a failure")
+}
+
+// ConfigMaps and Services that can't be read are said so, not silently
+// dropped.
+func TestScanCluster_DependencyReadsThatFail(t *testing.T) {
+	objs := []runtime.Object{
+		appWithEnv("worker", nil, []corev1.EnvFromSource{
+			{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "worker-config"}}},
+		}),
+	}
+	tests := []struct {
+		name           string
+		err            error
+		wantNote       string
+		wantIncomplete []string
+	}{
+		{name: "denied", err: forbidden("configmaps"),
+			wantNote: "your access doesn't allow reading ConfigMaps in 1 namespace, so dependencies set in them " +
+				"aren't found: " + testNamespace},
+		{name: "failed", err: errors.New("connection reset"),
+			wantNote:       "the scan is incomplete: it couldn't read ConfigMaps in " + testNamespace,
+			wantIncomplete: []string{testNamespace}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*corev1.ConfigMap); ok {
+							return tt.err
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				}).Build()
+
+			report, err := NewScanner(c, c).ScanCluster(context.Background(), scanOptions(testNamespace))
+
+			require.NoError(t, err)
+			assert.Contains(t, strings.Join(report.Notes, "\n"), tt.wantNote)
+			assert.Equal(t, tt.wantIncomplete, report.Incomplete)
+		})
+	}
 }

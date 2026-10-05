@@ -196,3 +196,17 @@ func TestScanCluster_ReplaysAtItsNodesPrices(t *testing.T) {
 	assert.InDelta(t, podHour(listPrice(t, "g5.xlarge")), w.HourlyCost, 1e-9)
 	assert.InDelta(t, w.HourlyCost*w.History.SleepHours, w.History.Freed, 1e-6)
 }
+
+// A node without a region label can't be looked up, since prices differ by
+// region, so its pods are priced at the scan's rates rather than guessed.
+func TestScanCluster_NodeWithoutARegion(t *testing.T) {
+	unplaced := node("small-1", "m6i.large")
+	delete(unplaced.Labels, "topology.kubernetes.io/region")
+	objs := []runtime.Object{unplaced, makeDeployment("api", testNamespace, 1, "1", "4Gi", nil),
+		podOn("api", "api-a", "small-1")}
+
+	report := scanWorkloads(t, objs...)
+
+	assert.Equal(t, []NodeTypePrice{{InstanceType: "m6i.large", Nodes: 1}}, report.NodePrices.NodeTypes)
+	assert.InDelta(t, podHour(cost.DefaultRates), byName(report)["api"].HourlyCost, 1e-9)
+}

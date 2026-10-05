@@ -155,7 +155,7 @@ func TestWorkloadSeries(t *testing.T) {
 		{pod: "api-gateway-5c6d7-klmno", container: "app", samples: map[int64]float64{0: 9}},
 	}
 
-	used, pods, found := workloadSeries(history, podsOf(v1alpha1.TargetKindDeployment, "api"), []string{"app"})
+	used, pods, found := workloadSeries(history, replicaSetPods([]string{"api-7d9f8c6b5"}), []string{"app"})
 
 	assert.True(t, found)
 	assert.InDelta(t, 0.5, used[0], 0.001, "its own containers in both pods; not the sidecar, not api-gateway")
@@ -163,18 +163,49 @@ func TestWorkloadSeries(t *testing.T) {
 	assert.Equal(t, map[int64]int{0: 2, 300: 1}, pods)
 }
 
-func TestPodsOf(t *testing.T) {
-	deployment := podsOf(v1alpha1.TargetKindDeployment, "api")
-	assert.True(t, deployment.MatchString("api-7d9f8c6b5-abcde"))
-	assert.True(t, deployment.MatchString("api-65bd9-x2k4p"))
-	assert.False(t, deployment.MatchString("api-gateway-7d9f8c6b5-abcde"))
-	assert.False(t, deployment.MatchString("api-0"))
+func TestReplicaSetPods(t *testing.T) {
+	long := "payments-reconciliation-worker-eu-west-primary-blue"
+	longRS := long + "-7d9f8c6b5"
+	tests := []struct {
+		name        string
+		replicaSets []string
+		pod         string
+		want        bool
+	}{
+		{"its ReplicaSet's pod", []string{"api-7d9f8c6b5"}, "api-7d9f8c6b5-abcde", true},
+		{"an older ReplicaSet's pod", []string{"api-7d9f8c6b5", "api-65bd9"}, "api-65bd9-x2k4p", true},
+		{"a longer-named Deployment's pod", []string{"api-7d9f8c6b5"}, "api-gateway-7d9f8c6b5-abcde", false},
+		{"a Job's pod", []string{"api-7d9f8c6b5"}, "api-migrate-x7k2p", false},
+		{"a CronJob's pod", []string{"api-7d9f8c6b5"}, "api-29312345-x7k2p", false},
+		{"a DaemonSet's pod", []string{"api-7d9f8c6b5"}, "api-agent-x7k2p", false},
+		{"a StatefulSet's pod", []string{"api-7d9f8c6b5"}, "api-0", false},
+		{"a ReplicaSet it doesn't own", []string{"api-7d9f8c6b5"}, "api-5c6d7f8b9-abcde", false},
+		{"a long name cut through its hash", []string{longRS}, (longRS + "-")[:58] + "x7k2p", true},
+		{"no ReplicaSets", nil, "api-7d9f8c6b5-abcde", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, replicaSetPods(tt.replicaSets)(tt.pod))
+		})
+	}
+}
 
-	statefulSet := podsOf(v1alpha1.TargetKindStatefulSet, "db")
-	assert.True(t, statefulSet.MatchString("db-0"))
-	assert.True(t, statefulSet.MatchString("db-12"))
-	assert.False(t, statefulSet.MatchString("db-replica-0"))
-	assert.False(t, statefulSet.MatchString("db-7d9f8c6b5-abcde"))
+func TestStatefulSetPods(t *testing.T) {
+	db := statefulSetPods("db")
+	assert.True(t, db("db-0"))
+	assert.True(t, db("db-12"))
+	assert.False(t, db("db-replica-0"))
+	assert.False(t, db("db-7d9f8c6b5-abcde"))
+	assert.False(t, db("db-01"), "ordinals have no leading zero")
+	assert.False(t, db("db-"))
+}
+
+func TestReplayStart(t *testing.T) {
+	since := weekStart
+	assert.Equal(t, since, replayStart(since, time.Time{}, minStep), "unknown creation")
+	assert.Equal(t, since, replayStart(since, since.Add(-time.Hour), minStep), "created before the history")
+	assert.Equal(t, since.Add(24*time.Hour+minStep), replayStart(since, since.Add(24*time.Hour+time.Second), minStep),
+		"the next step of the history")
 }
 
 func TestHistoryStep(t *testing.T) {
@@ -198,8 +229,8 @@ func TestScanCluster_ReplaysHistory(t *testing.T) {
 	f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{testNamespace: {
 		{pod: "idle-api-7d9f8c6b5-abcde", container: "main", cores: quiet},
 		{pod: "idle-api-7d9f8c6b5-fghij", container: "main", cores: quiet},
-		{pod: "busy-api-5c6d7f8b9-klmno", container: "main", cores: busy},
-		{pod: "managed-api-5c6d7f8b9-pqrst", container: "main", cores: quiet},
+		{pod: "busy-api-7d9f8c6b5-klmno", container: "main", cores: busy},
+		{pod: "managed-api-7d9f8c6b5-pqrst", container: "main", cores: quiet},
 	}}}
 	objs := deploymentWithRollout("idle-api", testNamespace, 2, 30*24*time.Hour)
 	objs = append(objs, makePodMetrics("idle-api", testNamespace, "1m", "20Mi"))
@@ -321,4 +352,76 @@ func TestScanCluster_EachWithItsCPUThreshold(t *testing.T) {
 	require.NotNil(t, got["managed"].History)
 	assert.Zero(t, got["plain"].History.SleepHours)
 	assert.InDelta(t, 168-1, got["managed"].History.SleepHours, 0.1)
+}
+
+// A Job or another Deployment whose pods start with the workload's name
+// isn't the workload, and isn't replayed as its activity.
+func TestScanCluster_HistoryIsTheWorkloadsOwn(t *testing.T) {
+	quiet := func(time.Time) float64 { return 0.001 }
+	busy := func(time.Time) float64 { return 2 }
+	f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{testNamespace: {
+		{pod: "web-7d9f8c6b5-abcde", container: "main", cores: quiet},
+		{pod: "web-migrate-x7k2p", container: "main", cores: busy},
+		{pod: "web-29312345-x7k2p", container: "main", cores: busy},
+		{pod: "web-api-7d9f8c6b5-fghij", container: "main", cores: busy},
+	}}}
+	objs := deploymentWithRollout("web", testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, makePodMetrics("web", testNamespace, "1m", "20Mi"))
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	h := byName(report)["web"].History
+	require.NotNil(t, h)
+	assert.InDelta(t, 167, h.SleepHours, 1, "web was quiet all week; the migration Job and web-api aren't web")
+}
+
+// A Deployment's name long enough that the API server cuts its pods' names
+// short still has its history found.
+func TestScanCluster_HistoryOfALongName(t *testing.T) {
+	name := "payments-reconciliation-worker-eu-west-primary-blue"
+	pod := (name + "-7d9f8c6b5-")[:58] + "x7k2p"
+	f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{testNamespace: {
+		{pod: pod, container: "main", cores: func(time.Time) float64 { return 0.001 }},
+	}}}
+	objs := deploymentWithRollout(name, testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, makePodMetrics(name, testNamespace, "1m", "20Mi"))
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	require.NotNil(t, byName(report)[name].History, pod)
+	assert.NotContains(t, strings.Join(report.Notes, "\n"), "no CPU history")
+}
+
+// A workload already at zero by hand frees nothing more when paused, so it
+// isn't replayed or counted toward what pausing could save.
+func TestScanCluster_ScaledByHandCouldSaveNothing(t *testing.T) {
+	quiet := func(time.Time) float64 { return 0.001 }
+	f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{testNamespace: {
+		{pod: "old-api-7d9f8c6b5-abcde", container: "main", cores: quiet},
+	}}}
+	objs := deploymentWithRollout("old-api", testNamespace, 0, 30*24*time.Hour)
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	w := byName(report)["old-api"]
+	assert.True(t, w.ScaledByHand)
+	assert.Nil(t, w.History, "not replayed")
+	assert.Zero(t, CouldSave(w))
+	assert.Zero(t, report.Totals.Replayed.Workloads)
+	assert.Zero(t, report.Totals.Replayed.MonthlyFreed)
+	assert.Equal(t, 1, report.Totals.ScaledToZero)
+	assert.NotContains(t, strings.Join(report.Notes, "\n"), "no CPU history")
+	assert.Zero(t, CouldSave(Workload{ScaledByHand: true, History: &History{MonthlyFreed: 50}}))
 }

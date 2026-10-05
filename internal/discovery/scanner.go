@@ -18,10 +18,11 @@ package discovery
 
 import (
 	"context"
-	"fmt"
+	"slices"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -30,6 +31,10 @@ import (
 
 // hoursPerMonth is the average month, for monthly costs.
 const hoursPerMonth = 730
+
+// pageSize bounds each list the scan makes, so a namespace with thousands of
+// pods is read in pieces the API server can serve without strain.
+const pageSize = 500
 
 // Scanner reads a cluster's workloads and judges whether they're in use.
 type Scanner struct {
@@ -43,68 +48,59 @@ func NewScanner(c client.Client, pods client.Reader) *Scanner {
 	return &Scanner{client: c, pods: pods}
 }
 
-func (s *Scanner) listWorkloads(ctx context.Context, namespace string, kind v1alpha1.TargetKind) ([]client.Object, error) {
-	switch kind {
-	case v1alpha1.TargetKindDeployment:
-		var list appsv1.DeploymentList
-		if err := s.client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
-			return nil, err
+// listAll lists a page at a time, handing each page to each. Every page is
+// decoded into a fresh list, since decoding into a used one merges maps such
+// as labels from one page's items into the next's.
+func listAll[T any, L interface {
+	*T
+	client.ObjectList
+}](ctx context.Context, r client.Reader, each func(L), opts ...client.ListOption) error {
+	var next string
+	for {
+		pageOpts := append(slices.Clip(opts), client.Limit(pageSize))
+		if next != "" {
+			pageOpts = append(pageOpts, client.Continue(next))
 		}
-		out := make([]client.Object, len(list.Items))
-		for i := range list.Items {
-			out[i] = &list.Items[i]
+		list := L(new(T))
+		if err := r.List(ctx, list, pageOpts...); err != nil {
+			return err
 		}
-		return out, nil
-	case v1alpha1.TargetKindStatefulSet:
-		var list appsv1.StatefulSetList
-		if err := s.client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
-			return nil, err
+		each(list)
+		if next = list.GetContinue(); next == "" {
+			return nil
 		}
-		out := make([]client.Object, len(list.Items))
-		for i := range list.Items {
-			out[i] = &list.Items[i]
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("unsupported kind: %s", kind)
 	}
 }
 
-// workloadPods are the workload's pods, or none when they can't be listed,
-// which prices it from its template at the scan's rates.
-func (s *Scanner) workloadPods(ctx context.Context, namespace string, sel labels.Selector) []corev1.Pod {
-	var pods corev1.PodList
-	if err := s.pods.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
-		return nil
-	}
-	return pods.Items
+// workload is the part of a Deployment or StatefulSet the scan reads.
+type workload struct {
+	obj      client.Object
+	kind     v1alpha1.TargetKind
+	replicas *int32
+	template corev1.PodTemplateSpec
+	selector *metav1.LabelSelector
 }
 
-// workloadFields extracts the common fields from a Deployment or StatefulSet.
-func workloadFields(obj client.Object) (replicas *int32, spec corev1.PodSpec, matchLabels map[string]string) {
-	switch t := obj.(type) {
-	case *appsv1.Deployment:
-		replicas = t.Spec.Replicas
-		spec = t.Spec.Template.Spec
-		if t.Spec.Selector != nil {
-			matchLabels = t.Spec.Selector.MatchLabels
-		}
-	case *appsv1.StatefulSet:
-		replicas = t.Spec.Replicas
-		spec = t.Spec.Template.Spec
-		if t.Spec.Selector != nil {
-			matchLabels = t.Spec.Selector.MatchLabels
-		}
-	}
-	return
+func deploymentWorkload(d *appsv1.Deployment) workload {
+	return workload{obj: d, kind: v1alpha1.TargetKindDeployment, replicas: d.Spec.Replicas,
+		template: d.Spec.Template, selector: d.Spec.Selector}
 }
 
-func podTemplate(obj client.Object) corev1.PodTemplateSpec {
-	switch t := obj.(type) {
-	case *appsv1.Deployment:
-		return t.Spec.Template
-	case *appsv1.StatefulSet:
-		return t.Spec.Template
+func statefulSetWorkload(s *appsv1.StatefulSet) workload {
+	return workload{obj: s, kind: v1alpha1.TargetKindStatefulSet, replicas: s.Spec.Replicas,
+		template: s.Spec.Template, selector: s.Spec.Selector}
+}
+
+// podSelector is the selector the workload's controller adopts pods by,
+// match expressions included. A missing or empty one selects nothing, as
+// the API server rejects one for a Deployment or StatefulSet anyway.
+func (w workload) podSelector() (labels.Selector, error) {
+	sel, err := metav1.LabelSelectorAsSelector(w.selector)
+	if err != nil {
+		return nil, err
 	}
-	return corev1.PodTemplateSpec{}
+	if sel.Empty() {
+		return labels.Nothing(), nil
+	}
+	return sel, nil
 }

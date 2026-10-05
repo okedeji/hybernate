@@ -89,18 +89,15 @@ func (r scanResult) pricesSentence() string {
 		}
 	}
 
-	var listed []discovery.NodeTypePrice
-	var unlisted []string
+	var listed, unlisted []discovery.NodeTypePrice
 	unlistedNodes := 0
 	for _, t := range nodes.NodeTypes {
 		if t.Listed {
 			listed = append(listed, t)
 			continue
 		}
+		unlisted = append(unlisted, t)
 		unlistedNodes += t.Nodes
-		if t.InstanceType != "" {
-			unlisted = append(unlisted, t.InstanceType)
-		}
 	}
 
 	var s string
@@ -110,7 +107,7 @@ func (r scanResult) pricesSentence() string {
 	case len(listed) == 0:
 		s = p.sentence()
 		if unlistedNodes > 0 {
-			s += " None of the nodes' instance types has a list price."
+			s += " None of the nodes has a list price: " + unlistedPhrase(unlisted) + "."
 		}
 	default:
 		s = "On-demand list prices for " + nodeTypesPhrase(listed) + "."
@@ -125,7 +122,7 @@ func (r scanResult) pricesSentence() string {
 			if unlistedNodes == 1 {
 				use = "uses"
 			}
-			s += " " + unlistedPhrase(unlistedNodes, unlisted) + " " + use + " " + p.unlistedRates() + "."
+			s += " " + unlistedPhrase(unlisted) + " " + use + " " + p.unlistedRates() + "."
 		}
 	}
 	if onSpot > 0 {
@@ -175,12 +172,44 @@ func nodeTypesPhrase(types []discovery.NodeTypePrice) string {
 	return fmt.Sprintf("its %d node types, %s,%s", len(types), listed, where)
 }
 
-func unlistedPhrase(nodes int, types []string) string {
-	s := plural(nodes, "node", "nodes")
-	if len(types) == 0 {
-		return s + " without an instance type"
+// unlistedPhrase names the nodes without a list price, by why: no instance
+// type label, no region label to price their type in, or a type the price
+// table doesn't have.
+func unlistedPhrase(types []discovery.NodeTypePrice) string {
+	const (
+		noType = iota
+		noRegion
+		notInTable
+	)
+	phrases := []string{noType: "without an instance type", noRegion: "without a region label",
+		notInTable: "of a type without a list price"}
+	nodes := make([]int, len(phrases))
+	names := make([][]string, len(phrases))
+	for _, t := range types {
+		why := notInTable
+		switch {
+		case t.InstanceType == "":
+			why = noType
+		case t.Region == "":
+			why = noRegion
+		}
+		nodes[why] += t.Nodes
+		if t.InstanceType != "" && !slices.Contains(names[why], t.InstanceType) {
+			names[why] = append(names[why], t.InstanceType)
+		}
 	}
-	return s + " of a type without a list price (" + strings.Join(types, ", ") + ")"
+	var parts []string
+	for why, phrase := range phrases {
+		if nodes[why] == 0 {
+			continue
+		}
+		part := plural(nodes[why], "node", "nodes") + " " + phrase
+		if len(names[why]) > 0 {
+			part += " (" + strings.Join(names[why], ", ") + ")"
+		}
+		parts = append(parts, part)
+	}
+	return joinAnd(parts)
 }
 
 func providerName(provider string) string {

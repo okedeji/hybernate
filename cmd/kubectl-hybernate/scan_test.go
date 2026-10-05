@@ -47,7 +47,8 @@ func sampleCluster() scanResult {
 			State: discovery.StateActive, CPUPercent: ptr.To(64), MonthlyCost: 96, HourlyCost: 0.1315},
 	}
 	return scanResult{Context: "staging", Cluster: "staging", ClusterReport: &discovery.ClusterReport{
-		Mode: discovery.ModeSnapshot, Workloads: workloads, Notes: []string{"skipped namespace locked: forbidden"},
+		Mode: discovery.ModeSnapshot, Namespaces: 1, Workloads: workloads,
+		Notes: []string{"skipped namespace locked: forbidden"},
 		Totals: discovery.Totals{Workloads: 2, Idle: 1, IdleCPUMillis: 1000, IdleMemoryBytes: 2 << 30,
 			MonthlyCost: 1336.4, IdleMonthlyCost: 1240.4, IdleHourlyCost: 1.6992},
 	}}
@@ -91,6 +92,7 @@ func TestWriteTable_Limit(t *testing.T) {
 func TestWriteTable_NothingIdle(t *testing.T) {
 	cluster := sampleCluster()
 	cluster.Totals = discovery.Totals{Workloads: 2}
+	cluster.Workloads[0].State = discovery.StateActive
 	var out bytes.Buffer
 
 	require.NoError(t, writeScan(&out, cluster, scanOptions{output: "table"}))
@@ -535,4 +537,81 @@ func TestWriteScan_Protected(t *testing.T) {
 	got := out.String()
 	assert.Regexp(t, `statefulset/postgres\s+idle \(protected\)`, got)
 	assert.NotContains(t, got, "kubectl label statefulset postgres", "never suggested")
+}
+
+// Next steps never suggest a protected workload, in the table or the
+// report, which choose them the same way.
+func TestNextSteps_SkipProtected(t *testing.T) {
+	protected := Workload{Namespace: "prod", Kind: v1alpha1.TargetKindDeployment, Name: "payments",
+		State: discovery.StateIdle, Protected: true}
+	open := Workload{Namespace: "dev", Kind: v1alpha1.TargetKindDeployment, Name: "preview", State: discovery.StateIdle}
+	measuringProtected := Workload{Namespace: "prod", Kind: v1alpha1.TargetKindDeployment, Name: "ledger",
+		Managed: true, DryRun: true, Protected: true, Measured: &discovery.Measured{}}
+	tests := []struct {
+		name      string
+		workloads []Workload
+		want      []string
+	}{
+		{name: "only protected", workloads: []Workload{protected, measuringProtected}},
+		{name: "the first that isn't", workloads: []Workload{protected, open}, want: []string{
+			"kubectl label deployment preview -n dev hybernate.io/managed=true",
+			"kubectl annotate deployment preview -n dev hybernate.io/dry-run=true",
+			"kubectl hybernate enable deployment/preview -n dev",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := scanResult{Cluster: "c", ClusterReport: &discovery.ClusterReport{Workloads: tt.workloads,
+				Totals: discovery.Totals{Workloads: len(tt.workloads), Idle: 2}}}
+			var table bytes.Buffer
+			writeNextSteps(&printer{w: &table}, result)
+			page := renderHTML(t, result)
+
+			if tt.want == nil {
+				assert.Empty(t, table.String())
+				assert.NotContains(t, page, "Next steps")
+				return
+			}
+			for _, command := range tt.want {
+				assert.Contains(t, table.String(), command)
+			}
+			steps := buildReport(result, time.Hour).NextSteps
+			require.Len(t, steps, len(tt.want))
+			for _, step := range steps {
+				assert.NotContains(t, string(step), "payments")
+			}
+			assert.NotContains(t, table.String(), "payments")
+		})
+	}
+}
+
+// A scan that couldn't read all it should have exits non-zero, after its
+// report is written.
+func TestIncompleteError(t *testing.T) {
+	result := sampleCluster()
+	assert.NoError(t, incompleteError(result))
+
+	result.Incomplete = []string{"payments", "orders"}
+	err := incompleteError(result)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the scan of staging is incomplete: 2 namespaces couldn't be read in full")
+}
+
+// An empty cluster says so, rather than pointing at notes it doesn't have.
+func TestEmptyCluster(t *testing.T) {
+	result := scanResult{Cluster: "c", ClusterReport: &discovery.ClusterReport{Namespaces: 3, Workloads: []Workload{}}}
+	var out bytes.Buffer
+
+	require.NoError(t, writeScan(&out, result, scanOptions{output: "table"}))
+
+	assert.Contains(t, out.String(), "c: 0 workloads in 3 namespaces")
+	assert.Contains(t, out.String(), "No Deployments or StatefulSets were found.")
+	assert.NotContains(t, out.String(), "No running workloads are idle")
+	page := renderHTML(t, result)
+	assert.Contains(t, page, "No Deployments or StatefulSets were found.")
+	assert.NotContains(t, page, "the notes say why")
+
+	result.Notes = []string{"your access doesn't allow reading workloads in 3 namespaces"}
+	assert.Contains(t, renderHTML(t, result), "the notes say what it couldn&#39;t")
 }

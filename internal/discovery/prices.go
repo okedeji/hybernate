@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
@@ -69,9 +70,8 @@ type nodePrice struct {
 // readNodePrices prices the cluster's nodes from their labels. The nodes
 // are read as metadata only, which is all their labels need.
 func (s *Scanner) readNodePrices(ctx context.Context) (nodePricing, Prices) {
-	var nodes metav1.PartialObjectMetadataList
-	nodes.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("NodeList"))
-	if err := s.client.List(ctx, &nodes); err != nil {
+	nodes, err := s.listNodes(ctx)
+	if err != nil {
 		reason := err.Error()
 		if apierrors.IsForbidden(err) {
 			reason = "your access doesn't allow listing nodes"
@@ -79,9 +79,9 @@ func (s *Scanner) readNodePrices(ctx context.Context) (nodePricing, Prices) {
 		return nodePricing{}, Prices{NodesUnread: reason}
 	}
 
-	pricing := nodePricing{byNode: make(map[string]nodePrice, len(nodes.Items))}
+	pricing := nodePricing{byNode: make(map[string]nodePrice, len(nodes))}
 	byType := map[cost.NodeType]*NodeTypePrice{}
-	for _, node := range nodes.Items {
+	for _, node := range nodes {
 		t := cost.NodeTypeOf(node.Labels)
 		p, listed := cost.ListPriceOf(t)
 		pricing.byNode[node.Name] = nodePrice{rates: p.Rates, listed: listed, spot: t.Spot}
@@ -117,6 +117,28 @@ func (s *Scanner) readNodePrices(ctx context.Context) (nodePricing, Prices) {
 		}
 	}
 	return pricing, prices
+}
+
+// listNodes reads the nodes' metadata a page at a time; nodes have no typed
+// metadata-only list for listAll to make.
+func (s *Scanner) listNodes(ctx context.Context) ([]metav1.PartialObjectMetadata, error) {
+	var out []metav1.PartialObjectMetadata
+	var next string
+	for {
+		var page metav1.PartialObjectMetadataList
+		page.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("NodeList"))
+		opts := []client.ListOption{client.Limit(pageSize)}
+		if next != "" {
+			opts = append(opts, client.Continue(next))
+		}
+		if err := s.client.List(ctx, &page, opts...); err != nil {
+			return nil, err
+		}
+		out = append(out, page.Items...)
+		if next = page.GetContinue(); next == "" {
+			return out, nil
+		}
+	}
 }
 
 // ratesFor is what a workload is priced at: the listed nodes its pods are

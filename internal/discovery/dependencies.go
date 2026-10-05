@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -86,55 +87,86 @@ type variable struct {
 }
 
 // findDependencies fills in each workload's dependencies from the addresses
-// in its environment that name a Service in a scanned namespace, and
-// returns notes on what it couldn't read. Secrets are never read.
+// in its environment that name a Service in a scanned namespace. It reads a
+// namespace at a time, and only the ConfigMaps its workloads take variables
+// from. It returns notes on what it couldn't read; Secrets are never read.
 func (s *Scanner) findDependencies(ctx context.Context, workloads []Workload, sources map[workloadKey]workloadSource,
-	namespaces []string) []string {
-	services := map[string]map[string]corev1.Service{}
-	configMaps := map[string]map[string]map[string]string{}
-	for _, ns := range namespaces {
-		var svcs corev1.ServiceList
-		if err := s.client.List(ctx, &svcs, client.InNamespace(ns)); err == nil {
-			services[ns] = map[string]corev1.Service{}
-			for _, svc := range svcs.Items {
-				services[ns][svc.Name] = svc
-			}
-		}
-		var cms corev1.ConfigMapList
-		if err := s.client.List(ctx, &cms, client.InNamespace(ns)); err == nil {
-			configMaps[ns] = map[string]map[string]string{}
-			for _, cm := range cms.Items {
-				configMaps[ns][cm.Name] = cm.Data
-			}
-		}
-	}
-
-	var fromSecrets []string
-	for i := range workloads {
-		w := &workloads[i]
-		self := workloadKey{w.Namespace, w.Kind, w.Name}
-		source, ok := sources[self]
-		if !ok {
+	services map[string]map[string]corev1.Service) ([]string, []readProblem) {
+	byNamespace := map[string][]int{}
+	var namespaces []string
+	for i, w := range workloads {
+		if _, ok := sources[workloadKey{w.Namespace, w.Kind, w.Name}]; !ok {
 			continue
 		}
-		deps, usesSecrets := dependenciesOf(self, source.template.Spec, configMaps[w.Namespace], services, sources)
-		if usesSecrets {
-			fromSecrets = append(fromSecrets, w.Namespace+"/"+w.Name)
+		if _, seen := byNamespace[w.Namespace]; !seen {
+			namespaces = append(namespaces, w.Namespace)
 		}
-		for _, d := range deps {
-			target := workloadKey{d.Namespace, d.Kind, d.Name}
-			d.Declared = declares(source.managed, w.Namespace, target)
-			d.Connected = learned(source.managed, target)
-			w.Dependencies = append(w.Dependencies, d)
+		byNamespace[w.Namespace] = append(byNamespace[w.Namespace], i)
+	}
+
+	var problems []readProblem
+	var fromSecrets []string
+	for _, namespace := range namespaces {
+		specs := make([]corev1.PodSpec, 0, len(byNamespace[namespace]))
+		for _, i := range byNamespace[namespace] {
+			w := workloads[i]
+			specs = append(specs, sources[workloadKey{w.Namespace, w.Kind, w.Name}].template.Spec)
 		}
-		w.Dependencies = append(w.Dependencies, learnedFromWakes(source.managed, w.Dependencies)...)
+		configMaps, err := s.readConfigMaps(ctx, namespace, specs)
+		if err != nil {
+			problems = append(problems, readProblem{namespace: namespace, what: readingConfigMaps, err: err})
+		}
+		for _, i := range byNamespace[namespace] {
+			w := &workloads[i]
+			self := workloadKey{w.Namespace, w.Kind, w.Name}
+			source := sources[self]
+			deps, usesSecrets := dependenciesOf(self, source.template.Spec, configMaps, services, sources)
+			if usesSecrets {
+				fromSecrets = append(fromSecrets, w.Namespace+"/"+w.Name)
+			}
+			for _, d := range deps {
+				target := workloadKey{d.Namespace, d.Kind, d.Name}
+				d.Declared = declares(source.managed, w.Namespace, target)
+				d.Connected = learned(source.managed, target)
+				w.Dependencies = append(w.Dependencies, d)
+			}
+			w.Dependencies = append(w.Dependencies, learnedFromWakes(source.managed, w.Dependencies)...)
+		}
 	}
 	if len(fromSecrets) == 0 {
-		return nil
+		return nil, problems
 	}
 	return []string{fmt.Sprintf("%s environment variables from Secrets, which the scan doesn't read, "+
 		"so dependencies set there aren't found: %s",
-		plural(len(fromSecrets), "workload takes", "workloads take"), listSome(fromSecrets))}
+		plural(len(fromSecrets), "workload takes", "workloads take"), listSome(fromSecrets))}, problems
+}
+
+// readConfigMaps reads the ConfigMaps a namespace's pods take variables
+// from, by name. One that doesn't exist is left out, as the pod would leave
+// it out if optional. It stops at the first it isn't allowed to read, since
+// the rest won't be either.
+func (s *Scanner) readConfigMaps(ctx context.Context, namespace string, specs []corev1.PodSpec) (
+	map[string]map[string]string, error) {
+	names := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		names = append(names, ConfigMapsReferenced(spec)...)
+	}
+	out := map[string]map[string]string{}
+	var failed error
+	for _, name := range uniqueSorted(names) {
+		var cm corev1.ConfigMap
+		err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &cm)
+		switch {
+		case err == nil:
+			out[name] = cm.Data
+		case apierrors.IsNotFound(err):
+		case apierrors.IsForbidden(err):
+			return out, err
+		case failed == nil:
+			failed = fmt.Errorf("reading ConfigMap %s: %w", name, err)
+		}
+	}
+	return out, failed
 }
 
 // Target is a workload a dependency can resolve to, by the labels on its

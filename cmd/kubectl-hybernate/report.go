@@ -46,8 +46,10 @@ var reportTemplate = template.Must(template.New("report").Funcs(template.FuncMap
 // reportPage is what the HTML report shows, worded from the same report
 // data and helpers as the terminal table, so the two never disagree.
 type reportPage struct {
-	Cluster      string
-	ScannedAt    string
+	Cluster   string
+	ScannedAt string
+	// Empty says why there are no workloads, when there are none.
+	Empty        string
 	Basis        string
 	Prices       string
 	Headline     headline
@@ -266,6 +268,9 @@ func buildReport(result scanResult, idleAfter time.Duration) reportPage {
 		Mark:      doorman.Mark,
 		HubURL:    hubURL,
 	}
+	if result.Totals.Workloads == 0 {
+		page.Empty = emptySentence(result)
+	}
 	page.Headline, page.Facts = headlineFor(result.Totals, replayedOver(result.History))
 	page.Saving, page.CouldSave = savingColumns(result.Workloads)
 	page.Sleep = sleepColumns(history, result.Workloads)
@@ -319,8 +324,12 @@ func buildReport(result scanResult, idleAfter time.Duration) reportPage {
 			"can pause them while idle and wake them on the next request instead"}, page.Notes...)
 	}
 	page.Method = methodFor(result, history, len(page.Dependencies) > 0, idleAfter)
-	for _, step := range nextStepsFor(result.Workloads) {
+	measure, enable := nextStepCommands(nextStepTargets(result.Workloads))
+	for _, step := range measure {
 		page.NextSteps = append(page.NextSteps, shellHTML(step))
+	}
+	if enable != "" {
+		page.NextSteps = append(page.NextSteps, shellHTML(enable))
 	}
 	return page
 }
@@ -439,34 +448,6 @@ func methodFor(result scanResult, history, dependencies bool, idleAfter time.Dur
 			"this report.")
 	}
 	return method
-}
-
-func nextStepsFor(workloads []Workload) []string {
-	var idle, measuring *Workload
-	for i := range workloads {
-		wl := &workloads[i]
-		if idle == nil && wl.State == discovery.StateIdle && !wl.Managed {
-			idle = wl
-		}
-		if measuring == nil && wl.Measured != nil {
-			measuring = wl
-		}
-	}
-	var steps []string
-	if idle != nil {
-		kind := strings.ToLower(string(idle.Kind))
-		steps = append(steps,
-			fmt.Sprintf("kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace),
-			fmt.Sprintf("kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, idle.Name, idle.Namespace))
-	}
-	if measuring == nil {
-		measuring = idle
-	}
-	if measuring != nil {
-		steps = append(steps, fmt.Sprintf("kubectl hybernate enable %s/%s -n %s",
-			strings.ToLower(string(measuring.Kind)), measuring.Name, measuring.Namespace))
-	}
-	return steps
 }
 
 // shellHTML colours a command the way a terminal would: the program and

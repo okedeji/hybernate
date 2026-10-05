@@ -54,7 +54,7 @@ func deploymentWithRollout(name, namespace string, replicas int32, age time.Dura
 	d := makeDeployment(name, namespace, replicas, "100m", "128Mi", nil)
 	d.UID = types.UID(namespace + "-" + name)
 	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
-		Name: name + "-abc", Namespace: namespace,
+		Name: name + "-7d9f8c6b5", Namespace: namespace,
 		CreationTimestamp: metav1.NewTime(scanTime.Add(-age)),
 		OwnerReferences:   []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: name, UID: d.UID, Controller: ptr.To(true)}},
 	}}
@@ -86,8 +86,8 @@ func TestScanCluster_JudgesEachWorkload(t *testing.T) {
 
 	got := byName(scanWorkloads(t, objs...))
 
-	assert.Equal(t, StateIdle, got["idle-api"].State, "5m of 2×100m is 2.5%")
-	assert.Equal(t, 2, *got["idle-api"].CPUPercent)
+	assert.Equal(t, StateIdle, got["idle-api"].State, "5m of the one measured pod's 100m is 5%")
+	assert.Equal(t, 5, *got["idle-api"].CPUPercent)
 	assert.Equal(t, StateActive, got["busy-api"].State)
 	assert.Equal(t, StateUnknown, got["starting"].State, "no metrics yet isn't the same as idle")
 	assert.Equal(t, "no metrics yet", got["starting"].Unmeasured)
@@ -203,6 +203,24 @@ func TestNamespaces(t *testing.T) {
 	got, err = Namespaces(context.Background(), c, []string{"kube-system"}, SystemNamespaces)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"kube-system"}, got, "named namespaces are scanned as asked")
+
+	got, err = Namespaces(context.Background(), c, []string{"api", "preview-42", "api", ""}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api", "preview-42"}, got, "a namespace named twice is scanned once")
+}
+
+// A namespace named twice is scanned, and counted, once.
+func TestScanCluster_NamespaceNamedTwice(t *testing.T) {
+	objs := idleNow("api")
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+	namespaces, err := Namespaces(context.Background(), c, []string{testNamespace, testNamespace}, nil)
+	require.NoError(t, err)
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), scanOptions(namespaces...))
+
+	require.NoError(t, err)
+	assert.Len(t, report.Workloads, 1)
+	assert.Equal(t, 1, report.Totals.Idle)
 }
 
 func TestNamespaces_Forbidden(t *testing.T) {

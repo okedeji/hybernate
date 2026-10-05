@@ -23,6 +23,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -158,12 +159,16 @@ Examples:
 				return err
 			}
 			result.ScannedAt = time.Now().UTC().Truncate(time.Second)
-			result.Settings = settings{CPUThreshold: opts.cpuThreshold, IdleAfter: opts.idleAfter.String(), Window: opts.window}
+			result.Settings = settings{CPUThreshold: opts.cpuThreshold, IdleAfter: roundedDuration(opts.idleAfter),
+				Window: opts.window}
 			result.Prices = pricesFor(opts)
 			if err := writeScan(cmd.OutOrStdout(), result, opts); err != nil {
 				return err
 			}
-			return writeReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), result, opts)
+			if err := writeReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), result, opts); err != nil {
+				return err
+			}
+			return incompleteError(result)
 		},
 	}
 	addNamespaceFlags(cmd, &opts.namespaces,
@@ -190,6 +195,18 @@ Examples:
 	cmd.Flags().BoolVar(&opts.open, "open", opts.open,
 		"Open the HTML report in your browser, when the table is shown in a terminal")
 	return cmd
+}
+
+// incompleteError fails a scan that couldn't read all it should have, once
+// its report is written, so a script sees the exit code and a person still
+// gets what it did read.
+func incompleteError(result scanResult) error {
+	if result.ClusterReport == nil || len(result.Incomplete) == 0 {
+		return nil
+	}
+	return fmt.Errorf("the scan of %s is incomplete: %s couldn't be read in full, as the notes say; run it again, "+
+		"scan fewer namespaces with -n, or pass a longer --timeout", result.Cluster,
+		plural(len(result.Incomplete), "namespace", "namespaces"))
 }
 
 // parseWindow reads a duration that may be in days, which
@@ -253,12 +270,13 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 		CPUThreshold: opts.cpuThreshold,
 		Rates: cost.Rates{CPUPerHour: opts.cpuPrice, MemoryPerHour: opts.memoryPrice,
 			StoragePerMonth: cost.DefaultRates.StoragePerMonth},
-		OwnCPUPrice:    opts.ownCPUPrice,
-		OwnMemoryPrice: opts.ownMemoryPrice,
-		Now:            time.Now,
-		History:        history,
-		Window:         window,
-		IdleAfter:      opts.idleAfter,
+		OwnCPUPrice:     opts.ownCPUPrice,
+		OwnMemoryPrice:  opts.ownMemoryPrice,
+		Now:             time.Now,
+		History:         history,
+		Window:          window,
+		IdleAfter:       opts.idleAfter,
+		NamedNamespaces: len(opts.namespaces.list()) > 0,
 	})
 	if err != nil {
 		return scanResult{}, fmt.Errorf("scanning %s: %w", scan.Cluster, err)
@@ -268,9 +286,6 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	}
 	if namespaceNote != "" {
 		report.Notes = append([]string{namespaceNote}, report.Notes...)
-	}
-	if len(namespaces) > 0 {
-		report.Notes = append(discovery.AccessNotes(ctx, c, namespaces[0]), report.Notes...)
 	}
 	// The scan carries on past calls that fail, noting what it couldn't
 	// read; once the deadline passes they all fail, and what it has isn't
@@ -347,14 +362,15 @@ func writeScan(w io.Writer, result scanResult, opts scanOptions) error {
 
 func writeTable(w io.Writer, result scanResult, limit int) error {
 	p := &printer{w: w}
-	namespaces := map[string]bool{}
-	for _, wl := range result.Workloads {
-		namespaces[wl.Namespace] = true
-	}
 	p.line("%s: %s in %s", result.Cluster, countOf(result.Totals.Workloads, "workload"),
-		countOf(len(namespaces), "namespace"))
+		countOf(result.Namespaces, "namespace"))
 	p.line("")
-	writeHeadline(p, result.Totals, replayedOver(result.History))
+	if result.Totals.Workloads == 0 {
+		p.line("  %s", emptySentence(result))
+		p.line("")
+	} else {
+		writeHeadline(p, result.Totals, replayedOver(result.History))
+	}
 	judged, unjudged := splitJudged(result.Workloads)
 	if len(judged) > 0 {
 		writeWorkloads(p, judged, limit, result.Mode == discovery.ModeHistory)
@@ -471,10 +487,24 @@ func splitJudged(workloads []Workload) (judged, unjudged []Workload) {
 	return judged, unjudged
 }
 
+// emptySentence says why a scan found no workloads.
+func emptySentence(result scanResult) string {
+	if result.Namespaces == 0 {
+		return "There were no namespaces to scan."
+	}
+	if len(result.Notes) > 0 {
+		return "No Deployments or StatefulSets were found that the scan could read; the notes say what it couldn't."
+	}
+	return "No Deployments or StatefulSets were found."
+}
+
 var unmeasuredExplained = map[string]string{
-	"no CPU requests": "set no CPU requests, so their use can't be measured",
-	"no metrics yet":  "have no metrics yet, usually because their pods just started",
-	"no Metrics API":  "couldn't be measured without the Metrics API",
+	"no CPU requests":         "set no CPU requests, so their use can't be measured",
+	"no metrics yet":          "have no metrics yet, usually because their pods just started",
+	"no Metrics API":          "couldn't be measured without the Metrics API",
+	"pod metrics not allowed": "couldn't be measured, as your access doesn't allow reading pod metrics",
+	"pod metrics unreadable":  "couldn't be measured, as reading pod metrics failed",
+	"invalid selector":        "have a pod selector the scan couldn't read, so their pods weren't found",
 }
 
 func unjudgedNotes(unjudged []Workload) []string {
@@ -603,54 +633,84 @@ func savedCell(wl Workload) string {
 // couldSaveCell is what pausing a workload Hybernate doesn't pause yet
 // would free a month, from what dry-run measured or history shows.
 func couldSaveCell(wl Workload) string {
-	if wl.Measured == nil && (wl.Managed || wl.History == nil) {
+	if wl.ScaledByHand || (wl.Measured == nil && (wl.Managed || wl.Protected || wl.History == nil)) {
 		return "-"
 	}
 	return dollars(discovery.CouldSave(wl))
 }
 
-func writeNextSteps(p *printer, result scanResult) {
-	var idle, measuring *Workload
-	installed := false
-	for i := range result.Workloads {
-		wl := &result.Workloads[i]
-		installed = installed || wl.Managed
-		if idle == nil && result.Totals.Idle > 0 && wl.State == discovery.StateIdle && !wl.Managed && !wl.Protected {
+// nextStepTargets are the workloads next steps are about: the first idle
+// one Hybernate could manage, to measure, and the first already measuring
+// in dry-run, to go live. Workloads come sorted most savings first, so each
+// is the best example. Protected workloads are left out, as Hybernate won't
+// manage them.
+func nextStepTargets(workloads []Workload) (idle, measuring *Workload) {
+	for i := range workloads {
+		wl := &workloads[i]
+		if wl.Protected {
+			continue
+		}
+		if idle == nil && wl.State == discovery.StateIdle && !wl.Managed {
 			idle = wl
 		}
 		if measuring == nil && wl.Measured != nil {
 			measuring = wl
 		}
 	}
+	return idle, measuring
+}
+
+// nextStepCommands are the commands that measure the idle workload and then
+// take a workload live, which both the table and the report show.
+func nextStepCommands(idle, measuring *Workload) (measure []string, enable string) {
+	if idle != nil {
+		kind := strings.ToLower(string(idle.Kind))
+		measure = []string{
+			fmt.Sprintf("kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace),
+			fmt.Sprintf("kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, idle.Name, idle.Namespace),
+		}
+	}
+	if measuring == nil {
+		measuring = idle
+	}
+	if measuring != nil {
+		enable = fmt.Sprintf("kubectl hybernate enable %s/%s -n %s",
+			strings.ToLower(string(measuring.Kind)), measuring.Name, measuring.Namespace)
+	}
+	return measure, enable
+}
+
+func writeNextSteps(p *printer, result scanResult) {
+	idle, measuring := nextStepTargets(result.Workloads)
 	if idle == nil && measuring == nil {
 		return
 	}
+	installed := slices.ContainsFunc(result.Workloads, func(wl Workload) bool { return wl.Managed })
+	measure, enable := nextStepCommands(idle, measuring)
 	p.line("Next steps:")
 	step := 0
 	next := func(title string) {
 		step++
 		p.line("  %d. %s", step, title)
 	}
-	if idle != nil {
+	if len(measure) > 0 {
 		// Managed workloads show Hybernate is installed; without any, it
 		// may or may not be, so the install step is shown.
 		if !installed {
 			next("Install Hybernate in the cluster:")
 			p.line("       helm install hybernate oci://ghcr.io/okedeji/charts/hybernate -n hybernate-system --create-namespace")
 		}
-		kind := strings.ToLower(string(idle.Kind))
 		next("Measure a workload first; nothing is paused in dry-run:")
-		p.line("       kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace)
-		p.line("       kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, idle.Name, idle.Namespace)
+		for _, command := range measure {
+			p.line("       %s", command)
+		}
 	}
 	if measuring != nil {
 		next("When you're happy with what dry-run measured, start pausing:")
 	} else {
 		next("When you're happy with what it measures, start pausing it while idle:")
-		measuring = idle
 	}
-	p.line("       kubectl hybernate enable %s/%s -n %s",
-		strings.ToLower(string(measuring.Kind)), measuring.Name, measuring.Namespace)
+	p.line("       %s", enable)
 	p.line("")
 }
 

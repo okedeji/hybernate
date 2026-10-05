@@ -18,13 +18,12 @@ package discovery
 
 import (
 	"context"
-	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/metrics"
 )
@@ -150,27 +149,62 @@ func rolledOutBetween(sorted []time.Time, after, upTo time.Time) bool {
 	return i < len(sorted) && !sorted[i].After(upTo)
 }
 
-// podsOf matches the names of a workload's pods: a Deployment's are named
-// after it with its ReplicaSet's hash and a random suffix, a StatefulSet's
-// with an ordinal. A Deployment's hash and suffix never contain a dash, so
-// "api" doesn't match "api-gateway"'s pods.
-func podsOf(kind v1alpha1.TargetKind, name string) *regexp.Regexp {
-	if kind == v1alpha1.TargetKindStatefulSet {
-		return regexp.MustCompile(`^` + regexp.QuoteMeta(name) + `-[0-9]+$`)
+// podNames matches the names of a workload's pods.
+type podNames func(pod string) bool
+
+// The names a ReplicaSet gives its pods: the API server cuts a generated
+// name's base to leave room for the random suffix in 63 characters.
+const (
+	generatedSuffixLength = 5
+	maxGeneratedNameBase  = 63 - generatedSuffixLength
+)
+
+// replicaSetPods matches the pods of a Deployment's ReplicaSets, each named
+// after its ReplicaSet, a dash, and a random suffix. Matching the
+// ReplicaSets' own names, hash and all, rather than the Deployment's, keeps a
+// Job's or another Deployment's pods that share its name as a prefix out. A
+// long name's base is cut short, which is matched as the API server cuts it.
+func replicaSetPods(replicaSets []string) podNames {
+	prefixes := make([]string, 0, len(replicaSets))
+	for _, rs := range replicaSets {
+		prefix := rs + "-"
+		if len(prefix) > maxGeneratedNameBase {
+			prefix = prefix[:maxGeneratedNameBase]
+		}
+		prefixes = append(prefixes, prefix)
 	}
-	return regexp.MustCompile(`^` + regexp.QuoteMeta(name) + `-[a-z0-9]{1,10}-[a-z0-9]{5}$`)
+	return func(pod string) bool {
+		for _, prefix := range prefixes {
+			if len(pod) == len(prefix)+generatedSuffixLength && strings.HasPrefix(pod, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// statefulSetPods matches a StatefulSet's pods, named after it with an
+// ordinal.
+func statefulSetPods(name string) podNames {
+	return func(pod string) bool {
+		ordinal, ok := strings.CutPrefix(pod, name+"-")
+		if !ok || ordinal == "" || (ordinal[0] == '0' && len(ordinal) > 1) {
+			return false
+		}
+		return strings.Trim(ordinal, "0123456789") == ""
+	}
 }
 
 // workloadSeries sums a workload's own containers' CPU at each step, and
 // counts its pods, from a namespace's history. Containers not in its pod
 // template, such as injected sidecars, cost money but aren't activity, as
 // for the activity clock.
-func workloadSeries(history []containerCPU, pods *regexp.Regexp, containers []string) (
+func workloadSeries(history []containerCPU, pods podNames, containers []string) (
 	usedCores map[int64]float64, podCount map[int64]int, found bool) {
 	usedCores = map[int64]float64{}
 	running := map[int64]map[string]bool{}
 	for _, series := range history {
-		if !pods.MatchString(series.pod) {
+		if !pods(series.pod) {
 			continue
 		}
 		found = true
@@ -214,40 +248,53 @@ func earliestSample(history []containerCPU) (int64, bool) {
 	return first, found
 }
 
-// readHistory reads a namespace's CPU history over the window, and where it
-// begins. It returns nothing when the scan has no history to read, or the
-// namespace has none recorded.
-func (s *Scanner) readHistory(ctx context.Context, namespace string, opts ClusterOptions) (
-	[]containerCPU, time.Time, error) {
+// readHistory reads a namespace's CPU history over the window. It returns
+// nothing when the scan has no history to read, or the namespace has none
+// recorded.
+func (s *Scanner) readHistory(ctx context.Context, namespace string, opts ClusterOptions) ([]containerCPU, error) {
 	if opts.History == nil {
-		return nil, time.Time{}, nil
+		return nil, nil
 	}
 	step := historyStep(opts.Window)
 	end := opts.Now().Truncate(step)
 	history, err := opts.History.namespaceCPU(ctx, namespace, end.Add(-opts.Window), end, step)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, err
 	}
-	first, ok := earliestSample(history)
-	if !ok {
-		return nil, time.Time{}, nil
+	if _, ok := earliestSample(history); !ok {
+		return nil, nil
 	}
-	return history, time.Unix(first, 0), nil
+	return history, nil
+}
+
+// replayStart is the first step of the history at or after a workload was
+// created. Steps fall where Prometheus put them, which is where the
+// namespace's history begins and every step after.
+func replayStart(historySince, created time.Time, step time.Duration) time.Time {
+	if !created.After(historySince) {
+		return historySince
+	}
+	steps := (created.Sub(historySince) + step - 1) / step
+	return historySince.Add(steps * step)
 }
 
 // replayWorkload replays the activity clock over one workload's share of
 // its namespace's history, or returns nil when none of it is the workload's.
+// The replay starts at since, where the history begins or the workload was
+// created if later, as the activity clock starts when a workload is created:
+// one younger than the window isn't charged for hours before it existed.
 // Its requests and prices are today's, since the history only records CPU.
-func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, since time.Time,
+func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, podsOf podNames, since time.Time,
 	rollouts []time.Time, threshold int, idleAfter time.Duration, opts ClusterOptions) *History {
 	containers := make([]string, 0, len(spec.Containers))
 	for _, c := range metrics.WorkloadContainers(spec) {
 		containers = append(containers, c.Name)
 	}
-	used, pods, found := workloadSeries(history, podsOf(w.Kind, w.Name), containers)
+	used, pods, found := workloadSeries(history, podsOf, containers)
 	if !found {
 		return nil
 	}
+
 	ownCPU, _ := metrics.Requests(metrics.WorkloadContainers(spec))
 	step := historyStep(opts.Window)
 	h := replay{
@@ -269,9 +316,12 @@ func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, sin
 // CouldSave is what pausing a workload Hybernate doesn't pause yet would
 // free a month: measured, for one in dry-run, or estimated from history,
 // for one Hybernate doesn't manage. It's 0 for a live workload, whose
-// saving is already happening.
+// saving is already happening, and for one already scaled to zero, which
+// pausing can't free any more of.
 func CouldSave(w Workload) float64 {
 	switch {
+	case w.ScaledByHand:
+		return 0
 	case w.Measured != nil:
 		return w.Measured.MonthlyFreed
 	case !w.Managed && !w.Protected && w.History != nil:

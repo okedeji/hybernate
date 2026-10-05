@@ -220,7 +220,7 @@ ul.plain { margin: 0; padding: 0 0 0 18px; color: var(--muted); font-size: 14px;
     </table>
   </div>
   {{else}}
-  <p class="empty">None could be judged; the notes say why.</p>
+  <p class="empty">{{if .Empty}}{{.Empty}}{{else}}None could be judged; the notes say why.{{end}}</p>
   {{end}}
 
   {{if .Dependencies}}
