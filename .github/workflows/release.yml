@@ -217,3 +217,12 @@ jobs:
             checksums.txt
             checksums.txt.sigstore.json
             vulnerabilities.txt
+
+  docs:
+    name: Docs
+    needs: [release]
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/docs.yml
