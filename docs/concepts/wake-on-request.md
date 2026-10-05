@@ -28,7 +28,7 @@ WakeOnRequest=True   DoormanRouted   requests are held and wake the workload
 | Sends bytes: an HTTP request, a TLS handshake, a database protocol's first message | Held, and the workload wakes |
 | Connects and sends nothing for 3 seconds | Held, and the workload wakes: it's taken for a protocol where the server speaks first, such as MySQL |
 | Connects and closes without sending anything, like a TCP health check | Closed; nothing wakes |
-| An HTTP request whose `User-Agent` starts with `kube-probe/`, `Prometheus/`, `vm_promscrape`, `GrafanaAgent/`, `Alloy/`, `ELB-HealthChecker/`, `GoogleHC/` or `Envoy/HC` | Answered `503 Service Unavailable` with `Connection: close`; nothing wakes. Probes and scrapers would otherwise keep a workload awake forever |
+| An HTTP request whose `User-Agent` starts with `kube-probe/`, `Prometheus/`, `vm_promscrape`, `GrafanaAgent/`, `Alloy/`, `ELB-HealthChecker/`, `GoogleHC/` or `Envoy/HC` | Answered `503 Service Unavailable` with `Connection: close` while no pod is Ready; nothing wakes. Probes and scrapers would otherwise keep a workload awake forever. Once a pod is Ready they're passed through like any other request |
 
 To keep the doorman off a port altogether, such as a metrics port something else scrapes, list it on the Service by name or number:
 
