@@ -152,21 +152,23 @@ func (h *heldConn) hold(ctx context.Context) (net.Conn, string) {
 		return h.passThrough(waitCtx)
 	}
 
+	// A workload with a Ready pod is awake, or its Service is served by
+	// another workload's pods: the connection goes straight through, a
+	// health check's included, since what it checks is up. That's decided
+	// before reading anything, since a client of a protocol where the
+	// server speaks first, such as MySQL, sends nothing until it has.
+	if addrs, _, err := h.backends.get(waitCtx, key); err == nil && len(addrs) > 0 {
+		if upstream := dialAny(waitCtx, addrs); upstream != nil {
+			return upstream, resultSuccess
+		}
+	}
+
 	head, state := readHead(h.conn, h.silent)
 	if state == headClosed {
 		return nil, resultIgnored
 	}
 	h.head = head
 	req, isHTTP := parseRequest(head)
-
-	// A workload with a Ready pod is awake, or its Service is served by
-	// another workload's pods: the connection goes straight through, a
-	// health check's included, since what it checks is up.
-	if addrs, _, err := h.backends.get(waitCtx, key); err == nil && len(addrs) > 0 {
-		if upstream := dialAny(waitCtx, addrs); upstream != nil {
-			return upstream, resultSuccess
-		}
-	}
 
 	if isHTTP && isHealthCheck(req) {
 		_ = h.conn.SetWriteDeadline(time.Now().Add(dialTimeout)) // a failure just means no deadline

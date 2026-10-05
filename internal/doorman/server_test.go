@@ -535,6 +535,35 @@ func TestServer_WakesForAClientWaitingOnTheServer(t *testing.T) {
 	echoed(t, conn, "hello\n")
 }
 
+// A server-first protocol through a Service the doorman still routes, but
+// whose workload has a Ready pod, gets the server's greeting at once rather
+// than after the doorman has waited for the client to speak.
+func TestServer_PassesAServerFirstClientStraightThrough(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = io.WriteString(conn, "220 ready\r\n")
+			_ = conn.Close()
+		}
+	}()
+	port := freePort(t)
+	startServerWith(t, func(s *Server) { s.silent = 2 * time.Second },
+		pausedWorkload("api", port, time.Minute), readySlice(int32(l.Addr().(*net.TCPAddr).Port)))
+
+	conn := dial(t, port)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+	greeting, err := bufio.NewReader(conn).ReadString('\n')
+
+	require.NoError(t, err, "the greeting waited for the client to speak first")
+	assert.Equal(t, "220 ready\r\n", greeting)
+}
+
 // failPatches fails the first n patches, like an API server having a moment.
 func failPatches(n int32, patches *atomic.Int32) func(client.WithWatch) client.WithWatch {
 	var fails atomic.Int32
