@@ -992,10 +992,11 @@ func inPhase(phase v1alpha1.WorkloadPhase) func(*v1alpha1.ManagedWorkload) bool 
 	return func(w *v1alpha1.ManagedWorkload) bool { return w.Status.Phase == phase }
 }
 
-func reconcileUntilSettled(t *testing.T, r *Reconciler, name string) {
+// reconcileUntilSettled reconciles the workload named api until it settles.
+func reconcileUntilSettled(t *testing.T, r *Reconciler) {
 	t.Helper()
 	for range 8 {
-		_, _ = r.Reconcile(context.Background(), reconcileFor(name)) // an injected failure is retried, as the controller would
+		_, _ = r.Reconcile(context.Background(), reconcileFor("api")) // an injected failure is retried, as the controller would
 	}
 }
 
@@ -1053,7 +1054,7 @@ func TestPause_InterruptedBeforePausedKeepsTheReplicaCount(t *testing.T) {
 
 	paused.Spec.DesiredState = desiredState(v1alpha1.DesiredStateRunning)
 	require.NoError(t, r.Update(context.Background(), paused))
-	reconcileUntilSettled(t, r, "api")
+	reconcileUntilSettled(t, r)
 	assert.Equal(t, v1alpha1.PhaseRunning, getWorkload(t, r, "api").Status.Phase)
 	assert.Equal(t, int32(3), targetReplicas(t, r))
 }
@@ -1156,7 +1157,7 @@ func TestLifecycle_InterruptedTransitionsComplete(t *testing.T) {
 				}
 				r := lifecycleReconciler(t, workload, tt.replicas, funcs)
 
-				reconcileUntilSettled(t, r, "api")
+				reconcileUntilSettled(t, r)
 
 				got := getWorkload(t, r, "api")
 				assert.Equal(t, tt.wantPhase, got.Status.Phase)

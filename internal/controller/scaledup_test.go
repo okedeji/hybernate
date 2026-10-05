@@ -316,7 +316,7 @@ func TestScaledToZero_IsLeftOff(t *testing.T) {
 			workload.Status.Activity = idleLongAgo.DeepCopy()
 			r := lifecycleReconciler(t, workload, 0, interceptor.Funcs{})
 
-			reconcileUntilSettled(t, r, "api")
+			reconcileUntilSettled(t, r)
 
 			got := getWorkload(t, r, "api")
 			assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
@@ -346,7 +346,7 @@ func TestScaledToZero_StaleCacheDoesntPause(t *testing.T) {
 	workload := lifecycleWorkload("api", desiredState(v1alpha1.DesiredStatePaused), v1alpha1.PhaseRunning)
 	r := lifecycleReconciler(t, workload, 0, stale)
 
-	reconcileUntilSettled(t, r, "api")
+	reconcileUntilSettled(t, r)
 
 	got := getWorkload(t, r, "api")
 	assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
@@ -364,7 +364,7 @@ func TestScaledToZero_BackUpIsActivity(t *testing.T) {
 		Status: metav1.ConditionTrue, Reason: "ScaledToZero"})
 	r := lifecycleReconciler(t, workload, 2, interceptor.Funcs{})
 
-	reconcileUntilSettled(t, r, "api")
+	reconcileUntilSettled(t, r)
 
 	got := getWorkload(t, r, "api")
 	assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
