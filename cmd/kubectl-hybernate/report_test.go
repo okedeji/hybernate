@@ -282,6 +282,33 @@ func TestWriteHTMLFile_Temporary(t *testing.T) {
 	assert.Regexp(t, `^hybernate-scan-\d+\.html$`, filepath.Base(first))
 }
 
+// The report opens where the user sits: not on a Mac or Windows machine
+// they've reached over SSH, nor on Linux without a display, which X
+// forwarding gives an SSH session.
+func TestCanBrowseOn(t *testing.T) {
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		want bool
+	}{
+		{name: "a Mac", goos: "darwin", want: true},
+		{name: "a Mac over SSH", goos: "darwin", env: map[string]string{"SSH_CONNECTION": "10.0.0.2 51234 10.0.0.9 22"}},
+		{name: "Windows over SSH", goos: "windows", env: map[string]string{"SSH_TTY": "/dev/pts/0"}},
+		{name: "Windows", goos: "windows", want: true},
+		{name: "Linux without a display", goos: "linux"},
+		{name: "a Linux desktop", goos: "linux", env: map[string]string{"WAYLAND_DISPLAY": "wayland-0"}, want: true},
+		{name: "Linux over SSH with X forwarding", goos: "linux",
+			env: map[string]string{"SSH_TTY": "/dev/pts/0", "DISPLAY": "localhost:10.0"}, want: true},
+		{name: "another OS", goos: "plan9"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, canBrowseOn(tt.goos, func(k string) string { return tt.env[k] }))
+		})
+	}
+}
+
 func TestWriteReport(t *testing.T) {
 	result := historyResult()
 	tests := []struct {

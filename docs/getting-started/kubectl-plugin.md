@@ -138,7 +138,7 @@ Pass --cpu-price and --memory-price for yours.
 
 Dependency addresses are left out of the page, since it's meant to be passed around; JSON and YAML keep them. The report file is created readable only by you. A scan covers one cluster, the current kubeconfig context or the one you name with `--context`.
 
-The file goes to your temporary directory unless you pass `--html FILE`. It opens only when the table is shown in a terminal on a machine with a desktop; piped output, `-o json`, CI, and SSH sessions get no report unless you ask for one with `--html`. `--open=false` keeps it from opening.
+The file goes to your temporary directory unless you pass `--html FILE`. It opens only when the table is shown in a terminal on a machine with a desktop; piped output, `-o json`, CI, and SSH sessions (unless X forwarding gives a Linux one a display) get no report unless you ask for one with `--html`. `--open=false` keeps it from opening.
 
 **Cluster names:** EKS and GKE contexts are shortened to the cluster with its provider and region, such as `staging (EKS us-east-1)` for `arn:aws:eks:us-east-1:123456789012:cluster/staging`. Any other context is shown as named. JSON and YAML keep the full context name.
 

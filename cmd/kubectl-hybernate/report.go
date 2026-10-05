@@ -197,10 +197,21 @@ func isTerminal(w io.Writer) bool {
 // canBrowse reports whether there's a desktop to open a browser on, which
 // an SSH session or a container on Linux doesn't have.
 func canBrowse() bool {
-	if runtime.GOOS != "linux" {
-		return runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+	return canBrowseOn(runtime.GOOS, os.Getenv)
+}
+
+// canBrowseOn is canBrowse on an OS with an environment. Over SSH to a Mac
+// or Windows machine, its desktop is there but the user isn't, so a browser
+// would open where nobody sees it. On Linux, a display set over SSH is X
+// forwarding, which shows the browser on the user's own screen.
+func canBrowseOn(goos string, getenv func(string) string) bool {
+	if goos == "linux" {
+		return getenv("DISPLAY") != "" || getenv("WAYLAND_DISPLAY") != ""
 	}
-	return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+	if getenv("SSH_CONNECTION") != "" || getenv("SSH_TTY") != "" {
+		return false
+	}
+	return goos == "darwin" || goos == "windows"
 }
 
 // browserTimeout bounds the opener, which hands the file to the browser and
