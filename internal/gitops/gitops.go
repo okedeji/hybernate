@@ -51,6 +51,12 @@ func (w Writer) FromGit() bool {
 
 // ReplicasWriter is whoever last set spec.replicas, and false when no field
 // manager records it, such as on an object created before managed fields.
+// Writes through the scale subresource count: the API server records them
+// against spec.replicas too.
+//
+// Managed-field times have one-second precision, so two managers can tie.
+// A GitOps tool wins a tie: it sets the replicas again on every sync, and
+// missing that would have Hybernate keep pausing what the tool keeps waking.
 func ReplicasWriter(managedFields []metav1.ManagedFieldsEntry) (Writer, bool) {
 	var found Writer
 	ok := false
@@ -58,14 +64,14 @@ func ReplicasWriter(managedFields []metav1.ManagedFieldsEntry) (Writer, bool) {
 		if entry.FieldsV1 == nil || !setsReplicas(entry.FieldsV1.Raw) {
 			continue
 		}
-		var at time.Time
+		w := Writer{Manager: entry.Manager, Tool: toolOf(entry.Manager)}
 		if entry.Time != nil {
-			at = entry.Time.Time
+			w.At = entry.Time.Time
 		}
-		if ok && !at.After(found.At) {
+		if ok && (w.At.Before(found.At) || w.At.Equal(found.At) && (found.FromGit() || !w.FromGit())) {
 			continue
 		}
-		found, ok = Writer{Manager: entry.Manager, Tool: toolOf(entry.Manager), At: at}, true
+		found, ok = w, true
 	}
 	return found, ok
 }
