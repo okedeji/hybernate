@@ -745,9 +745,6 @@ func writeWorkloads(p *printer, workloads []Workload, limit int, history bool) {
 	p.line("")
 }
 
-// savingColumns says which money columns a table needs: what Hybernate has
-// saved, for live workloads, and what pausing could save, for those it
-// doesn't pause yet, when the scan knows either for any of them.
 // sleptColumn says whether the scan knows how long Hybernate has had any
 // live workload paused.
 func sleptColumn(workloads []Workload) bool {
@@ -769,6 +766,9 @@ func sleptCells(wl Workload) (slept, wakes, since string, sleptSort float64) {
 	return hours(s.Hours), strconv.Itoa(s.Wakes), "since " + s.Since.Format("Jan 2"), s.Hours
 }
 
+// savingColumns says which money columns a table needs: what Hybernate has
+// saved, for live workloads, and what pausing could save, for those it
+// doesn't pause yet, when the scan knows either for any of them.
 func savingColumns(workloads []Workload) (saving, couldSave bool) {
 	for _, wl := range workloads {
 		saving = saving || (wl.Managed && !wl.DryRun)
