@@ -5,10 +5,10 @@
 ### Prerequisites
 
 - Go 1.26+ (`go.mod` pins the toolchain)
-- Docker
+- Docker (`make test-alerts` runs promtool in a container, so you don't need it installed)
 - kubectl
 - [Kind](https://kind.sigs.k8s.io/) (for the end-to-end and Helm tests)
-- Helm and promtool, only for `make check-chart` and `make test-alerts`
+- Helm, only for `make check-chart` and `make test-alerts`
 
 `make` downloads controller-gen, kustomize, setup-envtest and golangci-lint into `bin/` as it needs them.
 
