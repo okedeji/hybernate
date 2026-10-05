@@ -64,22 +64,31 @@ func TestIsPageLoad(t *testing.T) {
 
 func TestIsHealthCheck(t *testing.T) {
 	tests := []struct {
-		agent string
-		want  bool
+		method string
+		agent  string
+		want   bool
 	}{
-		{agent: "kube-probe/1.31", want: true},
-		{agent: "Prometheus/2.53.0", want: true},
-		{agent: "ELB-HealthChecker/2.0", want: true},
-		{agent: "GoogleHC/1.0", want: true},
-		{agent: "Envoy/HC", want: true},
-		{agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)"},
-		{agent: "curl/8.7.1"},
-		{agent: ""},
+		{method: "GET", agent: "kube-probe/1.31", want: true},
+		{method: "GET", agent: "Prometheus/2.53.0", want: true},
+		{method: "HEAD", agent: "ELB-HealthChecker/2.0", want: true},
+		{method: "GET", agent: "GoogleHC/1.0", want: true},
+		{method: "GET", agent: "Envoy/HC", want: true},
+		{method: "GET", agent: "OpenTelemetry Collector Contrib/0.104.0 (linux/amd64)", want: true},
+		{method: "GET", agent: "otelcol-contrib/0.110.0", want: true},
+		{method: "GET", agent: "Datadog Agent/7.55.0", want: true},
+		{method: "GET", agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)"},
+		{method: "GET", agent: "curl/8.7.1"},
+		{method: "GET", agent: ""},
+		// Remote write and Alertmanager notifications send real data with
+		// the same agents; dropping them would lose samples and alerts.
+		{method: "POST", agent: "Prometheus/2.53.0"},
+		{method: "POST", agent: "Alertmanager/0.27.0"},
+		{method: "PUT", agent: "GrafanaAgent/0.40.0"},
 	}
 	for _, tt := range tests {
-		req, ok := parseRequest(request("GET /healthz HTTP/1.1", "Host: shop", "User-Agent: "+tt.agent))
+		req, ok := parseRequest(request(tt.method+" /healthz HTTP/1.1", "Host: shop", "User-Agent: "+tt.agent))
 		require.True(t, ok)
-		assert.Equal(t, tt.want, isHealthCheck(req), tt.agent)
+		assert.Equal(t, tt.want, isHealthCheck(req), "%s %s", tt.method, tt.agent)
 	}
 }
 

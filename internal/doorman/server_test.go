@@ -490,6 +490,23 @@ func TestServer_ProbesAndScrapesDoNotWake(t *testing.T) {
 	}
 }
 
+// Prometheus remote write comes from the same agent as a scrape, but it's
+// data for the workload: it's held and wakes it, rather than being told
+// the workload is down and dropped.
+func TestServer_RemoteWriteWakes(t *testing.T) {
+	port := freePort(t)
+	_, c := startServer(t, pausedWorkload("api", port, time.Minute))
+	write := "POST /api/v1/write HTTP/1.1\r\nHost: 10.0.0.1\r\nUser-Agent: Prometheus/2.53.0\r\n" +
+		"Content-Length: 5\r\n\r\nhello"
+
+	conn := dial(t, port)
+	send(t, conn, write)
+
+	require.Eventually(t, func() bool { return lastRequest(t, c) != "" }, 5*time.Second, 20*time.Millisecond)
+	require.NoError(t, c.Create(context.Background(), readySlice(echoPort(t))))
+	echoed(t, conn, write)
+}
+
 // Once a pod is Ready, as while a woken workload finishes resuming, a
 // scrape or health check reaches it rather than being told it's down.
 func TestServer_PassesAProbeThroughWhenAPodIsReady(t *testing.T) {

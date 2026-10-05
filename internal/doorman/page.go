@@ -108,13 +108,22 @@ var healthCheckAgents = []string{
 	"vm_promscrape",
 	"GrafanaAgent/",
 	"Alloy/",
+	"OpenTelemetry Collector",
+	"otelcol",
+	"Datadog Agent/",
 	"ELB-HealthChecker/",
 	"GoogleHC/",
 	"Envoy/HC",
 }
 
 // isHealthCheck reports whether req comes from a health checker or scraper.
+// Only a GET or HEAD can be one: the same agents also send real traffic,
+// such as Prometheus remote write and Alertmanager notifications, which
+// are POSTs and must reach the workload.
 func isHealthCheck(req *http.Request) bool {
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return false
+	}
 	agent := req.UserAgent()
 	for _, prefix := range healthCheckAgents {
 		if strings.HasPrefix(agent, prefix) {
