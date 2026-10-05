@@ -1,9 +1,12 @@
 image:
   repository: ghcr.io/okedeji/hybernate
-  tag: "" # defaults to Chart.appVersion
+  tag: "" # defaults to the chart's appVersion
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
 
 # Installs the ManagedWorkload CRD and upgrades it with the release. It's
 # kept on uninstall, since deleting it deletes every ManagedWorkload. Set
@@ -11,18 +14,33 @@ imagePullSecrets: []
 crds:
   install: true
 
+# More than one replica needs leader election, so only one acts at a time.
 replicaCount: 1
 
 leaderElection:
   enabled: true
 
+# How many ManagedWorkloads the operator reconciles at once, so one slow
+# metrics or Prometheus query doesn't hold up waking another workload.
+maxConcurrentReconciles: 4
+
+# IANA time zone, such as Europe/London, whose hours and weekdays forecasts
+# learn. Use your users' zone, so forecasts follow daylight saving.
+timezone: UTC
+
+# The operator caches the cluster's Deployments, StatefulSets, Services,
+# PVCs, HPAs, nodes and namespaces (or only the watched namespaces'), so its
+# memory grows with the cluster. Raise the limit on clusters with many
+# thousands of workloads. The garbage collector is told the limit through
+# GOMEMLIMIT, and works harder near it rather than letting the operator be
+# OOM-killed.
 resources:
   limits:
     cpu: 500m
-    memory: 128Mi
+    memory: 512Mi
   requests:
     cpu: 10m
-    memory: 64Mi
+    memory: 128Mi
 
 nodeSelector: {}
 tolerations: []
@@ -30,7 +48,7 @@ affinity: {}
 
 serviceAccount:
   create: true
-  name: "" # defaults to fullname
+  name: "" # defaults to the release's full name
 
 metrics:
   enabled: true
@@ -56,8 +74,6 @@ metrics:
 prometheus:
   url: "" # required only for Prometheus activity queries, e.g. http://prometheus.monitoring.svc:9090
 
-# Settings for workloads opted in with the hybernate.io/managed label, where
-# their own annotations and their namespace's don't say otherwise.
 # Namespaces Hybernate works in. Empty means every namespace, with a
 # ClusterRole; set, Hybernate gets a Role in each of these only, and can't
 # read or scale workloads anywhere else.
@@ -68,6 +84,8 @@ watchNamespaces: []
 # labelled hybernate.io/allow-protected=true.
 protectedNamespaces: []
 
+# Settings for workloads opted in with the hybernate.io/managed label, where
+# their own annotations and their namespace's don't say otherwise.
 defaults:
   idleAfter: 1h
   cpuThreshold: 10
@@ -77,15 +95,28 @@ defaults:
 doorman:
   enabled: true
   replicaCount: 2
+  # Keeps one doorman serving through node drains, when replicaCount > 1.
+  podDisruptionBudget:
+    enabled: true
+  # Default to the operator's settings above when empty.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Empty spreads the replicas across nodes, where it can.
+  topologySpreadConstraints: []
+  # The doorman caches ManagedWorkloads and the EndpointSlices of the
+  # watched namespaces, which it reads to find a woken workload's pods.
   resources:
     limits:
       cpu: 500m
-      memory: 128Mi
+      memory: 256Mi
     requests:
       cpu: 10m
-      memory: 32Mi
+      memory: 64Mi
 
 networkPolicy:
   enabled: false
 
 logLevel: info
+# json, or console for reading by eye.
+logEncoder: json

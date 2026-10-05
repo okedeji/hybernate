@@ -47,6 +47,34 @@ spec:
             - --metrics-secure={{ .Values.metrics.secure }}
             {{- end }}
             - --zap-log-level={{ .Values.logLevel }}
+            - --zap-encoder={{ .Values.logEncoder }}
+          env:
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+          ports:
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+            - name: probes
+              containerPort: 8081
+              protocol: TCP
+          {{- /*
+          Kube-proxies and load balancers keep sending new connections for
+          a few seconds after the pod is marked terminating, until they see
+          its endpoint go. The sleep keeps it listening through that. The
+          sleep action needs no shell, which the image doesn't have, and is
+          on by default from Kubernetes 1.30.
+          */}}
+          {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -55,25 +83,61 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8081
+              port: probes
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8081
+              port: probes
             initialDelaySeconds: 2
             periodSeconds: 5
           resources:
             {{- toYaml .Values.doorman.resources | nindent 12 }}
-      {{- with .Values.nodeSelector }}
+      {{- with .Values.doorman.nodeSelector | default .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with .Values.doorman.affinity | default .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.doorman.tolerations | default .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      topologySpreadConstraints:
+        {{- with .Values.doorman.topologySpreadConstraints }}
+        {{- toYaml . | nindent 8 }}
+        {{- else }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "hybernate.doormanSelectorLabels" . | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "hybernate.doormanSelectorLabels" . | nindent 14 }}
+        {{- end }}
+{{- if and .Values.doorman.podDisruptionBudget.enabled (gt (int .Values.doorman.replicaCount) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "hybernate.doormanSelectorLabels" . | nindent 6 }}
+{{- end }}
 ---
 {{- /*
 The operator finds the Ready doorman pods through this Service's

@@ -1,4 +1,9 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- /*
+Only pods in namespaces labelled metrics=enabled may scrape the operator
+and the doorman. The doorman's routing ports stay open to everyone, since
+every client of a paused workload's Services is sent to them.
+*/}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -20,4 +25,32 @@ spec:
       ports:
         - port: {{ .Values.metrics.port }}
           protocol: TCP
+{{- if .Values.doorman.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "hybernate.doormanSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              metrics: enabled
+      ports:
+        - port: {{ .Values.metrics.port }}
+          protocol: TCP
+    - ports:
+        - port: 20000
+          endPort: 29999
+          protocol: TCP
+{{- end }}
 {{- end }}
