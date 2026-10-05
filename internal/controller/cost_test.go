@@ -278,11 +278,11 @@ func TestTransition_SettlesCostInThePhaseItWasSpentIn(t *testing.T) {
 	r.metrics = &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: bytesPerGiB, replicas: 2}
 	ctx := context.Background()
 
-	_, err := r.transition(ctx, w, v1alpha1.PhaseResuming, "ResumeRequested")
+	err := r.transition(ctx, w, v1alpha1.PhaseResuming, "ResumeRequested")
 	require.NoError(t, err)
 	w.Status.Pause = nil
 	now = now.Add(time.Minute)
-	_, err = r.transition(ctx, w, v1alpha1.PhaseRunning, "Resumed")
+	err = r.transition(ctx, w, v1alpha1.PhaseRunning, "Resumed")
 	require.NoError(t, err)
 	now = now.Add(statusFlushInterval)
 	r.accumulateCost(ctx, w)

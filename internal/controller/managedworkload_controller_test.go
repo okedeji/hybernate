@@ -171,7 +171,7 @@ func desiredState(s v1alpha1.DesiredState) *v1alpha1.DesiredState {
 	return &s
 }
 
-func getWorkload(t *testing.T, r *Reconciler, name string) *v1alpha1.ManagedWorkload { //nolint:unparam
+func getWorkload(t *testing.T, r *Reconciler, name string) *v1alpha1.ManagedWorkload {
 	t.Helper()
 	var w v1alpha1.ManagedWorkload
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, &w))

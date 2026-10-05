@@ -68,7 +68,7 @@ func (r *Reconciler) reconcileProtected(ctx context.Context, workload *v1alpha1.
 	}
 	switch {
 	case workload.Status.Phase != v1alpha1.PhaseRunning || released:
-		if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Protected"); err != nil {
+		if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Protected"); err != nil {
 			return ctrl.Result{}, err
 		}
 	case !reported || routed:

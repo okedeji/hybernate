@@ -174,7 +174,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	if workload.Spec.IdlePolicy == nil {
 		r.clearIdleVeto(workload)
 		if phase == v1alpha1.PhaseIdle {
-			if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "NoIdlePolicy"); err != nil {
+			if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "NoIdlePolicy"); err != nil {
 				return nil, err
 			}
 		}

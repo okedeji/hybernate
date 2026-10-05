@@ -182,7 +182,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	}
 
 	if workload.Status.Phase == "" || workload.Status.Phase == v1alpha1.PhaseCreating {
-		return r.transition(ctx, &workload, v1alpha1.PhaseRunning, "Created")
+		return ctrl.Result{}, r.transition(ctx, &workload, v1alpha1.PhaseRunning, "Created")
 	}
 
 	target, err := r.checkTarget(ctx, &workload)
@@ -350,7 +350,7 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 			workload.Status.Pause = nil
 			return &ctrl.Result{RequeueAfter: time.Second}, nil
 		}
-		if _, err := r.transition(ctx, workload, v1alpha1.PhasePausing, "PauseRequested"); err != nil {
+		if err := r.transition(ctx, workload, v1alpha1.PhasePausing, "PauseRequested"); err != nil {
 			return nil, err
 		}
 	case v1alpha1.PhasePausing:
@@ -376,7 +376,7 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 
 	r.stampLastActed(workload)
 	took := r.sinceTransition(workload)
-	if _, err := r.transition(ctx, workload, v1alpha1.PhasePaused, "Paused"); err != nil {
+	if err := r.transition(ctx, workload, v1alpha1.PhasePaused, "Paused"); err != nil {
 		return nil, err
 	}
 	metrics.LifecycleActionDuration.WithLabelValues("pause").Observe(took.Seconds())
@@ -410,11 +410,10 @@ type wakeEvent struct {
 func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.ManagedWorkload, why *wakeEvent) (*ctrl.Result, error) {
 	switch workload.Status.Phase {
 	case v1alpha1.PhaseIdle:
-		result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ResumeRequested")
-		if err != nil {
+		if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ResumeRequested"); err != nil {
 			return nil, err
 		}
-		return &result, nil
+		return &ctrl.Result{}, nil
 	case v1alpha1.PhasePausing, v1alpha1.PhasePaused:
 		if workload.Status.Pause == nil {
 			if err := r.pauser.Prepare(ctx, workload); err != nil {
@@ -435,7 +434,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 		if err := r.wakeDependencies(ctx, workload); err != nil {
 			return nil, err
 		}
-		if _, err := r.transition(ctx, workload, v1alpha1.PhaseResuming, "ResumeRequested"); err != nil {
+		if err := r.transition(ctx, workload, v1alpha1.PhaseResuming, "ResumeRequested"); err != nil {
 			return nil, err
 		}
 		if why != nil {
@@ -463,8 +462,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 	took := r.sinceTransition(workload)
 	r.resetActivity(workload, source)
 	tool, resolved := r.clearGitOpsConflict(workload)
-	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed")
-	if err != nil {
+	if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed"); err != nil {
 		return nil, err
 	}
 	metrics.LifecycleActionDuration.WithLabelValues("resume").Observe(took.Seconds())
@@ -472,7 +470,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 		r.announceGitOpsConflictResolved(workload, tool)
 	}
 	r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume, "resumed")
-	return &result, nil
+	return &ctrl.Result{}, nil
 }
 
 // resumeRecheck is when a resume waiting for its pods to be Ready is looked
@@ -567,7 +565,7 @@ func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.Ma
 	}
 	switch {
 	case workload.Status.Phase != v1alpha1.PhaseRunning || released:
-		if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "TargetIgnored"); err != nil {
+		if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "TargetIgnored"); err != nil {
 			return ctrl.Result{}, err
 		}
 	case !reported || routed:
@@ -832,7 +830,7 @@ func dependsOnTarget(workload *v1alpha1.ManagedWorkload, id workloadID) bool {
 	return false
 }
 
-func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) (ctrl.Result, error) { //nolint:unparam
+func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) error {
 	logger := log.FromContext(ctx)
 	r.settleCost(ctx, workload)
 	if phase == v1alpha1.PhaseRunning {
@@ -845,13 +843,13 @@ func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedW
 	workload.Status.LastTransitionTime = &now
 
 	if err := r.Status().Update(ctx, workload); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating phase to %s: %w", phase, err)
+		return fmt.Errorf("updating phase to %s: %w", phase, err)
 	}
 	metrics.WorkloadPhase.DeleteLabelValues(workload.Namespace, workload.Name, string(old))
 	recordPhase(workload)
 	metrics.LifecycleTransitions.WithLabelValues(string(old), string(phase)).Inc()
 	logger.Info("phase transition", "from", old, "to", phase, "reason", reason)
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *Reconciler) now() time.Time {

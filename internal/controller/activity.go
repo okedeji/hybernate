@@ -397,7 +397,7 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		if workload.Status.Phase == v1alpha1.PhaseIdle {
 			source := workload.Status.Activity.LastActivitySource
 			slept, freed, measured := r.endWouldBePause(workload)
-			if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ActivityResumed"); err != nil {
+			if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ActivityResumed"); err != nil {
 				return nil, err
 			}
 			r.reportActivityResumed(workload, source, slept, freed, measured)
@@ -424,7 +424,7 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		if workload.Spec.DryRun {
 			r.beginWouldBePause(ctx, workload)
 		}
-		if _, err := r.transition(ctx, workload, v1alpha1.PhaseIdle, "IdleDetected"); err != nil {
+		if err := r.transition(ctx, workload, v1alpha1.PhaseIdle, "IdleDetected"); err != nil {
 			return nil, err
 		}
 		opmetrics.IdleDetections.WithLabelValues(workload.Namespace, workload.Name).Inc()

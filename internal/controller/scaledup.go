@@ -96,7 +96,7 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 	if err := r.wakeDependencies(ctx, workload); err != nil {
 		return err
 	}
-	if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ScaledUp"); err != nil {
+	if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ScaledUp"); err != nil {
 		return err
 	}
 
@@ -162,7 +162,7 @@ func (r *Reconciler) reconcileScaledToZero(ctx context.Context, workload *v1alph
 	r.trackDryRun(workload)
 	if workload.Status.Phase == v1alpha1.PhaseIdle {
 		r.endWouldBePause(workload)
-		if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ScaledToZero"); err != nil {
+		if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ScaledToZero"); err != nil {
 			return ctrl.Result{}, err
 		}
 	} else {
