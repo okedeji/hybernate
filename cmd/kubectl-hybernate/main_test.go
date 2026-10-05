@@ -213,6 +213,17 @@ func TestCLI_ContextNamespace(t *testing.T) {
 
 // The kubectl connection flags work on every command, and every client is
 // allowed more than client-go's default 5 requests a second.
+// --request-timeout's help says what the plugin does: kubectl's says it
+// defaults to 0, no timeout, which the plugin never uses.
+func TestCLI_RequestTimeoutHelp(t *testing.T) {
+	flag := newRootCmd(newKubeClient).PersistentFlags().Lookup("request-timeout")
+	require.NotNil(t, flag)
+
+	assert.Equal(t, "30s", flag.DefValue)
+	assert.Contains(t, flag.Usage, "0 means the default")
+	assert.NotContains(t, flag.Usage, "don't timeout")
+}
+
 func TestCLI_ConnectionFlags(t *testing.T) {
 	kubeconfig := filepath.Join(t.TempDir(), "config")
 	require.NoError(t, os.WriteFile(kubeconfig, []byte(`apiVersion: v1
@@ -252,6 +263,10 @@ current-context: a
 		{name: "--request-timeout", args: []string{"--request-timeout", "5s"},
 			check: func(t *testing.T, config *rest.Config) {
 				assert.Equal(t, 5*time.Second, config.Timeout)
+			}},
+		{name: "--request-timeout 0", args: []string{"--request-timeout", "0"},
+			check: func(t *testing.T, config *rest.Config) {
+				assert.Equal(t, apiRequestTimeout, config.Timeout)
 			}},
 	}
 	for _, command := range []string{"status", "wake", "enable", "deps", "scan"} {

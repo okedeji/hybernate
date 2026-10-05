@@ -133,6 +133,9 @@ func addKubeFlags(flags *pflag.FlagSet, newClient clientFunc) *kubeFlags {
 	names := clientcmd.RecommendedConfigOverrideFlags("")
 	// Each command defines its own -n: status and scan take several.
 	names.ContextOverrideFlags.Namespace = clientcmd.FlagInfo{}
+	names.Timeout.Default = apiRequestTimeout.String()
+	names.Timeout.Description = "How long to wait for each request to the API server before giving up, such as " +
+		"10s or 2m; 0 means the default"
 	clientcmd.BindOverrideFlags(&k.overrides, flags, names)
 	return k
 }

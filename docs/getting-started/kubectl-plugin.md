@@ -4,7 +4,7 @@ The `kubectl hybernate` plugin scans a cluster for idle workloads, shows what Hy
 
 `scan` and `status` read every namespace you can, and fall back to your kubeconfig context's namespace, with a note, when your access doesn't allow listing them all; `-n` names namespaces instead, and `-A` (`--all-namespaces`) insists on every one, failing rather than falling back. `wake`, `deps` and `enable` work in one namespace: `-n`, or your context's, as kubectl does.
 
-Every command takes kubectl's connection flags: `--kubeconfig`, `--context`, `--cluster`, `--user`, `--as`, `--as-group`, `--as-uid`, `--token`, `--server`, `--certificate-authority`, `--client-certificate`, `--client-key`, `--insecure-skip-tls-verify`, `--tls-server-name`, `--proxy-url`, `--username`, `--password`, `--disable-compression` and `--request-timeout`. Each request to the API server gives up after 30 seconds unless `--request-timeout` sets otherwise, so a cluster that stops answering ends a command with an error, not a hang. `kubectl hybernate version` prints the plugin's version.
+Every command takes kubectl's connection flags: `--kubeconfig`, `--context`, `--cluster`, `--user`, `--as`, `--as-group`, `--as-uid`, `--token`, `--server`, `--certificate-authority`, `--client-certificate`, `--client-key`, `--insecure-skip-tls-verify`, `--tls-server-name`, `--proxy-url`, `--username`, `--password`, `--disable-compression` and `--request-timeout`. Each request to the API server gives up after 30 seconds unless `--request-timeout` sets otherwise (`0` keeps the 30 seconds, unlike kubectl, where it means no limit), so a cluster that stops answering ends a command with an error, not a hang. `kubectl hybernate version` prints the plugin's version.
 
 ## Installation
 
