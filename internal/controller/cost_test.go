@@ -266,6 +266,34 @@ func TestAccumulateCost_WaitsForTheFlush(t *testing.T) {
 	assert.Zero(t, w.Status.Cost.AwakeCPUHours.AsApproximateFloat64())
 }
 
+// A wake counts the pause as paused right up to the wake, and what follows
+// as awake: the paused gap isn't billed as running.
+func TestTransition_SettlesCostInThePhaseItWasSpentIn(t *testing.T) {
+	w := costWorkload(v1alpha1.PhasePaused)
+	w.Status.Cost = accumulatedAt(fixedTime.Add(-4 * time.Minute))
+	pausedWith(w, v1alpha1.ResourceSnapshot{Replicas: 2, CPUMillis: 1000, MemoryBytes: bytesPerGiB})
+	r := newTestReconciler(t, w, &stubPauser{})
+	now := fixedTime
+	r.clock = func() time.Time { return now }
+	r.metrics = &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: bytesPerGiB, replicas: 2}
+	ctx := context.Background()
+
+	_, err := r.transition(ctx, w, v1alpha1.PhaseResuming, "ResumeRequested")
+	require.NoError(t, err)
+	w.Status.Pause = nil
+	now = now.Add(time.Minute)
+	_, err = r.transition(ctx, w, v1alpha1.PhaseRunning, "Resumed")
+	require.NoError(t, err)
+	now = now.Add(statusFlushInterval)
+	r.accumulateCost(ctx, w)
+
+	c := getWorkload(t, r, "api").Status.Cost
+	require.NotNil(t, c, "settled cost is written with the transition")
+	assert.InDelta(t, 2*4.0/60, c.PausedCPUHours.AsApproximateFloat64(), 1e-9, "paused until the wake")
+	assert.InDelta(t, 2*1.0/60, c.AwakeCPUHours.AsApproximateFloat64(), 1e-9, "the minute spent resuming")
+	assert.InDelta(t, 2*6.0/60, w.Status.Cost.AwakeCPUHours.AsApproximateFloat64(), 1e-9, "and running since")
+}
+
 type countingPricer struct {
 	stubPricer
 	calls int

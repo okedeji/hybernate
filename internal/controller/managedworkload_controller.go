@@ -644,6 +644,7 @@ func dependsOnTarget(workload *v1alpha1.ManagedWorkload, id workloadID) bool {
 
 func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) (ctrl.Result, error) { //nolint:unparam
 	logger := log.FromContext(ctx)
+	r.settleCost(ctx, workload)
 	old := workload.Status.Phase
 	workload.Status.Phase = phase
 
