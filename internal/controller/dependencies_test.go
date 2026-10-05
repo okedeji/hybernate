@@ -18,20 +18,27 @@ package controller
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -211,14 +218,25 @@ func TestDependencies_WakingWakesDependencies(t *testing.T) {
 }
 
 func TestDependencies_WaitForReady(t *testing.T) {
+	pausedPostgres := func(desired *v1alpha1.DesiredState) *v1alpha1.ManagedWorkload {
+		w := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
+		w.Spec.DesiredState = desired
+		return w
+	}
 	tests := []struct {
-		name     string
-		postgres client.Object
-		wantWait bool
+		name        string
+		postgres    client.Object
+		managed     *v1alpha1.ManagedWorkload
+		wantWait    bool
+		wantRewoken bool
 	}{
 		{name: "dependency pods not ready", postgres: postgresTarget(1, 0), wantWait: true},
 		{name: "dependency ready", postgres: postgresTarget(1, 1)},
-		{name: "dependency scaled to zero is not ready", postgres: postgresTarget(0, 0), wantWait: true},
+		{name: "paused dependency is woken again and waited for", postgres: postgresTarget(0, 0),
+			managed: pausedPostgres(nil), wantWait: true, wantRewoken: true},
+		{name: "unmanaged dependency scaled to zero won't start", postgres: postgresTarget(0, 0)},
+		{name: "dependency held paused by desiredState won't start", postgres: postgresTarget(0, 0),
+			managed: pausedPostgres(ptr.To(v1alpha1.DesiredStatePaused))},
 	}
 
 	for _, tt := range tests {
@@ -228,11 +246,19 @@ func TestDependencies_WaitForReady(t *testing.T) {
 			api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseResuming, ref)
 			api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1}
 			pauser := &stubPauser{resumeDone: true}
-			r := depReconciler(t, pauser, api, tt.postgres)
+			objs := []client.Object{api, tt.postgres}
+			if tt.managed != nil {
+				objs = append(objs, tt.managed)
+			}
+			r := depReconciler(t, pauser, objs...)
 
 			result, err := r.handleResume(context.Background(), api)
 			require.NoError(t, err)
 
+			if tt.managed != nil {
+				stamped := fetch(t, r, "postgres").Annotations[v1alpha1.AnnotationLastActivity] != ""
+				assert.Equal(t, tt.wantRewoken, stamped)
+			}
 			if tt.wantWait {
 				assert.Equal(t, 0, pauser.resumeCalls, "the dependent must not scale up before its dependency is Ready")
 				require.NotNil(t, result)
@@ -240,7 +266,7 @@ func TestDependencies_WaitForReady(t *testing.T) {
 				assert.True(t, meta.IsStatusConditionTrue(fetch(t, r, "api").Status.Conditions, conditionWaitingForDependencies))
 				return
 			}
-			assert.Equal(t, 1, pauser.resumeCalls)
+			assert.Equal(t, 1, pauser.resumeCalls, "a dependency that won't start never strands the dependent at zero")
 			assert.Equal(t, v1alpha1.PhaseRunning, api.Status.Phase)
 		})
 	}
@@ -338,4 +364,114 @@ func TestDependencies_ScaleUpWakesDependencies(t *testing.T) {
 
 	assert.Equal(t, fixedTime.UTC().Format(time.RFC3339),
 		fetch(t, r, "postgres").Annotations[v1alpha1.AnnotationLastActivity])
+}
+
+// startEnvtest runs an API server with Hybernate's CRDs for the test.
+func startEnvtest(t *testing.T) *rest.Config {
+	t.Helper()
+	env := &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+		BinaryAssetsDirectory: getFirstFoundEnvTestBinaryDir(),
+	}
+	cfg, err := env.Start()
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, env.Stop()) })
+	return cfg
+}
+
+// startCache runs a cache of the namespaces given, as the operator's is
+// under watchNamespaces, until the test ends, and returns a client that
+// reads from it.
+func startCache(t *testing.T, cfg *rest.Config, namespaces ...string) client.Client {
+	t.Helper()
+	scheme := testScheme(t)
+	byNamespace := map[string]cache.Config{}
+	for _, ns := range namespaces {
+		byNamespace[ns] = cache.Config{}
+	}
+	c, err := cache.New(cfg, cache.Options{Scheme: scheme, DefaultNamespaces: byNamespace})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	var running sync.WaitGroup
+	running.Go(func() { assert.NoError(t, c.Start(ctx)) })
+	t.Cleanup(func() {
+		cancel()
+		running.Wait()
+	})
+	require.True(t, c.WaitForCacheSync(ctx))
+	cl, err := client.New(cfg, client.Options{Scheme: scheme, Cache: &client.CacheOptions{Reader: c}})
+	require.NoError(t, err)
+	return cl
+}
+
+func postgresStatefulSet(namespace string) *appsv1.StatefulSet {
+	labels := map[string]string{"app": "postgres"}
+	return &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "postgres", Namespace: namespace},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: ptr.To(int32(0)),
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "postgres", Image: "postgres:17"}}},
+			},
+		},
+	}
+}
+
+// Under watchNamespaces, the operator's cache can't read a dependency in
+// another namespace at all: it fails with "unknown namespace for the
+// cache", not NotFound. That mustn't stop the dependent pausing or waking.
+func TestDependencies_UnwatchedNamespaceDoesNotBlock(t *testing.T) {
+	cfg := startEnvtest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	scheme := testScheme(t)
+	direct, err := client.New(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+
+	require.NoError(t, direct.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shared"}}))
+	require.NoError(t, direct.Create(ctx, postgresStatefulSet("shared")))
+	api := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{
+			Target:     v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85},
+			DependsOn: []v1alpha1.DependencyRef{
+				{Namespace: "shared", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", WaitForReady: true}},
+		},
+	}
+	require.NoError(t, direct.Create(ctx, api))
+	api.Status.Phase = v1alpha1.PhasePaused
+	api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 2}
+	require.NoError(t, direct.Status().Update(ctx, api))
+
+	cached := startCache(t, cfg, "default")
+	err = cached.Get(ctx, types.NamespacedName{Namespace: "shared", Name: "postgres"}, &appsv1.StatefulSet{})
+	require.Error(t, err, "the cache can't read outside its namespaces")
+	require.False(t, apierrors.IsNotFound(err))
+
+	pauser := &stubPauser{resumeDone: true}
+	metrics := idleCPU
+	r := &Reconciler{Client: cached, Scheme: scheme, Recorder: events.NewFakeRecorder(20),
+		WatchNamespaces: []string{"default"}, pauser: pauser, metrics: &metrics,
+		clock:   func() time.Time { return fixedTime },
+		engines: newEngineRegistry(func(_ int) forecaster { return &stubForecaster{phase: forecast.Observing} })}
+
+	var w v1alpha1.ManagedWorkload
+	require.Eventually(t, func() bool {
+		return cached.Get(ctx, client.ObjectKeyFromObject(api), &w) == nil && w.Status.Phase == v1alpha1.PhasePaused
+	}, 10*time.Second, 50*time.Millisecond)
+
+	require.NoError(t, r.checkDependenciesExist(ctx, &w))
+	cond := meta.FindStatusCondition(w.Status.Conditions, conditionDependencyNotFound)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Contains(t, cond.Message, "doesn't watch namespace shared")
+
+	_, err = r.handleResume(ctx, &w)
+	require.NoError(t, err, "waking isn't blocked by a dependency it can't see")
+	assert.Equal(t, 1, pauser.resumeCalls)
+	assert.Equal(t, v1alpha1.PhaseRunning, w.Status.Phase)
 }
