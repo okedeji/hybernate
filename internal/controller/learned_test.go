@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
@@ -143,6 +146,45 @@ func TestLearnDependencies_WhenToRelearn(t *testing.T) {
 	r.clock = func() time.Time { return fixedTime.Add(2 * time.Hour) }
 	require.NoError(t, r.learnDependencies(context.Background(), api, changed))
 	assert.True(t, api.Status.LearnedDependencies.At.After(relearnedAt.Time), "an hour on")
+}
+
+// What's learned is announced once it's recorded, so a write that fails
+// and is retried doesn't announce it twice.
+func TestLearnDependencies_AnnouncedOnceRecorded(t *testing.T) {
+	target := apiWith(nil, corev1.EnvVar{Name: "DATABASE_URL", Value: "postgres:5432"})
+	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
+	r := depReconciler(t, &stubPauser{}, append(databases(), api, target)...)
+	fail := true
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if fail {
+				return errors.New("conflict")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		}})
+	recorder := r.Recorder.(*events.FakeRecorder)
+	learnedEvents := func() int {
+		n := 0
+		for len(recorder.Events) > 0 {
+			if strings.Contains(<-recorder.Events, ReasonDependenciesLearned) {
+				n++
+			}
+		}
+		return n
+	}
+
+	require.Error(t, r.learnDependencies(context.Background(), api.DeepCopy(), target))
+	assert.Zero(t, learnedEvents(), "not announced before it's recorded")
+
+	fail = false
+	require.NoError(t, r.learnDependencies(context.Background(), api, target))
+	assert.Equal(t, 1, learnedEvents())
+	assert.Equal(t, []string{"default/postgres DATABASE_URL"}, learnedNames(fetch(t, r, "api")), "and recorded")
+
+	r.clock = func() time.Time { return fixedTime.Add(2 * time.Hour) }
+	require.NoError(t, r.learnDependencies(context.Background(), api, target))
+	assert.Zero(t, learnedEvents(), "learning the same again says nothing")
 }
 
 func TestDependencyRefs(t *testing.T) {

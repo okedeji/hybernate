@@ -98,11 +98,17 @@ func (r *Reconciler) learnDependencies(ctx context.Context, workload *v1alpha1.M
 		}
 	}
 
-	if before == nil || !sameDependencies(before.Dependencies, learned) {
-		r.emitEvent(workload, false, "Normal", ReasonDependenciesLearned, actionLearnDependencies,
-			"%s", learnedMessage(learned))
-	}
 	workload.Status.LearnedDependencies = &v1alpha1.LearnedDependencies{From: from, At: now, Dependencies: learned}
+	if before != nil && sameDependencies(before.Dependencies, learned) {
+		return nil
+	}
+	// Written before it's announced: a write that fails is learned again,
+	// and would otherwise be announced again.
+	if err := r.Status().Update(ctx, workload); err != nil {
+		return fmt.Errorf("recording learned dependencies: %w", err)
+	}
+	r.emitEvent(workload, false, "Normal", ReasonDependenciesLearned, actionLearnDependencies,
+		"%s", learnedMessage(learned))
 	return nil
 }
 
