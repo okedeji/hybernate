@@ -197,11 +197,15 @@ spec:
                   confidence:
                     default: 85
                     description: |-
-                      Confidence is the minimum accuracy percentage (0-100) required before
-                      the prediction engine transitions from suggesting (shadow mode) to
-                      actively driving decisions.
+                      Confidence is the accuracy percentage (50-100) a season's forecasts
+                      must reach before they drive decisions rather than only being
+                      reported. Accuracy is 1 - WAPE: 85 means the forecast's total error
+                      over the window is 15% of the demand in it. A season that falls 5
+                      points below it stops driving decisions until it earns it again. The
+                      minimum is 50 because below that a forecast that is wrong more than it
+                      is right would wake workloads and hold off pauses.
                     maximum: 100
-                    minimum: 0
+                    minimum: 50
                     type: integer
                 required:
                 - confidence
@@ -838,17 +842,26 @@ spec:
                   engine.
                 properties:
                   dailyConfidence:
-                    description: DailyConfidence is the daily season's prediction
-                      accuracy percentage.
+                    description: |-
+                      DailyConfidence is the forecast's accuracy over the last 24 observed
+                      hours, as a percentage.
                     type: integer
                   dailyPhase:
                     description: |-
                       DailyPhase is the daily season's lifecycle phase
                       (Observing, Suggesting, or Active).
                     type: string
+                  state:
+                    description: |-
+                      State is what the forecasting engine has learned, compressed and
+                      encoded, so that it survives an operator restart. It is written with
+                      each hourly observation. State that can't be read is discarded, with a
+                      warning event, and the engine starts learning again.
+                    type: string
                   weeklyConfidence:
-                    description: WeeklyConfidence is the weekly season's prediction
-                      accuracy percentage.
+                    description: |-
+                      WeeklyConfidence is the forecast's accuracy over the last 168
+                      observed hours, a whole week of weekdays and weekend, as a percentage.
                     type: integer
                   weeklyPhase:
                     description: |-
