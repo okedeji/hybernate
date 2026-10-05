@@ -101,7 +101,9 @@ spec:
       app.kubernetes.io/name: hybernate
 ---
 # The operator finds the Ready doorman pods through this Service's
-# EndpointSlices, and points paused workloads' Services at them.
+# EndpointSlices, and points paused workloads' Services at them. On a
+# dual-stack cluster it needs both families, or it can't route the other
+# family's Services.
 apiVersion: v1
 kind: Service
 metadata:
@@ -112,6 +114,7 @@ metadata:
     app.kubernetes.io/name: hybernate
     app.kubernetes.io/managed-by: kustomize
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     control-plane: doorman
     app.kubernetes.io/name: hybernate
