@@ -35,7 +35,16 @@ serviceAccount:
 metrics:
   enabled: true
   port: 8443
+  # Serves metrics over HTTPS, to scrapers allowed to get /metrics, such as
+  # those bound to the metrics-reader ClusterRole below. False serves plain
+  # HTTP to anyone who can reach the port.
   secure: true
+  # The ClusterRole the chart creates, while metrics.secure, is allowed to
+  # get /metrics. List your Prometheus's ServiceAccount here to bind it:
+  #   - kind: ServiceAccount
+  #     name: prometheus-k8s
+  #     namespace: monitoring
+  readerSubjects: []
   serviceMonitor:
     enabled: false
     interval: 30s

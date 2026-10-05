@@ -1,12 +1,8 @@
+# Applied on its own, after config/default, with
+# kubectl apply -k config/prometheus. Names are written out rather than
+# prefixed, so they match what config/default creates.
+namespace: hybernate-system
+
 resources:
 - monitor.yaml
 - alerts.yaml
-
-# [PROMETHEUS-WITH-CERTS] The following patch configures the ServiceMonitor in ../prometheus
-# to securely reference certificates created and managed by cert-manager.
-# Additionally, ensure that you uncomment the [METRICS WITH CERTMANAGER] patch under config/default/kustomization.yaml
-# to mount the "metrics-server-cert" secret in the Manager Deployment.
-#patches:
-#  - path: monitor_tls_patch.yaml
-#    target:
-#      kind: ServiceMonitor

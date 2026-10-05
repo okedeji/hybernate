@@ -44,9 +44,7 @@ spec:
             {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
-            {{- if .Values.metrics.secure }}
-            - --metrics-secure
-            {{- end }}
+            - --metrics-secure={{ .Values.metrics.secure }}
             {{- end }}
             - --zap-log-level={{ .Values.logLevel }}
           securityContext:

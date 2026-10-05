@@ -121,6 +121,18 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 test-helm-smoke: ## Install the Helm chart with watchNamespaces into Kind and check it works with only namespaced Roles
 	KIND=$(KIND) ./hack/helm-smoke.sh
 
+PROMETHEUS_IMAGE ?= prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+
+.PHONY: test-alerts
+test-alerts: ## Unit-test the chart's and config/prometheus's alert rules with promtool
+	@dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; \
+	cp tests/prometheus/*_test.yaml "$$dir"; \
+	go run ./hack/promrules < config/prometheus/alerts.yaml > "$$dir/kustomize.rules.yaml"; \
+	helm template hybernate charts/hybernate --set metrics.prometheusRule.enabled=true \
+		--show-only templates/prometheusrule.yaml | go run ./hack/promrules > "$$dir/chart.rules.yaml"; \
+	$(CONTAINER_TOOL) run --rm -v "$$dir:/rules" -w /rules --entrypoint promtool $(PROMETHEUS_IMAGE) \
+		test rules $$(cd "$$dir" && ls *_test.yaml)
+
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)

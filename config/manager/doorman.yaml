@@ -79,7 +79,7 @@ spec:
     control-plane: doorman
     app.kubernetes.io/name: hybernate
   ports:
-  - name: metrics
+  - name: https
     port: 8443
     protocol: TCP
     targetPort: 8443
