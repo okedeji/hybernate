@@ -272,7 +272,10 @@ func TestServer_HoldsWakesAndPassesThrough(t *testing.T) {
 	require.NoError(t, c.Create(context.Background(), readySlice(echoPort(t))))
 
 	echoed(t, conn, "hello\n")
-	assert.Equal(t, before+1, wakes(resultSuccess))
+	// The result is counted once the connection is done with, just after
+	// the caller has its answer.
+	assert.Eventually(t, func() bool { return wakes(resultSuccess) == before+1 },
+		5*time.Second, 10*time.Millisecond, "counted as resultSuccess")
 }
 
 // The doorman never passes a connection to an address it can't trust to be
@@ -419,7 +422,10 @@ func TestServer_ClosesAfterMaxWait(t *testing.T) {
 	send(t, conn, "hello\n")
 
 	closedWithin(t, conn)
-	assert.Equal(t, before+1, wakes(resultTimeout))
+	// The result is counted once the connection is done with, just after
+	// the caller has its answer.
+	assert.Eventually(t, func() bool { return wakes(resultTimeout) == before+1 },
+		5*time.Second, 10*time.Millisecond, "counted as resultTimeout")
 }
 
 // Every connection waiting on a slow wake times out together, so they share
@@ -471,7 +477,10 @@ func TestServer_ServesThePageToABrowser(t *testing.T) {
 	assert.Contains(t, body, "<title>Waking up shop.example.dev</title>")
 	assert.NotContains(t, body, "dev/api", "the page names nothing inside the cluster")
 	assert.NotEmpty(t, lastRequest(t, c), "the page still wakes the workload")
-	assert.Equal(t, before+1, wakes(resultPage))
+	// The result is counted once the connection is done with, just after
+	// the caller has its answer.
+	assert.Eventually(t, func() bool { return wakes(resultPage) == before+1 },
+		5*time.Second, 10*time.Millisecond, "counted as resultPage")
 }
 
 // A workload that has a Ready pod is up, even if it isn't Running yet
@@ -758,7 +767,10 @@ func TestServer_HeldConnectionsAreCapped(t *testing.T) {
 	third := dial(t, port)
 
 	closedWithin(t, third)
-	assert.Equal(t, before+1, wakes(resultLimited))
+	// The result is counted once the connection is done with, just after
+	// the caller has its answer.
+	assert.Eventually(t, func() bool { return wakes(resultLimited) == before+1 },
+		5*time.Second, 10*time.Millisecond, "counted as resultLimited")
 }
 
 // A caller that goes away while held frees its place.
@@ -1017,7 +1029,10 @@ func TestServer_RefusesPromptlyWhenADrainingRouteHasNothingReady(t *testing.T) {
 
 	closedWithin(t, held)
 	closedWithin(t, dial(t, port))
-	assert.Equal(t, before+2, wakes(resultRefused))
+	// The result is counted once the connection is done with, just after
+	// the caller has its answer.
+	assert.Eventually(t, func() bool { return wakes(resultRefused) == before+2 },
+		5*time.Second, 10*time.Millisecond, "counted as resultRefused")
 }
 
 // On shutdown the doorman stops accepting, keeps the connections it carries
