@@ -3,6 +3,7 @@
 Some workloads never see outside traffic: databases, message brokers, caches, workers. Their own [activity clock](idle-detection.md) can run out while the workloads that use them are still busy. Hybernate [learns](#learned-dependencies) who needs what from each workload's environment, and `dependsOn` declares it by hand.
 
 ```yaml title="managedworkload.yaml" linenums="1"
+apiVersion: hybernate.io/v1alpha1
 kind: ManagedWorkload
 metadata:
   name: api
@@ -14,7 +15,10 @@ spec:
     - {namespace: messaging, kind: StatefulSet, name: nats}       # another namespace
   idlePolicy:
     idleAfter: 1h
+  prediction: {}                                                  # default confidence
 ```
+
+With the label instead, set `hybernate.io/depends-on: "statefulset/postgres, messaging/statefulset/nats"` on the workload; see [Opting In](../guides/opt-in.md#settings).
 
 Declare `dependsOn` on the workload that **needs** the other one. Each entry names the dependency's Deployment or StatefulSet, not its ManagedWorkload. `namespace` defaults to the ManagedWorkload's own.
 
@@ -28,7 +32,7 @@ HeldByDependents=True   kept awake for preview-42/api, preview-43/api
 
 Its clock keeps running. Once the last dependent has paused, the dependency pauses on its next check, provided its own clock has run out too.
 
-**Waking a workload wakes its dependencies.** Hybernate sets `hybernate.io/last-activity` on each dependency's ManagedWorkload, which wakes it through the usual [activity annotation](idle-detection.md#activity-annotations) path. This chains: if Postgres itself depends on something, that wakes too. You can see it happen with `kubectl describe`.
+**Waking a workload wakes its dependencies.** Before the workload starts resuming, Hybernate sets `hybernate.io/last-activity` on each dependency's ManagedWorkload, which wakes it through the usual [activity annotation](idle-detection.md#activity-annotations) path. This chains: if Postgres itself depends on something, that wakes too. You can see it happen with `kubectl describe`.
 
 By default, everything wakes at once, so a chain of dependencies doesn't add up to sequential cold starts.
 

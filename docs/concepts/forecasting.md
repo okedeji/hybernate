@@ -64,6 +64,10 @@ The engine doesn't start making decisions immediately. It progresses through pha
 
 The gates count hours of the calendar, not data points: a workload that is only ever observed from 9 to 5 hasn't shown what happens at night, however many hours it has been watched.
 
+That has a consequence for workloads paused without the [doorman](wake-on-request.md): an hour paused without it isn't observed (see [Wall-Clock Alignment](#wall-clock-alignment)), so a workload paused every night that way never has its nights observed, and its forecast never reaches `DailySuggesting`. Keep wake on request on if you want `autoResume` and the forecast's veto.
+
+The ManagedWorkload shows the phase per season, in `status.prediction`: `dailyPhase` and `weeklyPhase` are each `Observing`, `Suggesting` or `Active`, next to `dailyConfidence` and `weeklyConfidence`. `DailyActive`, for example, is `dailyPhase: Active` with `weeklyPhase: Observing`.
+
 The confidence threshold is configurable per workload via `spec.prediction.confidence` (default 85%, minimum 50%), and a change applies at the next reconcile. A phase is earned at the threshold and lost 5 points below it, so confidence hovering at the threshold doesn't switch the forecast on and off every hour.
 
 ## Confidence Scoring
