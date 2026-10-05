@@ -181,18 +181,23 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 ##@ Versioning
 
+# The docs that name the current release, for installing or verifying it.
+# docs/operations/upgrading.md isn't one: its versions are history.
+VERSIONED_DOCS = README.md docs/getting-started/installation.md docs/reference/helm-values.md docs/reference/security.md
+
 .PHONY: bump
 bump: ## Bump the version in the chart, the kustomize image, and docs. Usage: make bump VERSION=0.1.2
 	@if [ -z "$(VERSION)" ]; then echo "VERSION is required. Usage: make bump VERSION=0.1.2"; exit 1; fi
+	@old=$$(awk '/^version:/ {print $$2}' charts/hybernate/Chart.yaml); \
+	OLD="$$old" NEW="$(VERSION)" perl -pi -e 's/(?<![\d.])\Q$$ENV{OLD}\E(?!\.?[\w-])/$$ENV{NEW}/g' $(VERSIONED_DOCS)
 	@perl -pi -e 's/^version:.*/version: $(VERSION)/' charts/hybernate/Chart.yaml
 	@perl -pi -e 's/^appVersion:.*/appVersion: "v$(VERSION)"/' charts/hybernate/Chart.yaml
 	@perl -pi -e 's/^  newTag:.*/  newTag: v$(VERSION)/' config/manager/kustomization.yaml
-	@perl -pi -e 's|--version v?[\d]+\.[\d]+\.[\d]+|--version $(VERSION)|g' README.md docs/getting-started/installation.md docs/reference/helm-values.md
 	@echo "Bumped to $(VERSION)"
 
 .PHONY: release
 release: bump ## Bump version, commit, and tag. Usage: make release VERSION=0.1.2
-	@git add charts/hybernate/Chart.yaml config/manager/kustomization.yaml README.md docs/getting-started/installation.md docs/reference/helm-values.md
+	@git add charts/hybernate/Chart.yaml config/manager/kustomization.yaml $(VERSIONED_DOCS)
 	@git commit -m "chore(release): bump version to v$(VERSION)"
 	@git tag -a v$(VERSION) -m "v$(VERSION)"
 	@echo "Tagged v$(VERSION). Run 'git push origin main v$(VERSION)' to release."
