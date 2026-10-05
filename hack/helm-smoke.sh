@@ -44,6 +44,8 @@ diagnose() {
   kubectl get events -n "$WATCHED" --sort-by=.lastTimestamp || true
   echo "--- Hybernate's pods and logs"
   kubectl get pods -n "$RELEASE_NAMESPACE" -o wide || true
+  kubectl get events -n "$RELEASE_NAMESPACE" --sort-by=.lastTimestamp || true
+  kubectl logs -n "$RELEASE_NAMESPACE" -l app.kubernetes.io/instance=hybernate --prefix --previous --tail=50 || true
   kubectl logs -n "$RELEASE_NAMESPACE" -l app.kubernetes.io/instance=hybernate --prefix --tail=200 || true
 }
 
@@ -100,7 +102,7 @@ kubectl patch deployment metrics-server -n kube-system --type=json \
 
 kubectl create namespace "$WATCHED"
 kubectl create namespace "$UNWATCHED"
-helm install hybernate charts/hybernate --namespace "$RELEASE_NAMESPACE" --create-namespace --wait --timeout 3m \
+helm install hybernate charts/hybernate --namespace "$RELEASE_NAMESPACE" --create-namespace --wait --timeout 5m \
   --set image.repository=hybernate --set image.tag=smoke --set image.pullPolicy=Never \
   --set "watchNamespaces={$WATCHED}"
 kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=3m
