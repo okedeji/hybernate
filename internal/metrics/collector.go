@@ -98,7 +98,7 @@ var (
 
 	AutomationSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_automation_skipped_total",
-		Help: "Total times automation was skipped due to manual desiredState override.",
+		Help: "Total times a manual desiredState took over from automation.",
 	}, []string{"namespace", "workload"})
 
 	DryrunActions = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -160,4 +160,32 @@ func init() {
 		DoormanWaitSeconds,
 		DoormanHeldConnections,
 	)
+}
+
+// perWorkload are the vectors with series for each ManagedWorkload, labelled
+// by its namespace and name.
+var perWorkload = []interface {
+	DeletePartialMatch(labels prometheus.Labels) int
+}{
+	WorkloadPhase,
+	PredictionConfidence,
+	PredictionPhase,
+	PredictionDataPoints,
+	PredictionAnomalies,
+	IdleDetections,
+	IdleSeconds,
+	PredictionRegimeChanges,
+	AutomationSkipped,
+	TargetUnavailable,
+	DoormanWakes,
+}
+
+// DeleteWorkload drops every series of a deleted ManagedWorkload, so its
+// gauges stop reporting it and one recreated under the same name starts
+// afresh.
+func DeleteWorkload(namespace, workload string) {
+	labels := prometheus.Labels{"namespace": namespace, "workload": workload}
+	for _, v := range perWorkload {
+		v.DeletePartialMatch(labels)
+	}
 }

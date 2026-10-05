@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -86,4 +87,39 @@ func TestAllMetricsRegistered(t *testing.T) {
 	for _, name := range expected {
 		assert.True(t, registered[name], "metric %s not registered", name)
 	}
+}
+
+func TestDeleteWorkload(t *testing.T) {
+	WorkloadPhase.WithLabelValues("shop", "gone", "Paused").Set(1)
+	PredictionConfidence.WithLabelValues("daily", "shop", "gone").Set(50)
+	PredictionPhase.WithLabelValues("shop", "gone").Set(1)
+	PredictionDataPoints.WithLabelValues("shop", "gone").Set(10)
+	PredictionAnomalies.WithLabelValues("shop", "gone").Inc()
+	IdleDetections.WithLabelValues("shop", "gone").Inc()
+	IdleSeconds.WithLabelValues("shop", "gone").Set(60)
+	PredictionRegimeChanges.WithLabelValues("shop", "gone").Inc()
+	AutomationSkipped.WithLabelValues("shop", "gone").Inc()
+	TargetUnavailable.WithLabelValues("shop", "gone").Inc()
+	DoormanWakes.WithLabelValues("shop", "gone", "success").Inc()
+	IdleSeconds.WithLabelValues("shop", "kept").Set(60)
+
+	DeleteWorkload("shop", "gone")
+
+	gathered, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	kept := false
+	for _, mf := range gathered {
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["namespace"] != "shop" {
+				continue
+			}
+			assert.NotEqual(t, "gone", labels["workload"], "%s still reports the deleted workload", mf.GetName())
+			kept = kept || labels["workload"] == "kept"
+		}
+	}
+	assert.True(t, kept, "other workloads' series are left alone")
 }
