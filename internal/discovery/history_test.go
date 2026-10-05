@@ -204,14 +204,6 @@ func TestStatefulSetPods(t *testing.T) {
 	assert.False(t, db("db-"))
 }
 
-func TestReplayStart(t *testing.T) {
-	since := weekStart
-	assert.Equal(t, since, replayStart(since, time.Time{}, minStep), "unknown creation")
-	assert.Equal(t, since, replayStart(since, since.Add(-time.Hour), minStep), "created before the history")
-	assert.Equal(t, since.Add(24*time.Hour+minStep), replayStart(since, since.Add(24*time.Hour+time.Second), minStep),
-		"the next step of the history")
-}
-
 func TestHistoryStep(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, historyStep(7*24*time.Hour))
 	assert.Equal(t, 5*time.Minute, historyStep(30*24*time.Hour))
@@ -462,7 +454,29 @@ func TestScanCluster_ScaledByHandCouldSaveNothing(t *testing.T) {
 
 // A workload created partway through the window is replayed from when it
 // was created, so its monthly rate isn't diluted by hours before it existed.
-func TestScanCluster_ReplaysAYoungWorkloadFromItsCreation(t *testing.T) {
+// A workload deleted and created again with the same pod template, as a
+// reinstall does, runs pods with the same names, so the week its earlier
+// self ran is its history too.
+func TestScanCluster_ReplaysAReinstalledWorkloadsWholeHistory(t *testing.T) {
+	windowStart := scanTime.Add(-7 * 24 * time.Hour)
+	f := &fakePrometheus{from: windowStart, byNamespace: map[string][]series{testNamespace: {
+		{pod: "app-7d9f8c6b5-abcde", container: "main", cores: func(time.Time) float64 { return 0 }},
+	}}}
+	objs := deploymentWithRollout("app", testNamespace, 1, 6*24*time.Hour)
+	objs[0].(*appsv1.Deployment).CreationTimestamp = metav1.NewTime(scanTime.Add(-time.Hour))
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	h := byName(report)["app"].History
+	require.NotNil(t, h)
+	assert.InDelta(t, 7*24, h.Hours, 0.2, "replayed over the whole week, not the hour since it was created")
+}
+
+func TestScanCluster_ReplaysAYoungWorkloadFromItsFirstSample(t *testing.T) {
 	windowStart := scanTime.Add(-7 * 24 * time.Hour)
 	created := windowStart.Add(24 * time.Hour)
 	f := &fakePrometheus{from: windowStart, byNamespace: map[string][]series{testNamespace: {
@@ -487,7 +501,7 @@ func TestScanCluster_ReplaysAYoungWorkloadFromItsCreation(t *testing.T) {
 	require.NoError(t, err)
 	h := byName(report)["young"].History
 	require.NotNil(t, h)
-	assert.InDelta(t, 6*24, h.Hours, 0.2, "replayed from its creation")
+	assert.InDelta(t, 6*24, h.Hours, 0.2, "replayed from when it first ran")
 	assert.InDelta(t, 6*24-1, h.SleepHours, 0.2, "asleep an hour after it started")
 	hourly := byName(report)["young"].HourlyCost
 	assert.InDelta(t, hourly*(6*24-1)/(6*24)*hoursPerMonth, h.MonthlyFreed, 0.01,

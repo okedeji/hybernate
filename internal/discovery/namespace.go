@@ -180,8 +180,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, pricing n
 		w.Measured = measured(mw, w.HourlyCost, now)
 		w.SavedThisMonth = SavedThisMonth(mw)
 		if history != nil && ownCPU > 0 && !w.ScaledByHand {
-			since := replayStart(scan.historySince, obj.GetCreationTimestamp().Time, historyStep(opts.Window))
-			w.History = replayWorkload(w, spec, history, owners.podsOf(wl), since, rollouts,
+			w.History = replayWorkload(w, spec, history, owners.podsOf(wl), scan.historySince, rollouts,
 				thresholdFor(mw, opts), idleAfterFor(mw, opts), opts)
 			if w.History == nil && w.State != StateUnknown {
 				scan.noHistory = append(scan.noHistory, w.Namespace+"/"+w.Name)

@@ -18,6 +18,7 @@ package discovery
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -275,23 +276,15 @@ func (s *Scanner) readHistory(ctx context.Context, namespace string, opts Cluste
 	return history, nil
 }
 
-// replayStart is the first step of the history at or after a workload was
-// created. Steps fall where Prometheus put them, which is where the
-// namespace's history begins and every step after.
-func replayStart(historySince, created time.Time, step time.Duration) time.Time {
-	if !created.After(historySince) {
-		return historySince
-	}
-	steps := (created.Sub(historySince) + step - 1) / step
-	return historySince.Add(steps * step)
-}
-
 // replayWorkload replays the activity clock over one workload's share of
 // its namespace's history, or returns nil when none of it is the workload's.
-// The replay starts at since, where the history begins or the workload was
-// created if later, as the activity clock starts when a workload is created:
-// one younger than the window isn't charged for hours before it existed.
-// Its requests and prices are today's, since the history only records CPU.
+// The replay starts at the workload's first sample, or at since if it was
+// running before then, as the activity clock starts when a workload first
+// runs: one younger than the window isn't charged for hours before it ran.
+// That's its first sample rather than its creation time because a
+// workload deleted and created again with the same pod template, as a
+// reinstall does, runs the same pods, whose history is its own. Its
+// requests and prices are today's, since the history only records CPU.
 func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, podsOf podNames, since time.Time,
 	rollouts []time.Time, threshold int, idleAfter time.Duration, opts ClusterOptions) *History {
 	containers := make([]string, 0, len(spec.Containers))
@@ -301,6 +294,11 @@ func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, pod
 	used, pods, found := workloadSeries(history, podsOf, containers)
 	if !found {
 		return nil
+	}
+	if len(pods) > 0 {
+		if first := time.Unix(slices.Min(slices.Collect(maps.Keys(pods))), 0); first.After(since) {
+			since = first
+		}
 	}
 
 	ownCPU, _ := metrics.Requests(metrics.WorkloadContainers(spec))
