@@ -145,8 +145,9 @@ func TestWriteHTML_History(t *testing.T) {
 	assert.NotContains(t, got, "postgres-0.postgres-hl", "addresses stay out of a report that gets forwarded")
 	assert.NotContains(t, got, "nats://", "addresses stay out of a report that gets forwarded")
 	assert.Contains(t, got, "after its idle-after with no activity (1h, or a managed workload&#39;s own)")
-	assert.Contains(t, got, "<p>Every Deployment and StatefulSet in the cluster: what each is doing right now, "+
-		"what Hybernate saves pausing the live ones, and what pausing the rest could save.</p>")
+	assert.Contains(t, got, "<p>Every Deployment and StatefulSet scanned, except 1 it couldn't judge, which the "+
+		"notes list: what each is doing right now, what Hybernate saves pausing the live ones, and what pausing the "+
+		"rest could save.</p>", "the table leaves out what the scan couldn't judge, and -n limits it")
 	assert.Contains(t, got, "with their own CPU threshold and idle-after", "the details are in the method section")
 	assert.Contains(t, got, `<span class="line"><span class="sh-cmd">kubectl</span> label statefulset postgres `+
 		`<span class="sh-flag">-n</span> preview-42 <span class="sh-key">hybernate.io/managed</span>=`+

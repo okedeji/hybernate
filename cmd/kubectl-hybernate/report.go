@@ -71,6 +71,8 @@ type reportPage struct {
 	Tips         tips
 	Terms        []term
 	Mark         string
+	// Unjudged is how many workloads the notes list instead of Workloads.
+	Unjudged int
 }
 
 type headline struct {
@@ -327,6 +329,7 @@ func buildReport(result scanResult, idleAfter time.Duration) reportPage {
 	}
 
 	_, unjudged := splitJudged(result.Workloads)
+	page.Unjudged = len(unjudged)
 	page.Notes = append(unjudgedNotes(unjudged), result.Notes...)
 	if n := result.Totals.ScaledToZero; n > 0 {
 		page.Notes = append([]string{plural(n, "workload is", "workloads are") + " scaled to zero by hand; Hybernate " +

@@ -167,7 +167,7 @@ ul.plain { margin: 0; padding: 0 0 0 18px; color: var(--muted); font-size: 14px;
   {{end}}
 
   <h2>Workloads</h2>
-  <p>Every Deployment and StatefulSet in the cluster: what each is doing right now, what Hybernate saves pausing the live ones, and what pausing the rest could save.</p>
+  <p>Every Deployment and StatefulSet scanned{{if .Unjudged}}, except {{.Unjudged}} it couldn't judge, which the notes list{{end}}: what each is doing right now, what Hybernate saves pausing the live ones, and what pausing the rest could save.</p>
   {{if .Workloads}}
   <div class="tools">
     <p class="count" data-count="workloads">{{len .Workloads}} {{if eq (len .Workloads) 1}}workload{{else}}workloads{{end}}; select a column to sort</p>

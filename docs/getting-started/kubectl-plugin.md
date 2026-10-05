@@ -133,7 +133,7 @@ Pass --cpu-price and --memory-price for yours.
 
 - two headline figures: what Hybernate has saved this month, and what pausing could save a month (measured for dry-run workloads, estimated from history for unmanaged ones), as a share of what those workloads cost, "over the same time" when history was replayed, since a replayed workload is measured against what it cost over the history, with the pods it ran then; without either, what idle workloads cost while running
 - four facts: what the workloads cost, what's idle right now, how long unmanaged workloads would have slept (with history) or what idle workloads cost an hour (without), and how many Hybernate manages
-- a table by namespace (with a filter), every workload with the same columns as the terminal (sortable, with a filter), and the dependencies found
+- a table by namespace (with a filter), every workload scanned that the scan could judge, with the same columns as the terminal (sortable, with a filter), and the dependencies found
 - what the numbers mean, in plain words, and the next steps
 
 Dependency addresses are left out of the page, since it's meant to be passed around; JSON and YAML keep them. The report file is created readable only by you. A scan covers one cluster, the current kubeconfig context or the one you name with `--context`.
