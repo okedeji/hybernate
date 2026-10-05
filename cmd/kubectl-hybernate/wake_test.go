@@ -224,7 +224,39 @@ func TestWake_AmbiguousName(t *testing.T) {
 
 	require.ErrorIs(t, err, errAmbiguous)
 	assert.EqualError(t, err, "api in preview-42 matches more than one ManagedWorkload: "+
-		"api-deploy (deployment/api), api-sts (statefulset/api); name one by its kind, such as deployment/api")
+		"api-deploy (deployment/api), api-sts (statefulset/api); name one by its workload's kind and name, "+
+		"such as deployment/api")
+}
+
+// A ManagedWorkload named api that manages another workload doesn't win
+// over one that manages a workload named api: the bare name means either,
+// and the workload picks one.
+func TestWake_NameOfOneTargetOfAnother(t *testing.T) {
+	backend := managedWorkload(v1alpha1.PhasePaused)
+	backend.Spec.Target.Name = "backend"
+	frontend := managedWorkload(v1alpha1.PhasePaused)
+	frontend.Name = "frontend-mw"
+	opts := testOptions()
+	opts.wait = false
+
+	err := wake(testContext(t), newClient(t, interceptor.Funcs{}, backend.DeepCopy(), frontend.DeepCopy()), apiKey,
+		opts, &bytes.Buffer{})
+
+	require.ErrorIs(t, err, errAmbiguous)
+	assert.ErrorContains(t, err, "api (deployment/backend), frontend-mw (deployment/api)")
+
+	for arg, want := range map[string]string{"deployment/backend": "api", "deployment/api": "frontend-mw"} {
+		t.Run(arg, func(t *testing.T) {
+			c := newClient(t, interceptor.Funcs{}, backend.DeepCopy(), frontend.DeepCopy())
+
+			require.NoError(t, wake(testContext(t), c, client.ObjectKey{Namespace: "preview-42", Name: arg}, opts,
+				&bytes.Buffer{}))
+
+			var w v1alpha1.ManagedWorkload
+			require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: "preview-42", Name: want}, &w))
+			assert.NotEmpty(t, w.Annotations[v1alpha1.AnnotationLastActivity])
+		})
+	}
 }
 
 // When a Deployment and a StatefulSet share a name, the operator names one

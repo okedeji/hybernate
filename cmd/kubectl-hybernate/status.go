@@ -566,8 +566,9 @@ func eventTime(ev *corev1.Event) time.Time {
 // own name, or by its workload's as status shows it, "[kind/]name". The two
 // differ for a ManagedWorkload written by hand under another name, and for
 // one the operator names after its kind because a Deployment and a
-// StatefulSet share a name. A bare name both of those answer to is
-// ambiguous; the kind settles it.
+// StatefulSet share a name. A bare name more than one ManagedWorkload
+// answers to, by either name, is ambiguous; "kind/name" names a workload,
+// which settles it.
 func findManaged(ctx context.Context, c client.Client, namespace, arg string) (*v1alpha1.ManagedWorkload, error) {
 	kind, name, err := workloadArg(arg)
 	if err != nil {
@@ -579,8 +580,6 @@ func findManaged(ctx context.Context, c client.Client, namespace, arg string) (*
 		var w v1alpha1.ManagedWorkload
 		err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &w)
 		switch {
-		case err == nil && w.Spec.Target.Name != name:
-			return &w, nil
 		case err == nil:
 			named = &w
 		case meta.IsNoMatchError(err):
@@ -607,7 +606,8 @@ func findManaged(ctx context.Context, c client.Client, namespace, arg string) (*
 	var matches []*v1alpha1.ManagedWorkload
 	for i := range list.Items {
 		w := &list.Items[i]
-		if w.Spec.Target.Name == name && (kind == "" || strings.EqualFold(string(w.Spec.Target.Kind), kind)) {
+		ownName := kind == "" && w.Name == name
+		if ownName || w.Spec.Target.Name == name && (kind == "" || strings.EqualFold(string(w.Spec.Target.Kind), kind)) {
 			matches = append(matches, w)
 		}
 	}
@@ -615,9 +615,6 @@ func findManaged(ctx context.Context, c client.Client, namespace, arg string) (*
 	case 1:
 		return matches[0], nil
 	case 0:
-		if named != nil {
-			return named, nil
-		}
 		if notFound == nil {
 			notFound = apierrors.NewNotFound(
 				schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "managedworkloads"}, arg)
@@ -630,8 +627,9 @@ func findManaged(ctx context.Context, c client.Client, namespace, arg string) (*
 		names = append(names, fmt.Sprintf("%s (%s/%s)", w.Name, strings.ToLower(string(w.Spec.Target.Kind)),
 			w.Spec.Target.Name))
 	}
-	return nil, fmt.Errorf("%s in %s %w: %s; name one by its kind, such as %s/%s", arg, namespace, errAmbiguous,
-		strings.Join(names, ", "), strings.ToLower(string(matches[0].Spec.Target.Kind)), name)
+	return nil, fmt.Errorf("%s in %s %w: %s; name one by its workload's kind and name, such as %s/%s", arg,
+		namespace, errAmbiguous, strings.Join(names, ", "), strings.ToLower(string(matches[0].Spec.Target.Kind)),
+		matches[0].Spec.Target.Name)
 }
 
 func writeStatus(w io.Writer, result statusResult, output string, now time.Time) error {

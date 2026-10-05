@@ -289,7 +289,7 @@ kubectl hybernate wake my-api -n staging --for 2h
 kubectl hybernate wake my-api -n staging --wait=false
 ```
 
-NAME is the workload, as `status` shows it, such as `api` or `statefulset/postgres`, or its ManagedWorkload's name. When a Deployment and a StatefulSet share the name, it lists both and asks for the kind.
+NAME is the workload, as `status` shows it, such as `api` or `statefulset/postgres`, or its ManagedWorkload's name. When a bare name answers to more than one ManagedWorkload, such as when a Deployment and a StatefulSet share it, or one ManagedWorkload is named after a workload another one manages, it lists them and asks for the workload as `kind/name`, which only matches workloads.
 
 What it says depends on the phase:
 
