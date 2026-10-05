@@ -11,8 +11,17 @@ Most workloads follow predictable patterns:
 
 Hybernate learns these two patterns independently by feeding hourly CPU observations into a Holt-Winters model. Once it has enough data and confidence, it uses the learned patterns to:
 
-- Hold off a pause when it's confident demand is coming in the next hour. It never causes a pause: the [activity clock](idle-detection.md) decides that
+- Hold off a pause when it's confident demand is coming in the hour under way or the next. It never causes a pause: the [activity clock](idle-detection.md) decides that
 - Wake paused workloads ahead of predicted demand, starting 15 minutes before an hour it expects to be busy
+
+## What an Hour Records
+
+The forecast is fed each hour once it's over, as the busiest moment seen in it:
+
+- While the workload is awake, its CPU is read every minute, and the hour records the highest reading. The peak, rather than the mean, is what the forecast's decisions need: the activity clock counts any minute above `cpuThreshold` as activity, so an hour busy only for its last ten minutes is an hour the workload has to be awake for. Usage in the first 15 minutes after a wake isn't counted: starting up isn't demand, and counted, a wake ahead of a busy hour would teach the forecast that the hour before it is busy too, so that it woke the workload earlier every week
+- While the workload is paused behind the [doorman](wake-on-request.md) (`WakeOnRequest=True`), a request would wake it, so a check that finds it still paused finds no demand. A request that wakes it counts as at least twice `cpuThreshold` of what it requested, however little it then uses, so the hour people arrive in is learned as busy
+- While the workload is paused without the doorman, or by `desiredState`, which a request doesn't end, demand can't be seen, and the hour isn't recorded: demand it can't see isn't zero
+- An hour is recorded only if it was checked from its start to its end. The hour under way is kept in memory, so after an operator restart or a leader change, the hour it happened in is skipped, unless it was only minutes old, rather than recorded from the part seen after it
 
 ## How It Works
 
@@ -25,7 +34,7 @@ The model tracks four components:
 | **Daily components** | 24 offsets, one per hour of day: the shape of an average day | \( \gamma_1 = 0.1 \) |
 | **Weekly components** | 168 offsets, one per hour of week: how each weekday departs from that shape | \( \gamma_2 = 0.5 \) |
 
-Each hour, the model records the actual CPU observation \( Y(t) \), compares it to what it predicted (for confidence scoring), and updates all four components using exponential smoothing. The model is **additive**: idle workloads spend much of their time at zero demand, where a multiplicative model, which divides by the level and the seasonal factors, diverges.
+Each hour, the model takes the hour's CPU observation \( Y(t) \), compares it to what it predicted (for confidence scoring), and updates all four components using exponential smoothing. The model is **additive**: idle workloads spend much of their time at zero demand, where a multiplicative model, which divides by the level and the seasonal factors, diverges.
 
 \[
 \begin{aligned}
@@ -64,7 +73,7 @@ The engine doesn't start making decisions immediately. It progresses through pha
 
 The gates count hours of the calendar, not data points: a workload that is only ever observed from 9 to 5 hasn't shown what happens at night, however many hours it has been watched.
 
-That has a consequence for workloads paused without the [doorman](wake-on-request.md): an hour paused without it isn't observed (see [Wall-Clock Alignment](#wall-clock-alignment)), so a workload paused every night that way never has its nights observed, and its forecast never reaches `DailySuggesting`. Keep wake on request on if you want `autoResume` and the forecast's veto.
+That has a consequence for workloads paused without the [doorman](wake-on-request.md): an hour paused without it isn't observed (see [What an Hour Records](#what-an-hour-records)), so a workload paused every night that way never has its nights observed, and its forecast never reaches `DailySuggesting`. Keep wake on request on if you want `autoResume` and the forecast's veto.
 
 The ManagedWorkload shows the phase per season, in `status.prediction`: `dailyPhase` and `weeklyPhase` are each `Observing`, `Suggesting` or `Active`, next to `dailyConfidence` and `weeklyConfidence`. `DailyActive`, for example, is `dailyPhase: Active` with `weeklyPhase: Observing`.
 
@@ -98,10 +107,10 @@ Hybernate detects these **regime changes** using z-score anomaly detection:
 
     A sudden surge and a sudden disappearance of demand both count.
 
-2. If \( z(t) > 3.0 \), the observation is flagged as an anomaly. The model learns from it only up to 3 standard deviations, so a single spike isn't learned as a pattern
+2. If \( z(t) > 3.0 \), the observation is flagged as an anomaly. The model learns from it only up to 3 standard deviations, so a single spike isn't learned as a pattern. An error that large in the same direction as the last one in the same hour of the week isn't an anomaly, though: it's a weekly pattern, such as a Tuesday night batch job, and the model learns it in full
 3. If 3 or more anomalies occur within 24 observed hours, the engine declares a **regime change**
 
-On a regime change, the engine demotes its phase once:
+On a regime change, the engine demotes its phase one level from the phase it held before the anomalies began, even if they've already cost it confidence:
 
 - `FullyActive` → `WeeklySuggesting`
 - `WeeklySuggesting` or `DailyActive` → `DailySuggesting`
@@ -113,7 +122,7 @@ It then discards the evidence its confidence rested on: the scored errors, the a
 
 The engine's learned state (the model's components, the scored errors, the anomaly statistics, and the last hour observed) is stored in the ManagedWorkload's status, in `status.prediction.state`: gzipped JSON, base64-encoded, about 2.5 KB. It is written with each hourly observation. This means:
 
-- The engine survives operator restarts and leader changes, and the hour observed just before a restart isn't observed twice
+- The engine survives operator restarts and leader changes, and an hour observed before a restart isn't observed twice. The hour under way when the operator restarts is skipped
 - No external database, persistent volume, or ConfigMap is needed
 - Each workload has its own independent engine
 
@@ -123,9 +132,9 @@ State that can't be read, from an older version or a hand edit, is discarded wit
 
 Seasonal slots are keyed to wall-clock time, not to a running counter. The hour of day and day of week are counted in the operator's timezone (`--timezone`, UTC by default), so business hours stay in their slots when the clocks change for daylight saving. This means:
 
-- If a workload is paused for 6 hours, the model doesn't lose alignment. The next observation goes into the correct hour-of-day slot
-- While a workload is paused behind the [doorman](wake-on-request.md) (`WakeOnRequest=True`), each paused hour is recorded as zero demand: a request would have woken it, so an hour without one is an hour nobody asked for it. That's how the model learns that nights and weekends are quiet. A workload paused without the doorman records nothing while paused, since demand it can't see isn't zero
-- Monday 9am always maps to the same slot, regardless of gaps
+- If a workload is paused for 6 hours without the doorman, the model doesn't lose alignment. The next observation goes into the correct hour-of-day slot
+- An hour paused behind the doorman is recorded as no demand: that's how the model learns that nights and weekends are quiet
+- Monday 9am always maps to the same slot, regardless of gaps. In a timezone whose hours start at half or quarter past the hour in UTC, such as India's, hours, and the 15 minutes `autoResume` wakes ahead of one, are counted on the local clock
 
 ## Tuning
 

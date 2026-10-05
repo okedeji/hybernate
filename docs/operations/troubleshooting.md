@@ -43,7 +43,7 @@ A target scaled to zero replicas is not an error: it's recorded as zero usage.
 
 **Check 4: Is the forecast holding it awake?**
 
-A confident forecast that expects demand in the next hour defers the pause. While it does, the `IdleVetoed` condition is `True`, and its message says when the forecast expects demand; an `IdleVetoed` event marks when the veto began.
+A confident forecast that expects demand in the hour under way or the next defers the pause. While it does, the `IdleVetoed` condition is `True`, and its message says when the forecast expects demand; an `IdleVetoed` event marks when the veto began.
 
 ```bash
 kubectl get managedworkload my-api -n staging \
