@@ -18,6 +18,7 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -66,11 +67,70 @@ func TestAddresses(t *testing.T) {
 	}
 }
 
+// Whatever comes before the last @ can be a credential, whatever its form,
+// and so can a value whose key names a secret.
 func TestShown(t *testing.T) {
-	assert.Equal(t, "postgres://app:***@postgres:5432/shop", shown("postgres://app:secret@postgres:5432/shop?password=x"))
-	assert.Equal(t, "postgres://app@postgres:5432", shown("postgres://app@postgres:5432"), "no password to hide")
-	assert.Equal(t, "redis:6379", shown("redis:6379"))
+	tests := []struct {
+		raw, want string
+	}{
+		{"postgres://app:secret@postgres:5432/shop?password=x", "postgres://***@postgres:5432/shop"},
+		{"postgres://app@postgres:5432", "postgres://***@postgres:5432"},
+		{"admin:s3cr3t@redis:6379", "***@redis:6379"},
+		{"http://TOKEN@svc:8080", "http://***@svc:8080"},
+		{"https://user:p@ss:w0rd@api.internal/v1", "https://***@api.internal/v1"},
+		{"redis://:pa?ss@redis:6379", "redis://***@redis:6379"},
+		{"redis://:pa/ss@redis:6379/0", "redis://***@redis:6379/0"},
+		{"user:secret@[fd00::1]:5432", "***@[fd00::1]:5432"},
+		{"postgresql://u:p@[2001:db8::1]:5432/app", "postgresql://***@[2001:db8::1]:5432/app"},
+		{"mysql://root:hunter2@tcp(mysql:3306)/app", "mysql://***@tcp(mysql:3306)/app"},
+		{"amqp://guest:guest@rabbitmq:5672/vhost", "amqp://***@rabbitmq:5672/vhost"},
+		{"mongodb://u:p@mongo-0.mongo:27017,mongo-1.mongo:27017/app?authSource=admin",
+			"mongodb://***@mongo-0.mongo:27017,mongo-1.mongo:27017/app"},
+		{"http://search:9200?api_key=abc123", "http://search:9200"},
+		{"search:9200/x;password=abc", "search:9200/x;password=***"},
+		{"host=db user=app password=hunter2 dbname=shop", "host=db user=app password=*** dbname=shop"},
+		{"Server=db;User Id=sa;Password=hunter2;", "Server=db;User Id=sa;Password=***;"},
+		{"jdbc:postgresql://db:5432/orders?user=app&password=hunter2", "jdbc:postgresql://db:5432/orders"},
+		{"redis:6379", "redis:6379"},
+		{"keycloak:8080", "keycloak:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got := shown(tt.raw)
+			assert.Equal(t, tt.want, got)
+			for _, secret := range []string{"secret", "s3cr3t", "TOKEN", "p@ss", "w0rd", "pa", "hunter2", "abc"} {
+				if !strings.Contains(tt.want, secret) {
+					assert.NotContains(t, got, secret)
+				}
+			}
+		})
+	}
 	assert.Len(t, shown("kafka:9092,"+strings.Repeat("broker:9092,", 20)), maxAddressShown)
+}
+
+// What the scan reports is what the addresses it finds show, so a
+// credential in any of them stays hidden there too.
+func TestScanCluster_NeverShowsCredentials(t *testing.T) {
+	objs := []runtime.Object{
+		database("redis", testNamespace),
+		depService(testNamespace, "redis", false, map[string]string{"app": "redis"}),
+		appWithEnv("cache-user", []corev1.EnvVar{
+			{Name: "REDIS", Value: "admin:s3cr3t@redis:6379"},
+			{Name: "REDIS_URL", Value: "http://TOKEN123@redis:8080"},
+		}, nil),
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), scanOptions(testNamespace))
+
+	require.NoError(t, err)
+	deps := byName(report)["cache-user"].Dependencies
+	require.Len(t, deps, 1)
+	assert.Equal(t, "***@redis:6379", deps[0].Address)
+	out, err := json.Marshal(report)
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "s3cr3t")
+	assert.NotContains(t, string(out), "TOKEN123")
 }
 
 func depService(namespace, name string, headless bool, selector map[string]string) *corev1.Service {
@@ -195,7 +255,7 @@ func TestScanCluster_FindsDependencies(t *testing.T) {
 	got := byName(report)
 	assert.Equal(t, []Dependency{
 		{Namespace: testNamespace, Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", Via: "DATABASE_URL",
-			Address: "postgres://shop:***@postgres:5432/shop", Declared: true, Source: SourceEnvironment},
+			Address: "postgres://***@postgres:5432/shop", Declared: true, Source: SourceEnvironment},
 		{Namespace: messaging, Kind: v1alpha1.TargetKindStatefulSet, Name: "nats", Via: "NATS_URL",
 			Address: "nats://nats.messaging:4222", Source: SourceEnvironment},
 	}, got["checkout-api"].Dependencies,

@@ -19,6 +19,7 @@ package discovery
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -400,23 +401,31 @@ func declares(mw *v1alpha1.ManagedWorkload, namespace string, target workloadKey
 	return false
 }
 
-// shown is an address as the report shows it: any password replaced, the
-// query string, which can hold credentials, dropped, and long ones cut.
+// shown is an address as the report shows it: anything that can be a
+// credential hidden, and long ones cut. Everything before the last @ is a
+// user, a password, or a token, whatever its form, so it's replaced whole;
+// a query string or a key=value pair naming a secret has its value
+// replaced. The query string is then dropped, being no part of the address.
 func shown(raw string) string {
+	scheme := ""
 	if i := strings.Index(raw, "://"); i >= 0 {
-		rest := raw[i+3:]
-		if at := strings.LastIndex(rest, "@"); at >= 0 {
-			if user, _, ok := strings.Cut(rest[:at], ":"); ok {
-				rest = user + ":***" + rest[at:]
-			}
-		}
-		raw = raw[:i+3] + rest
+		scheme, raw = raw[:i+3], raw[i+3:]
 	}
-	if i := strings.Index(raw, "?"); i >= 0 {
+	if at := strings.LastIndex(raw, "@"); at >= 0 {
+		raw = "***" + raw[at:]
+	}
+	raw = secretValue.ReplaceAllString(raw, "${1}***")
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
 		raw = raw[:i]
 	}
+	raw = scheme + raw
 	if len(raw) > maxAddressShown {
 		raw = raw[:maxAddressShown-3] + "..."
 	}
 	return raw
 }
+
+// secretValue matches a key that names a credential, with its value, in a
+// query string or a list of key=value pairs.
+var secretValue = regexp.MustCompile(
+	`(?i)((?:^|[^a-z0-9])[a-z0-9_.-]*(?:pass|pwd|secret|token|key|auth|credential|signature)[a-z0-9_.-]*=)[^&;,\s]*`)
