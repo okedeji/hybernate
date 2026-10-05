@@ -18,12 +18,14 @@ package discovery
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -424,4 +426,38 @@ func TestScanCluster_ScaledByHandCouldSaveNothing(t *testing.T) {
 	assert.Equal(t, 1, report.Totals.ScaledToZero)
 	assert.NotContains(t, strings.Join(report.Notes, "\n"), "no CPU history")
 	assert.Zero(t, CouldSave(Workload{ScaledByHand: true, History: &History{MonthlyFreed: 50}}))
+}
+
+// A workload created partway through the window is replayed from when it
+// was created, so its monthly rate isn't diluted by hours before it existed.
+func TestScanCluster_ReplaysAYoungWorkloadFromItsCreation(t *testing.T) {
+	windowStart := scanTime.Add(-7 * 24 * time.Hour)
+	created := windowStart.Add(24 * time.Hour)
+	f := &fakePrometheus{from: windowStart, byNamespace: map[string][]series{testNamespace: {
+		{pod: "old-7d9f8c6b5-abcde", container: "main", cores: func(time.Time) float64 { return 0.5 }},
+		{pod: "young-7d9f8c6b5-abcde", container: "main", cores: func(t time.Time) float64 {
+			if t.Before(created) {
+				return math.NaN()
+			}
+			return 0
+		}},
+	}}}
+	objs := deploymentWithRollout("old", testNamespace, 1, 30*24*time.Hour)
+	young := deploymentWithRollout("young", testNamespace, 1, 6*24*time.Hour)
+	young[0].(*appsv1.Deployment).CreationTimestamp = metav1.NewTime(created)
+	objs = append(objs, young...)
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	h := byName(report)["young"].History
+	require.NotNil(t, h)
+	assert.InDelta(t, 6*24, h.Hours, 0.2, "replayed from its creation")
+	assert.InDelta(t, 6*24-1, h.SleepHours, 0.2, "asleep an hour after it started")
+	hourly := byName(report)["young"].HourlyCost
+	assert.InDelta(t, hourly*(6*24-1)/(6*24)*hoursPerMonth, h.MonthlyFreed, 0.01,
+		"nearly all of a month: it slept all but its first hour")
 }

@@ -23,6 +23,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,9 +62,19 @@ type scanOptions struct {
 	window         string
 	idleAfter      time.Duration
 	timeout        time.Duration
-	promURL        string
 	html           string
 	open           bool
+	prometheus     prometheusOptions
+}
+
+// prometheusOptions say where to read history from and how to reach it.
+type prometheusOptions struct {
+	url                string
+	selector           string
+	headers            []string
+	bearerTokenFile    string
+	caFile             string
+	insecureSkipVerify bool
 }
 
 // scanResult is a scan of one cluster, with the rules and prices it was
@@ -124,8 +135,13 @@ Examples:
   # One namespace, as JSON
   kubectl hybernate scan -n preview-42 -o json
 
-  # A month of history from a Prometheus outside the cluster
-  kubectl hybernate scan --window 30d --prometheus-url https://thanos.example.com
+  # A month of history from a Thanos that holds many clusters
+  kubectl hybernate scan --window 30d --prometheus-url https://thanos.example.com \
+    --prometheus-selector 'cluster="staging"'
+
+  # History from Grafana Mimir, for one tenant
+  kubectl hybernate scan --prometheus-url https://mimir.example.com/prometheus \
+    --prometheus-header 'X-Scope-OrgID: team-a'
 
   # Save the report to send around
   kubectl hybernate scan --html workload-scan.html
@@ -147,10 +163,14 @@ Examples:
 			if opts.timeout <= 0 {
 				return errors.New("--timeout must be more than zero")
 			}
+			prom, err := prometheusFrom(opts.prometheus)
+			if err != nil {
+				return err
+			}
 			opts.ownCPUPrice, opts.ownMemoryPrice = ownPrices(cmd)
 			ctx, cancel := context.WithTimeout(cmd.Context(), opts.timeout)
 			defer cancel()
-			result, err := scanCluster(ctx, window, opts)
+			result, err := scanCluster(ctx, window, prom, opts)
 			if errors.Is(err, context.DeadlineExceeded) {
 				return fmt.Errorf("the scan didn't finish within --timeout %s: the cluster's API server answered too "+
 					"slowly; scan fewer namespaces with -n, or pass a longer --timeout", opts.timeout)
@@ -188,13 +208,104 @@ Examples:
 		"How long without activity makes a workload idle, as Hybernate's idleAfter; managed workloads use their own")
 	cmd.Flags().DurationVar(&opts.timeout, "timeout", opts.timeout,
 		"How long the scan may take before it gives up")
-	cmd.Flags().StringVar(&opts.promURL, "prometheus-url", "",
-		"Prometheus API to read history from, such as Thanos or Mimir (defaults to one found in the cluster)")
+	addPrometheusFlags(cmd, &opts.prometheus)
 	cmd.Flags().StringVar(&opts.html, "html", "",
 		"Save the HTML report to this file, to share (defaults to a temporary file when it opens in a browser)")
 	cmd.Flags().BoolVar(&opts.open, "open", opts.open,
 		"Open the HTML report in your browser, when the table is shown in a terminal")
 	return cmd
+}
+
+func addPrometheusFlags(cmd *cobra.Command, o *prometheusOptions) {
+	cmd.Flags().StringVar(&o.url, "prometheus-url", "",
+		"Prometheus API to read history from, such as Thanos or Mimir (defaults to one found in the cluster). "+
+			"Amazon and Google Managed Prometheus need requests signed with SigV4 or OAuth, which the scan "+
+			"doesn't do; point this at a signing proxy in front of them")
+	cmd.Flags().StringVar(&o.selector, "prometheus-selector", "",
+		`Label matchers added to every history query, such as 'cluster="prod"', for a Prometheus that holds `+
+			`more than one cluster`)
+	cmd.Flags().StringArrayVar(&o.headers, "prometheus-header", nil,
+		`Header to send to --prometheus-url, as "Name: value", such as "X-Scope-OrgID: tenant" for Mimir; repeat for several`)
+	cmd.Flags().StringVar(&o.bearerTokenFile, "prometheus-bearer-token-file", "",
+		"File holding a bearer token to send to --prometheus-url")
+	cmd.Flags().StringVar(&o.caFile, "prometheus-ca-file", "",
+		"PEM file of CA certificates to trust for --prometheus-url, besides the system's")
+	cmd.Flags().BoolVar(&o.insecureSkipVerify, "prometheus-insecure-skip-verify", false,
+		"Don't verify --prometheus-url's certificate")
+}
+
+// prometheusSetup is how the scan reaches Prometheus, checked before the
+// scan starts so a mistyped flag fails at once.
+type prometheusSetup struct {
+	url      string
+	selector discovery.Selector
+	client   *http.Client
+	header   http.Header
+}
+
+func prometheusFrom(o prometheusOptions) (prometheusSetup, error) {
+	selector, err := discovery.ParseSelector(o.selector)
+	if err != nil {
+		return prometheusSetup{}, fmt.Errorf("--prometheus-selector: %w", err)
+	}
+	setup := prometheusSetup{url: o.url, selector: selector}
+	if o.url == "" {
+		if len(o.headers) > 0 || o.bearerTokenFile != "" || o.caFile != "" || o.insecureSkipVerify {
+			return prometheusSetup{}, errors.New("--prometheus-header, --prometheus-bearer-token-file, " +
+				"--prometheus-ca-file and --prometheus-insecure-skip-verify are for --prometheus-url; a Prometheus " +
+				"found in the cluster is reached through the API server with your kubeconfig")
+		}
+		return setup, nil
+	}
+	setup.header, err = parseHeaders(o.headers)
+	if err != nil {
+		return prometheusSetup{}, err
+	}
+	if o.bearerTokenFile != "" {
+		if setup.header.Get("Authorization") != "" {
+			return prometheusSetup{}, errors.New("--prometheus-bearer-token-file and an Authorization " +
+				"--prometheus-header can't both be given")
+		}
+		token, err := os.ReadFile(o.bearerTokenFile)
+		if err != nil {
+			return prometheusSetup{}, fmt.Errorf("--prometheus-bearer-token-file: %w", err)
+		}
+		setup.header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+	}
+	setup.client, err = discovery.NewHTTPClient(discovery.HTTPOptions{CAFile: o.caFile,
+		InsecureSkipVerify: o.insecureSkipVerify})
+	if err != nil {
+		return prometheusSetup{}, fmt.Errorf("--prometheus-ca-file: %w", err)
+	}
+	return setup, nil
+}
+
+// parseHeaders reads "Name: value" headers.
+func parseHeaders(raw []string) (http.Header, error) {
+	header := http.Header{}
+	for _, h := range raw {
+		name, value, ok := strings.Cut(h, ":")
+		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
+		if !ok || !validHeaderName(name) || strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf(`--prometheus-header %q isn't "Name: value"`, h)
+		}
+		header.Add(name, value)
+	}
+	return header, nil
+}
+
+// validHeaderName says name is an HTTP token, as a header name must be.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		alphanumeric := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if !alphanumeric && !strings.ContainsRune("!#$%&'*+-.^_`|~", r) {
+			return false
+		}
+	}
+	return true
 }
 
 // incompleteError fails a scan that couldn't read all it should have, once
@@ -226,7 +337,8 @@ func parseWindow(s string) (time.Duration, error) {
 	return d, nil
 }
 
-func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (scanResult, error) {
+func scanCluster(ctx context.Context, window time.Duration, prom prometheusSetup, opts scanOptions) (
+	scanResult, error) {
 	config, at, err := opts.kube.restConfig(ctx)
 	if err != nil {
 		return scanResult{}, err
@@ -255,7 +367,10 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	var historyNote string
 	if window > 0 {
 		var err error
-		history, err = historySource(ctx, c, config, namespaces, opts.promURL)
+		history, err = historySource(ctx, c, config, namespaces, prom)
+		if prom.url != "" && err != nil {
+			return scanResult{}, fmt.Errorf("reading history from --prometheus-url: %w", err)
+		}
 		var forbidden *discovery.ProxyForbiddenError
 		if errors.As(err, &forbidden) {
 			scan.HistoryAccess = historyAccess(ctx, c, forbidden)
@@ -299,12 +414,15 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 
 // historySource finds the Prometheus to replay history from, or says why
 // there's none to use.
-func historySource(ctx context.Context, c client.Client, config *rest.Config, namespaces []string, promURL string) (
-	*discovery.Prometheus, error) {
+func historySource(ctx context.Context, c client.Client, config *rest.Config, namespaces []string,
+	setup prometheusSetup) (*discovery.Prometheus, error) {
 	var prom *discovery.Prometheus
-	if promURL != "" {
-		p, err := discovery.NewPrometheusURL(promURL, &http.Client{})
+	if setup.url != "" {
+		p, err := discovery.NewPrometheusURL(setup.url, setup.client, setup.header)
 		if err != nil {
+			return nil, err
+		}
+		if err := p.Check(ctx); err != nil {
 			return nil, err
 		}
 		prom = p
@@ -319,13 +437,11 @@ func historySource(ctx context.Context, c client.Client, config *rest.Config, na
 				"pass --prometheus-url for one elsewhere")
 		}
 		if err != nil {
-			return nil, fmt.Errorf("can't look for Prometheus: %w", err)
+			return nil, err
 		}
 		prom = p
 	}
-	if err := prom.Check(ctx); err != nil {
-		return nil, err
-	}
+	prom.Selector = setup.selector
 	return prom, nil
 }
 
@@ -341,8 +457,8 @@ func historyAccess(ctx context.Context, c client.Client, f *discovery.ProxyForbi
 	}
 	const role = "hybernate-scan"
 	return []string{
-		fmt.Sprintf("kubectl create role %s -n %s --verb=get --resource=services/proxy --resource-name=%s:%s",
-			role, f.Namespace, f.Service, f.Port),
+		fmt.Sprintf("kubectl create role %s -n %s --verb=get --resource=services/proxy --resource-name=%s",
+			role, f.Namespace, f.ResourceName()),
 		fmt.Sprintf("kubectl create rolebinding %s -n %s --role=%s %s", role, f.Namespace, role, subject),
 	}
 }

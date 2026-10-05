@@ -305,6 +305,11 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 				duration(covered), duration(opts.Window)))
 		}
 	}
+	if opts.History != nil {
+		if note := opts.History.mixedSourcesNote(); note != "" {
+			report.Notes = append(report.Notes, note)
+		}
+	}
 	if len(noHistory) > 0 {
 		report.Notes = append(report.Notes, fmt.Sprintf("%s no CPU history in Prometheus, so only their CPU right now is known: %s",
 			plural(len(noHistory), "workload has", "workloads have"), listSome(noHistory)))

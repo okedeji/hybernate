@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -347,6 +349,18 @@ func TestHistoryAccess(t *testing.T) {
 	}
 }
 
+// A Prometheus served over TLS is reached at the proxy's https: name, which
+// is the name a Role must grant.
+func TestHistoryAccess_HTTPS(t *testing.T) {
+	forbidden := &discovery.ProxyForbiddenError{Namespace: "monitoring", Service: "prometheus", Port: "https",
+		Scheme: "https"}
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	got := historyAccess(context.Background(), c, forbidden)
+
+	assert.Contains(t, got[0], "--resource-name=https:prometheus:https")
+}
+
 func TestWriteTable_HistoryAccess(t *testing.T) {
 	cluster := sampleCluster()
 	cluster.HistoryAccess = []string{"kubectl create role x", "kubectl create rolebinding x"}
@@ -581,6 +595,53 @@ func TestNextSteps_SkipProtected(t *testing.T) {
 				assert.NotContains(t, string(step), "payments")
 			}
 			assert.NotContains(t, table.String(), "payments")
+		})
+	}
+}
+
+func TestParseHeaders(t *testing.T) {
+	got, err := parseHeaders([]string{"X-Scope-OrgID: team-a", "x-extra:  two words  "})
+	require.NoError(t, err)
+	assert.Equal(t, "team-a", got.Get("X-Scope-OrgID"))
+	assert.Equal(t, "two words", got.Get("X-Extra"))
+
+	for _, bad := range []string{"no colon", ": no name", "bad name: x", "X-A: one\rtwo"} {
+		_, err := parseHeaders([]string{bad})
+		assert.Error(t, err, bad)
+	}
+}
+
+func TestPrometheusFrom(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("s3cret\n"), 0o600))
+
+	setup, err := prometheusFrom(prometheusOptions{url: "https://mimir.example.com", selector: `cluster="prod"`,
+		headers: []string{"X-Scope-OrgID: team-a"}, bearerTokenFile: tokenFile})
+	require.NoError(t, err)
+	assert.Equal(t, discovery.Selector{`cluster="prod"`}, setup.selector)
+	assert.Equal(t, "Bearer s3cret", setup.header.Get("Authorization"))
+	assert.Equal(t, "team-a", setup.header.Get("X-Scope-OrgID"))
+	require.NotNil(t, setup.client)
+	assert.NotZero(t, setup.client.Timeout)
+
+	tests := []struct {
+		name string
+		opts prometheusOptions
+		want string
+	}{
+		{"a bad selector", prometheusOptions{selector: `cluster="prod"} or vector(1)`}, "--prometheus-selector"},
+		{"auth without a URL", prometheusOptions{headers: []string{"X-A: b"}}, "are for --prometheus-url"},
+		{"two Authorizations", prometheusOptions{url: "https://p", headers: []string{"Authorization: Basic x"},
+			bearerTokenFile: tokenFile}, "can't both be given"},
+		{"a missing token file", prometheusOptions{url: "https://p", bearerTokenFile: tokenFile + "-missing"},
+			"--prometheus-bearer-token-file"},
+		{"a missing CA file", prometheusOptions{url: "https://p", caFile: tokenFile + "-missing"}, "--prometheus-ca-file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := prometheusFrom(tt.opts)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
 }
