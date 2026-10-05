@@ -18,6 +18,10 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - description: Saved by pausing this month (UTC)
+      jsonPath: .status.cost.savedThisMonth
+      name: Saved
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -361,48 +365,39 @@ spec:
                 description: Cost holds accumulated resource cost data for the current
                   month.
                 properties:
-                  currentMonthCPUHours:
+                  awakeCPUHours:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: CurrentMonthCPUHours is total vCPU-hours consumed
-                      this month.
-                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                    x-kubernetes-int-or-string: true
-                  currentMonthMemoryHours:
-                    anyOf:
-                    - type: integer
-                    - type: string
-                    description: CurrentMonthMemoryHours is total GiB-hours of memory
-                      consumed this month.
-                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                    x-kubernetes-int-or-string: true
-                  currentMonthStorageHours:
-                    anyOf:
-                    - type: integer
-                    - type: string
-                    description: CurrentMonthStorageHours is total GiB-hours of PVC
-                      storage provisioned this month.
-                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                    x-kubernetes-int-or-string: true
-                  estimatedCostWithoutManagement:
                     description: |-
-                      EstimatedCostWithoutManagement is what this workload would have cost
-                      without Hybernate — the sum of estimated cost and estimated savings.
+                      AwakeCPUHours and AwakeMemoryHours are the vCPU-hours and GiB-hours
+                      the workload's replicas requested while it was awake, in any phase
+                      but Paused.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  awakeMemoryHours:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  costThisMonth:
+                    description: CostThisMonth is the awake hours and the storage
+                      hours, priced.
                     type: string
-                  estimatedMonthlyCost:
+                  costWithoutHybernateThisMonth:
                     description: |-
-                      EstimatedMonthlyCost is the projected cost for the full month based
-                      on current usage patterns. Set to "pending" on day 1 of the month.
-                    type: string
-                  estimatedMonthlySavings:
-                    description: |-
-                      EstimatedMonthlySavings is the projected dollar amount saved by Hybernate
-                      pauses this month. These savings are only
-                      realized when freed resources lead to node removal by a cluster autoscaler.
+                      CostWithoutHybernateThisMonth is what the workload would have cost
+                      this month had it never been paused: CostThisMonth plus
+                      SavedThisMonth.
                     type: string
                   lastAccumulatedAt:
-                    description: LastAccumulatedAt is when costs were last accumulated.
+                    description: |-
+                      LastAccumulatedAt is when the totals were last brought up to date:
+                      at every phase change, so time counts in the phase it was spent in,
+                      and every few minutes in between. A longer gap, such as while the
+                      operator wasn't running, counts as two hours at most, since what the
+                      workload did meanwhile isn't known.
                     format: date-time
                     type: string
                   listRates:
@@ -440,11 +435,46 @@ spec:
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                     type: object
+                  pausedCPUHours:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      PausedCPUHours and PausedMemoryHours are the vCPU-hours and GiB-hours
+                      the replicas Hybernate paused had requested, for as long as they were
+                      paused: what pausing freed.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  pausedMemoryHours:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  pricedAt:
+                    description: |-
+                      PricedAt is when what a replica requests and ListRates were last
+                      read, from the workload's pods and their nodes. They're read again
+                      hourly while it's awake, and when its pod template changes.
+                    format: date-time
+                    type: string
+                  pricedTemplateHash:
+                    description: PricedTemplateHash is the pod template's hash at
+                      PricedAt.
+                    type: string
+                  projectedMonthlyCost:
+                    description: |-
+                      ProjectedMonthlyCost and ProjectedMonthlySavings are CostThisMonth
+                      and SavedThisMonth carried from Tracked to the whole month at the
+                      same rate. They're "pending" until a day has been tracked, since a
+                      workload's pattern is daily.
+                    type: string
+                  projectedMonthlySavings:
+                    type: string
                   resourceReduction:
                     description: |-
-                      ResourceReduction tracks the concrete resources freed by Hybernate actions.
-                      Unlike cost estimates, these values are always accurate regardless of
-                      whether a cluster autoscaler removes the underlying nodes.
+                      ResourceReduction is what the current pause freed. Unlike the dollar
+                      figures, it doesn't depend on a cluster autoscaler removing nodes.
                     properties:
                       cpuMillis:
                         description: CPUMillis is the total CPU millicores freed by
@@ -465,13 +495,71 @@ spec:
                     - memoryBytes
                     - replicas
                     type: object
+                  running:
+                    description: |-
+                      Running is what the workload ran when the totals were last brought
+                      up to date while it was awake, which its awake time is priced on.
+                      Its replicas and storage are read each time, and what a replica
+                      requests at PricedAt.
+                    properties:
+                      cpuMillis:
+                        description: |-
+                          CPUMillis and MemoryBytes are what one replica's pod requests,
+                          sidecars injected when it was created included.
+                        format: int64
+                        type: integer
+                      memoryBytes:
+                        format: int64
+                        type: integer
+                      replicas:
+                        description: Replicas is the replica count at the time of
+                          the snapshot.
+                        format: int32
+                        type: integer
+                      storageBytes:
+                        description: |-
+                          StorageBytes is the capacity of the PersistentVolumeClaims the
+                          workload's pods mount, in all.
+                        format: int64
+                        type: integer
+                    required:
+                    - cpuMillis
+                    - memoryBytes
+                    - replicas
+                    - storageBytes
+                    type: object
+                  savedThisMonth:
+                    description: |-
+                      SavedThisMonth is the paused hours, priced. It becomes money only
+                      once a cluster autoscaler removes the capacity a pause frees.
+                    type: string
+                  storageHours:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      StorageHours is the GiB-hours its claims provisioned, awake or
+                      paused: a pause doesn't free storage.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  tracked:
+                    description: |-
+                      Tracked is how much of the month the totals cover. It's less than
+                      the time since the month began when the workload was created during
+                      the month, or when the operator wasn't running.
+                    type: string
                 required:
-                - currentMonthCPUHours
-                - currentMonthMemoryHours
-                - currentMonthStorageHours
-                - estimatedCostWithoutManagement
-                - estimatedMonthlyCost
-                - estimatedMonthlySavings
+                - awakeCPUHours
+                - awakeMemoryHours
+                - costThisMonth
+                - costWithoutHybernateThisMonth
+                - pausedCPUHours
+                - pausedMemoryHours
+                - projectedMonthlyCost
+                - projectedMonthlySavings
+                - savedThisMonth
+                - storageHours
+                - tracked
                 type: object
               doorman:
                 description: |-
@@ -509,9 +597,26 @@ spec:
                 properties:
                   estimatedSavings:
                     description: |-
-                      EstimatedSavings is what the replicas freed during Slept would have
-                      cost, at the workload's cost rates.
+                      EstimatedSavings is the freed hours priced at the workload's cost
+                      rates, to the cent. It's for display: the hours are the record.
                     type: string
+                  freedCPUHours:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      FreedCPUHours and FreedMemoryHours are the vCPU-hours and GiB-hours
+                      the replicas requested during Slept: what the would-be pauses would
+                      have freed. They're kept to a billionth of an hour, so short pauses
+                      of small workloads add up.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  freedMemoryHours:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
                   pauses:
                     description: |-
                       Pauses is how many times the workload would have been paused,
@@ -524,13 +629,12 @@ spec:
                       began, which is what pausing it would free.
                     properties:
                       cpuMillis:
-                        description: CPUMillis is total CPU request in millicores
-                          per replica.
+                        description: |-
+                          CPUMillis and MemoryBytes are what one replica's pod requests,
+                          sidecars injected when it was created included.
                         format: int64
                         type: integer
                       memoryBytes:
-                        description: MemoryBytes is total memory request in bytes
-                          per replica.
                         format: int64
                         type: integer
                       replicas:
@@ -539,8 +643,9 @@ spec:
                         format: int32
                         type: integer
                       storageBytes:
-                        description: StorageBytes is total PVC provisioned capacity
-                          in bytes.
+                        description: |-
+                          StorageBytes is the capacity of the PersistentVolumeClaims the
+                          workload's pods mount, in all.
                         format: int64
                         type: integer
                     required:
@@ -561,6 +666,8 @@ spec:
                     type: string
                 required:
                 - estimatedSavings
+                - freedCPUHours
+                - freedMemoryHours
                 - pauses
                 - since
                 - slept
@@ -683,13 +790,12 @@ spec:
                       for cost savings calculation.
                     properties:
                       cpuMillis:
-                        description: CPUMillis is total CPU request in millicores
-                          per replica.
+                        description: |-
+                          CPUMillis and MemoryBytes are what one replica's pod requests,
+                          sidecars injected when it was created included.
                         format: int64
                         type: integer
                       memoryBytes:
-                        description: MemoryBytes is total memory request in bytes
-                          per replica.
                         format: int64
                         type: integer
                       replicas:
@@ -698,8 +804,9 @@ spec:
                         format: int32
                         type: integer
                       storageBytes:
-                        description: StorageBytes is total PVC provisioned capacity
-                          in bytes.
+                        description: |-
+                          StorageBytes is the capacity of the PersistentVolumeClaims the
+                          workload's pods mount, in all.
                         format: int64
                         type: integer
                     required:
