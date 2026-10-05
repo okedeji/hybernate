@@ -57,7 +57,7 @@ Each check runs in this order:
 1. `desiredState` is set: the workload is under manual control, and automation does nothing.
 2. `active-until` is in the future: stay awake.
 3. The last activity is less than `idleAfter` ago: stay awake.
-4. The [forecast](forecasting.md) is confident (`DailyActive` or later) and predicts demand above `cpuThreshold` in the next hour: stay awake.
+4. The [forecast](forecasting.md) is confident (`DailyActive` or later) and predicts demand above `cpuThreshold` in the next hour: stay awake. The `IdleVetoed` condition is `True` while this holds the pause back.
 5. Another workload that [depends on](dependencies.md) this one is awake, or the dependencies form a cycle: stay awake.
 6. Otherwise the clock has run out. The phase becomes `Idle` and the idle action runs.
 

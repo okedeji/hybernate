@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func TestNextFor(t *testing.T) {
 			w := statusWorkloadObj("ns", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, time.Hour)
 			tt.mutate(w)
 
-			assert.Equal(t, tt.want, nextFor(w, holds{}, statusNow))
+			assert.Equal(t, tt.want, nextFor(w, time.Time{}, statusNow))
 		})
 	}
 }
@@ -216,10 +217,10 @@ func TestNextFor_WhatKeepsItUp(t *testing.T) {
 		}
 	}
 	tests := []struct {
-		name   string
-		mutate func(*v1alpha1.ManagedWorkload)
-		holds  holds
-		want   string
+		name              string
+		mutate            func(*v1alpha1.ManagedWorkload)
+		targetActiveUntil time.Time
+		want              string
 	}{
 		{name: "no idlePolicy, with a pause time left from when it had one", mutate: func(w *v1alpha1.ManagedWorkload) {
 			overdue(w)
@@ -246,12 +247,21 @@ func TestNextFor_WhatKeepsItUp(t *testing.T) {
 		{name: "a dependsOn cycle",
 			mutate: withCondition(condition("DependencyCycle", metav1.ConditionTrue, "DependencyCycle", "")),
 			want:   "won't pause: dependsOn cycle"},
-		{name: "vetoed by the forecast", mutate: overdue, holds: holds{vetoedAt: statusNow.Add(-time.Minute)},
-			want: "held awake by the forecast"},
-		{name: "a veto from before this idle spell doesn't hold", mutate: overdue,
-			holds: holds{vetoedAt: statusNow.Add(-2 * time.Hour)}, want: "overdue to pause"},
+		{name: "vetoed by the forecast",
+			mutate: withCondition(condition("IdleVetoed", metav1.ConditionTrue, "ForecastExpectsDemand", "")),
+			want:   "held awake by the forecast"},
+		{name: "a veto that's over doesn't hold",
+			mutate: withCondition(condition("IdleVetoed", metav1.ConditionFalse, "NotVetoed", "")),
+			want:   "overdue to pause"},
+		{name: "activity since the veto",
+			mutate: func(w *v1alpha1.ManagedWorkload) {
+				w.Status.Activity = activity(v1alpha1.ActivitySourceCPU, 0, 20*time.Minute)
+				w.Status.Conditions = []metav1.Condition{
+					condition("IdleVetoed", metav1.ConditionTrue, "ForecastExpectsDemand", "")}
+			},
+			want: "pauses in 20m"},
 		{name: "active-until on the workload itself", mutate: overdue,
-			holds: holds{activeUntil: statusNow.Add(3 * time.Hour)}, want: "held awake for 3h"},
+			targetActiveUntil: statusNow.Add(3 * time.Hour), want: "held awake for 3h"},
 		{name: "idle", mutate: func(w *v1alpha1.ManagedWorkload) {
 			overdue(w)
 			w.Status.Phase = v1alpha1.PhaseIdle
@@ -273,7 +283,7 @@ func TestNextFor_WhatKeepsItUp(t *testing.T) {
 			w := statusWorkloadObj("ns", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, time.Hour)
 			tt.mutate(w)
 
-			assert.Equal(t, tt.want, nextFor(w, tt.holds, statusNow))
+			assert.Equal(t, tt.want, nextFor(w, tt.targetActiveUntil, statusNow))
 		})
 	}
 }
@@ -301,11 +311,22 @@ func TestStatus_ActiveUntilOnTheWorkload(t *testing.T) {
 	assert.Equal(t, "held awake for 2h", onlyWorkload(t, c).Next)
 }
 
+// The veto is read from the ManagedWorkload's condition, so it shows for as
+// long as it lasts, after its one event has aged out, and without access to
+// events.
 func TestStatus_ForecastVeto(t *testing.T) {
 	w := statusWorkloadObj("shop", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, time.Hour)
 	w.Status.Activity = activity(v1alpha1.ActivitySourceCPU, 2*time.Hour, -time.Hour)
-	c := newStatusClient(t, interceptor.Funcs{}, w, statusEvent("shop", "api", "IdleVetoed",
-		"api: idle, but the forecast expects demand within the hour (40% of requests); not pausing yet", 2*time.Minute))
+	w.Status.Conditions = []metav1.Condition{condition("IdleVetoed", metav1.ConditionTrue, "ForecastExpectsDemand",
+		"idle, but the forecast expects demand at 40% of requests in the hour from 13:00 UTC; not pausing yet")}
+	forbidEvents := interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*corev1.EventList); ok {
+				return apierrors.NewForbidden(corev1.Resource("events"), "", errors.New("no access"))
+			}
+			return c.List(ctx, list, opts...)
+		}}
+	c := newStatusClient(t, forbidEvents, w)
 
 	assert.Equal(t, "held awake by the forecast", onlyWorkload(t, c).Next)
 }

@@ -154,6 +154,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	if now := r.now(); r.metrics != nil && !engine.Observed(now) {
 		metric, err := r.observedCPU(ctx, workload)
 		if err != nil {
+			r.clearIdleVeto(workload)
 			return r.reportMetricsUnavailable(ctx, workload, err)
 		}
 		r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionTrue, "MetricsReported", "")
@@ -166,6 +167,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	// If manual desiredState is set, prediction still learns but
 	// automation does not act. Status is updated above.
 	if workload.Spec.DesiredState != nil {
+		r.clearIdleVeto(workload)
 		if err := r.reportManualOverride(ctx, workload); err != nil {
 			return nil, err
 		}
@@ -174,6 +176,7 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	r.clearCondition(workload, conditionManualOverride, "Automated")
 
 	if workload.Spec.IdlePolicy == nil {
+		r.clearIdleVeto(workload)
 		if phase == v1alpha1.PhaseIdle {
 			if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "NoIdlePolicy"); err != nil {
 				return nil, err
@@ -211,6 +214,7 @@ func (r *Reconciler) reportManualOverride(ctx context.Context, workload *v1alpha
 // it's looked at again when that forecast could next change its mind.
 func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	recheck := &ctrl.Result{RequeueAfter: pausedRecheck(r.now())}
+	r.clearIdleVeto(workload)
 	if workload.Spec.DesiredState != nil {
 		return recheck, r.reportManualOverride(ctx, workload)
 	}

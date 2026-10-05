@@ -55,6 +55,7 @@ The operator sets standard Kubernetes conditions on the CR, each with `Reason`, 
 | `TargetAvailable` | The Deployment or StatefulSet exists |
 | `MetricsAvailable` | CPU can be measured, so the activity clock can run |
 | `PrometheusAvailable` | The Prometheus activity queries answer, when configured |
+| `IdleVetoed` | It's idle, but a confident forecast expects demand within the hour, so the pause waits; the message says when |
 | `WakeOnRequest` | Requests to the paused workload's Services wake it |
 | `HeldByDependents` | It's kept awake for the workloads that depend on it |
 | `WaitingForDependencies` | Its resume waits for a dependency to be Ready |

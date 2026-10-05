@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,10 +30,13 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/forecast"
@@ -294,6 +298,91 @@ func TestActivityClock_ForecastVeto(t *testing.T) {
 			assert.Equal(t, tt.wantPause, pauser.pauseCalls == 1)
 		})
 	}
+}
+
+func vetoEvents(recorder *events.FakeRecorder) int {
+	n := 0
+	for len(recorder.Events) > 0 {
+		if strings.Contains(<-recorder.Events, ReasonIdleVetoed) {
+			n++
+		}
+	}
+	return n
+}
+
+// A veto lasts as long as the forecast expects demand, and the clock checks
+// every minute meanwhile. The condition says so throughout; the event marks
+// only its beginning.
+func TestActivityClock_ForecastVetoIsACondition(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	engine := &stubForecaster{phase: forecast.DailyActive, predictValue: 300}
+	metrics := idleCPU
+	pauser := &stubPauser{pauseDone: true}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &metrics, pauser: pauser})
+	recorder := r.Recorder.(*events.FakeRecorder)
+
+	for range 3 {
+		_, err := r.reconcileAutomation(context.Background(), workload, target)
+		require.NoError(t, err)
+	}
+
+	cond := meta.FindStatusCondition(workload.Status.Conditions, conditionIdleVetoed)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "ForecastExpectsDemand", cond.Reason)
+	assert.Contains(t, cond.Message, "30% of requests in the hour from 13:00 UTC", "says when demand is expected")
+	assert.Equal(t, 1, vetoEvents(recorder), "one event for the veto, not one a minute")
+	assert.Zero(t, pauser.pauseCalls)
+	written := getWorkload(t, r, "api")
+	assert.True(t, meta.IsStatusConditionTrue(written.Status.Conditions, conditionIdleVetoed), "and it's written")
+
+	engine.predictValue = 20
+	_, err := r.reconcileAutomation(context.Background(), workload, target)
+	require.NoError(t, err)
+
+	assert.True(t, meta.IsStatusConditionFalse(workload.Status.Conditions, conditionIdleVetoed), "the veto is over")
+	assert.Equal(t, 1, pauser.pauseCalls)
+}
+
+// The event follows the write that records the veto, so a conflict doesn't
+// announce one veto twice.
+func TestActivityClock_ForecastVetoEventFollowsTheWrite(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	engine := &stubForecaster{phase: forecast.DailyActive, predictValue: 300}
+	metrics := idleCPU
+	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &metrics})
+	recorder := r.Recorder.(*events.FakeRecorder)
+	fail := true
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if fail {
+				return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("managedworkloads").GroupResource(), obj.GetName(), errors.New("stale"))
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		}})
+
+	_, err := r.reconcileAutomation(context.Background(), workload.DeepCopy(), target)
+	require.Error(t, err)
+	assert.Zero(t, vetoEvents(recorder), "nothing is announced until it's recorded")
+
+	fail = false
+	_, err = r.reconcileAutomation(context.Background(), workload, target)
+	require.NoError(t, err)
+	assert.Equal(t, 1, vetoEvents(recorder))
+}
+
+func TestForecastHourAhead(t *testing.T) {
+	kolkata, err := time.LoadLocation("Asia/Kolkata")
+	require.NoError(t, err)
+	r := &Reconciler{clock: func() time.Time { return fixedTime.Add(10 * time.Minute) }}
+
+	assert.Equal(t, fixedTime.Add(time.Hour), r.forecastHourAhead().UTC(), "13:00 UTC, the hour an hour from 12:10")
+
+	r.Timezone = kolkata
+	assert.Equal(t, fixedTime.Add(30*time.Minute), r.forecastHourAhead().UTC(),
+		"18:00 in Kolkata: its hours start at half past in UTC")
 }
 
 func TestActivityClock_DryRunReportsIdleOnceWithoutPausing(t *testing.T) {

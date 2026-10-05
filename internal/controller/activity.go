@@ -54,6 +54,8 @@ const (
 
 	defaultIdleAfter    = 1 * time.Hour
 	defaultCPUThreshold = 10
+
+	conditionIdleVetoed = "IdleVetoed"
 )
 
 // activityMemo keeps each workload's latest clock between status writes.
@@ -370,6 +372,12 @@ func podTemplateHash(target client.Object) string {
 // stays Idle and reports the pause it would make; otherwise it pauses.
 func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object, engine forecaster) (*ctrl.Result, error) {
 	now := r.now()
+	vetoed := false
+	defer func() {
+		if !vetoed {
+			r.clearIdleVeto(workload)
+		}
+	}()
 	obs := r.observeActivity(ctx, workload, target)
 	pauseAt := workload.Status.Activity.PauseAt.Time
 
@@ -397,10 +405,9 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		return &ctrl.Result{RequeueAfter: nextCheck(now, pauseAt, obs.activeUntil)}, nil
 	}
 
-	if vetoed, predicted := r.forecastVeto(ctx, workload, engine); vetoed {
-		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleVetoed, actionEvaluateIdle,
-			"idle, but the forecast expects demand within the hour (%.0f%% of requests); not pausing yet", predicted)
-		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+	var predicted float64
+	if vetoed, predicted = r.forecastVeto(ctx, workload, engine); vetoed {
+		return r.reportIdleVetoed(ctx, workload, predicted)
 	}
 
 	if held, err := r.dependencyHold(ctx, workload); held != nil || err != nil {
@@ -440,6 +447,40 @@ func (r *Reconciler) reportActivityResumed(workload *v1alpha1.ManagedWorkload, s
 	r.emitEvent(workload, true, "Normal", ReasonActivityResumed, actionEvaluateIdle,
 		"activity resumed (%s): would have slept %s, freeing %s; %s",
 		source, roundedDuration(slept), cost.FormatDollars(freed), dryRunSummary(workload.Status.DryRun))
+}
+
+// reportIdleVetoed holds back a pause because the forecast expects demand
+// soon. The condition says so for as long as the veto lasts. The event
+// marks it beginning, and is sent once the condition is written, so a
+// failed write doesn't announce it twice.
+func (r *Reconciler) reportIdleVetoed(ctx context.Context, workload *v1alpha1.ManagedWorkload, predicted float64) (*ctrl.Result, error) {
+	began := !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionIdleVetoed)
+	msg := fmt.Sprintf("idle, but the forecast expects demand at %.0f%% of requests in the hour from %s; not pausing yet",
+		predicted, r.forecastHourAhead().UTC().Format("15:04 UTC"))
+	r.setCondition(workload, conditionIdleVetoed, metav1.ConditionTrue, "ForecastExpectsDemand", msg)
+	if began {
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return nil, fmt.Errorf("recording the forecast's veto: %w", err)
+		}
+		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleVetoed, actionEvaluateIdle, "%s", msg)
+	}
+	return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+}
+
+func (r *Reconciler) clearIdleVeto(workload *v1alpha1.ManagedWorkload) {
+	r.clearCondition(workload, conditionIdleVetoed, "NotVetoed")
+}
+
+// forecastHourAhead is when the hour the veto forecasts begins: the hour
+// an hour from now, in the forecast's timezone, whose hours needn't start
+// on the hour in UTC.
+func (r *Reconciler) forecastHourAhead() time.Time {
+	loc := r.Timezone
+	if loc == nil {
+		loc = time.UTC
+	}
+	t := r.now().In(loc).Add(time.Hour)
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, loc)
 }
 
 // forecastVeto defers a pause when a confident forecast expects demand in

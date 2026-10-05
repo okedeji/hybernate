@@ -230,14 +230,6 @@ type targetKey struct {
 	name      string
 }
 
-// holds are what keeps a workload awake that its ManagedWorkload doesn't
-// record: an active-until on the workload itself, and a forecast veto,
-// which only shows in events.
-type holds struct {
-	activeUntil time.Time
-	vetoedAt    time.Time
-}
-
 func clusterStatus(ctx context.Context, c client.Client, home string, opts statusOptions) (statusResult, error) {
 	now := opts.now()
 	workloads, scope, err := listManaged(ctx, c, opts.namespaces, home)
@@ -258,14 +250,11 @@ func clusterStatus(ctx context.Context, c client.Client, home string, opts statu
 		return statusResult{}, err
 	}
 
-	vetoes := lastVetoes(events)
 	targets := map[client.ObjectKey]string{}
 	for i := range workloads {
 		w := &workloads[i]
-		key := client.ObjectKeyFromObject(w)
-		targets[key] = w.Spec.Target.Name
-		h := holds{activeUntil: activeUntil[targetOfManaged(w)], vetoedAt: vetoes[key]}
-		row := workloadStatus(w, h, now)
+		targets[client.ObjectKeyFromObject(w)] = w.Spec.Target.Name
+		row := workloadStatus(w, activeUntil[targetOfManaged(w)], now)
 		result.Workloads = append(result.Workloads, row)
 		result.SavedThisMonth += row.SavedThisMonth
 		result.Problems = append(result.Problems, problemsOf(w, now)...)
@@ -383,27 +372,16 @@ func targetOfManaged(w *v1alpha1.ManagedWorkload) targetKey {
 	return targetKey{w.Namespace, w.Spec.Target.Kind, w.Spec.Target.Name}
 }
 
-// lastVetoes is when the forecast last kept each workload from pausing,
-// from events sorted oldest first.
-func lastVetoes(events []corev1.Event) map[client.ObjectKey]time.Time {
-	out := map[client.ObjectKey]time.Time{}
-	for i := range events {
-		ev := &events[i]
-		if ev.Reason == "IdleVetoed" {
-			out[client.ObjectKey{Namespace: ev.InvolvedObject.Namespace, Name: ev.InvolvedObject.Name}] = eventTime(ev)
-		}
-	}
-	return out
-}
-
-func workloadStatus(w *v1alpha1.ManagedWorkload, h holds, now time.Time) statusWorkload {
+// workloadStatus is a workload's row. targetActiveUntil is the active-until
+// on the workload itself, which its ManagedWorkload doesn't record.
+func workloadStatus(w *v1alpha1.ManagedWorkload, targetActiveUntil, now time.Time) statusWorkload {
 	row := statusWorkload{
 		Namespace:      w.Namespace,
 		Name:           w.Name,
 		Target:         strings.ToLower(string(w.Spec.Target.Kind)) + "/" + w.Spec.Target.Name,
 		Phase:          w.Status.Phase,
 		DryRun:         w.Spec.DryRun,
-		Next:           nextFor(w, h, now),
+		Next:           nextFor(w, targetActiveUntil, now),
 		SavedThisMonth: savedThisMonth(w, now),
 		namedApart:     w.Name != w.Spec.Target.Name && w.Labels[v1alpha1.LabelFromLabel] != v1alpha1.True,
 	}
@@ -431,7 +409,7 @@ func savedThisMonth(w *v1alpha1.ManagedWorkload, now time.Time) float64 {
 }
 
 // nextFor says what happens to a workload next, or what's stopping it.
-func nextFor(w *v1alpha1.ManagedWorkload, h holds, now time.Time) string {
+func nextFor(w *v1alpha1.ManagedWorkload, targetActiveUntil, now time.Time) string {
 	if d := w.Spec.DesiredState; d != nil {
 		return "kept " + strings.ToLower(string(*d)) + " by desiredState"
 	}
@@ -464,7 +442,7 @@ func nextFor(w *v1alpha1.ManagedWorkload, h holds, now time.Time) string {
 	if meta.IsStatusConditionTrue(conditions, "HeldByDependents") {
 		return "held awake by its dependents"
 	}
-	if until := later(activeUntil(w.Annotations), h.activeUntil); until.After(now) {
+	if until := later(activeUntil(w.Annotations), targetActiveUntil); until.After(now) {
 		return "held awake for " + span(until.Sub(now))
 	}
 	switch {
@@ -487,7 +465,7 @@ func nextFor(w *v1alpha1.ManagedWorkload, h holds, now time.Time) string {
 	switch {
 	case pauseAt.After(now):
 		return verb + " in " + span(pauseAt.Sub(now))
-	case !h.vetoedAt.Before(pauseAt):
+	case meta.IsStatusConditionTrue(conditions, "IdleVetoed"):
 		return "held awake by the forecast"
 	case w.Status.Phase == v1alpha1.PhaseIdle:
 		return verb + " now"
