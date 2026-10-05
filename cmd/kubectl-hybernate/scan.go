@@ -169,12 +169,8 @@ Examples:
 			ctx, cancel := context.WithTimeout(cmd.Context(), opts.timeout)
 			defer cancel()
 			result, err := scanCluster(ctx, window, prom, opts)
-			if errors.Is(err, context.DeadlineExceeded) {
-				return fmt.Errorf("the scan didn't finish within --timeout %s: the cluster's API server answered too "+
-					"slowly; scan fewer namespaces with -n, or pass a longer --timeout", opts.timeout)
-			}
 			if err != nil {
-				return err
+				return scanFailed(ctx, err, opts.timeout)
 			}
 			result.ScannedAt = time.Now().UTC().Truncate(time.Second)
 			result.Settings = settings{CPUThreshold: opts.cpuThreshold, IdleAfter: roundedDuration(opts.idleAfter),
@@ -306,6 +302,29 @@ func validHeaderName(name string) bool {
 	return true
 }
 
+// historyError is a scan that failed reading history from Prometheus.
+type historyError struct{ err error }
+
+func (e *historyError) Error() string { return e.err.Error() }
+func (e *historyError) Unwrap() error { return e.err }
+
+// scanFailed says a scan ran out of --timeout, and which step was slow,
+// rather than the bare "context deadline exceeded". A deadline of one call
+// of its own, such as a Prometheus query's, isn't --timeout's, and is left
+// to say what it was.
+func scanFailed(ctx context.Context, err error, timeout time.Duration) error {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	var history *historyError
+	if errors.As(err, &history) {
+		return fmt.Errorf("the scan didn't finish within --timeout %s: Prometheus answered too slowly; pass a "+
+			"longer --timeout, or --window 0 to judge from CPU right now", timeout)
+	}
+	return fmt.Errorf("the scan didn't finish within --timeout %s: the cluster's API server answered too "+
+		"slowly; scan fewer namespaces with -n, or pass a longer --timeout", timeout)
+}
+
 // incompleteError fails a scan that couldn't read all it should have, once
 // its report is written, so a script sees the exit code and a person still
 // gets what it did read.
@@ -367,7 +386,10 @@ func scanCluster(ctx context.Context, window time.Duration, prom prometheusSetup
 		var err error
 		history, err = historySource(ctx, c, config, namespaces, prom)
 		if prom.url != "" && err != nil {
-			return scanResult{}, fmt.Errorf("reading history from --prometheus-url: %w", err)
+			return scanResult{}, &historyError{fmt.Errorf("reading history from --prometheus-url: %w", err)}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return scanResult{}, &historyError{fmt.Errorf("looking for Prometheus: %w", ctxErr)}
 		}
 		var forbidden *discovery.ProxyForbiddenError
 		if errors.As(err, &forbidden) {

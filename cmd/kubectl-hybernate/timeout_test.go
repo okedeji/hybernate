@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // hangingCluster is a kubeconfig for an API server that never answers.
@@ -75,6 +77,38 @@ func TestScan_GivesUpAtTimeout(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "the scan didn't finish within --timeout 300ms")
 	assert.Less(t, time.Since(start), 5*time.Second)
+}
+
+// A Prometheus that stops answering is named as what was slow, not the
+// API server, which answered.
+func TestScan_TimeoutBlamesPrometheus(t *testing.T) {
+	prometheus := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(prometheus.Close)
+
+	_, err := runCLI(t, newStatusClient(t, interceptor.Funcs{}), "scan", "-n", "preview-42", "-o", "json",
+		"--timeout", "300ms", "--prometheus-url", prometheus.URL)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the scan didn't finish within --timeout 300ms: Prometheus answered too slowly")
+	assert.NotContains(t, err.Error(), "API server")
+}
+
+// A deadline of the scan's own, such as one Prometheus query's, isn't
+// --timeout running out, so it isn't reported as that.
+func TestScanFailed(t *testing.T) {
+	queryTimedOut := &historyError{fmt.Errorf("reading history from --prometheus-url: %w", context.DeadlineExceeded)}
+
+	err := scanFailed(context.Background(), queryTimedOut, time.Minute)
+
+	assert.Equal(t, queryTimedOut, err)
+
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	assert.ErrorContains(t, scanFailed(expired, fmt.Errorf("listing pods: %w", context.DeadlineExceeded), time.Minute),
+		"the cluster's API server answered too slowly")
+	assert.ErrorContains(t, scanFailed(expired, queryTimedOut, time.Minute), "Prometheus answered too slowly")
 }
 
 // Every command that talks to the cluster gives up at --timeout, saying so.
