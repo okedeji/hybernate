@@ -94,7 +94,7 @@ watchNamespaces, a Role's in each of them.
 {{- define "hybernate.managerRules" -}}
 - apiGroups: [""]
   resources: [configmaps]
-  verbs: [get, list, watch, create, update, patch]
+  verbs: [get]
 - apiGroups: [""]
   resources: [events]
   verbs: [create, patch]
