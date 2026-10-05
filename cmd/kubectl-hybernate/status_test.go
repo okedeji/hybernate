@@ -452,6 +452,24 @@ func TestStatus_CantListEveryNamespace(t *testing.T) {
 	assert.Contains(t, err.Error(), "pass -n for the namespaces you can read")
 }
 
+// A failure listing every namespace says that's where it was listing, not
+// a blank namespace.
+func TestStatus_ListingEveryNamespaceFails(t *testing.T) {
+	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+		opts ...client.ListOption) error {
+		if _, ok := list.(*v1alpha1.ManagedWorkloadList); ok {
+			return apierrors.NewServiceUnavailable("etcd is down")
+		}
+		return c.List(ctx, list, opts...)
+	}}
+
+	_, err := clusterStatus(context.Background(), newStatusClient(t, funcs), "default", statusOpts())
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsServiceUnavailable(err))
+	assert.Contains(t, err.Error(), "listing ManagedWorkloads in every namespace: etcd is down")
+}
+
 func TestStatus_NotInstalled(t *testing.T) {
 	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
 		opts ...client.ListOption) error {

@@ -296,6 +296,8 @@ func listManaged(ctx context.Context, c client.Client, ns namespaceFlags, home s
 		case n == metav1.NamespaceAll && apierrors.IsForbidden(err):
 			return nil, scope, fmt.Errorf("listing ManagedWorkloads in every namespace: %w; "+
 				"pass -n for the namespaces you can read", err)
+		case n == metav1.NamespaceAll && err != nil:
+			return nil, scope, fmt.Errorf("listing ManagedWorkloads in every namespace: %w", err)
 		case err != nil:
 			return nil, scope, fmt.Errorf("listing ManagedWorkloads in %s: %w", n, err)
 		}
