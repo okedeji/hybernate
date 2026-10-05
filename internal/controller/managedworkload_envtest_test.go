@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -297,10 +298,9 @@ func TestKEDAUninstalledWhileTheOperatorRuns(t *testing.T) {
 		return apierrors.IsNotFound(c.Get(ctx, client.ObjectKeyFromObject(crd), kedaCRD()))
 	}, 30*time.Second, 100*time.Millisecond, "KEDA's CRD is gone")
 
+	poke := client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"annotations":{"poke":"after-keda"}}}`))
 	for _, name := range []string{"api", "web"} {
-		w := workload(name)
-		w.Annotations = map[string]string{"poke": "after-keda"}
-		require.NoError(t, c.Update(ctx, w))
+		require.NoError(t, c.Patch(ctx, workload(name), poke))
 	}
 	assert.Eventually(t, func() bool { return !autoscaled("api") && !autoscaled("web") },
 		30*time.Second, 100*time.Millisecond, "every workload reconciles again, and no longer reports KEDA")
