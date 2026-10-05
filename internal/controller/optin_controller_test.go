@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/config"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
@@ -429,4 +432,58 @@ func TestOptIn_InvalidNamespaceSettingIsReported(t *testing.T) {
 	warnings := recorded(recorder, ReasonInvalidSetting)
 	require.Len(t, warnings, 1)
 	assert.Contains(t, warnings[0], `hybernate.io/idle-after="soon" on the namespace`)
+}
+
+// Labelling a namespace, or removing its label, reaches its workloads
+// through the namespace watch alone: nothing about the workloads changes.
+func TestOptIn_NamespaceLabelThroughTheWatch(t *testing.T) {
+	cfg := startEnvtest(t)
+	scheme := testScheme(t)
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Controller: config.Controller{SkipNameValidation: ptr.To(true)}})
+	require.NoError(t, err)
+	r := &OptInReconciler{Client: mgr.GetClient(), Scheme: scheme, Recorder: events.NewFakeRecorder(100),
+		Kind: v1alpha1.TargetKindDeployment, Defaults: DefaultOptInDefaults}
+	require.NoError(t, r.SetupWithManager(mgr))
+	mgrCtx, stop := context.WithCancel(context.Background())
+	var running sync.WaitGroup
+	running.Go(func() { assert.NoError(t, mgr.Start(mgrCtx)) })
+	t.Cleanup(func() {
+		stop()
+		running.Wait()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}
+	require.NoError(t, c.Create(ctx, ns))
+	labels := map[string]string{"app": "web"}
+	require.NoError(t, c.Create(ctx, &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop"},
+		Spec: appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "web:v1"}}}}},
+	}))
+	key := types.NamespacedName{Namespace: "shop", Name: "web"}
+	exists := func() bool { return c.Get(ctx, key, &v1alpha1.ManagedWorkload{}) == nil }
+	gone := func() bool { return apierrors.IsNotFound(c.Get(ctx, key, &v1alpha1.ManagedWorkload{})) }
+
+	ns.Labels = managedLabel
+	require.NoError(t, c.Update(ctx, ns))
+	require.Eventually(t, exists, 10*time.Second, 50*time.Millisecond, "labelling the namespace opts its workloads in")
+
+	var mw v1alpha1.ManagedWorkload
+	require.NoError(t, c.Get(ctx, key, &mw))
+	mw.Status.Phase = v1alpha1.PhasePaused
+	mw.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 2}
+	require.NoError(t, c.Status().Update(ctx, &mw))
+
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(ns), ns))
+	ns.Labels = nil
+	require.NoError(t, c.Update(ctx, ns))
+	require.Eventually(t, gone, 10*time.Second, 50*time.Millisecond,
+		"removing the namespace's label releases a paused workload, whose ManagedWorkload's deletion restores it")
 }
