@@ -30,6 +30,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -858,6 +859,86 @@ func TestRouteDoorman_RechecksAServiceLeftToOtherPods(t *testing.T) {
 	require.NoError(t, r.Delete(context.Background(), servingSlice()))
 	assert.Zero(t, r.routeDoorman(context.Background(), workload, target), "routed: nothing to wait for")
 	assert.Len(t, doormanSlices(t, r), 1)
+}
+
+// A reconcile that applies the slices but fails before status is written
+// leaves the slices pointing at their ports. The next attempt keeps them,
+// rather than moving the Service to a new port on every retry.
+func TestReconcileDoorman_KeepsTheSlicesPortsWhenStatusWasNotWritten(t *testing.T) {
+	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
+		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
+	port := workload.Status.Doorman[0].DoormanPort
+
+	unwritten := fetch(t, r, "api")
+	require.Empty(t, unwritten.Status.Doorman)
+	restarted := doormanReconciler(t)
+	restarted.Client = r.Client
+	require.NoError(t, doormanErr(context.Background(), restarted, unwritten, appTarget()))
+
+	require.Len(t, unwritten.Status.Doorman, 1)
+	assert.Equal(t, port, unwritten.Status.Doorman[0].DoormanPort)
+	slices := doormanSlices(t, r)
+	require.Len(t, slices, 1)
+	assert.Equal(t, port, *slices[0].Ports[0].Port)
+}
+
+// A port goes back to the pool only once no slice sends traffic to it. If
+// the slice can't be deleted, the port stays the workload's, however long
+// that lasts, so it's never given to another workload while it still
+// receives the first one's traffic.
+func TestReconcileDoorman_KeepsAPortWhileItsSliceRemains(t *testing.T) {
+	first := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	first.UID = "api-uid"
+	second := lifecycleWorkload("billing", nil, v1alpha1.PhasePaused)
+	second.UID = "billing-uid"
+	billing := appTarget()
+	billing.Name = "billing"
+	billing.Spec.Template.Labels = map[string]string{"app": "billing"}
+	r := doormanReconciler(t, first, second, doormanEndpoints("10.0.0.7"),
+		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}),
+		service("billing", map[string]string{"app": "billing"}, corev1.ServicePort{Name: "http", Port: 80}))
+	r.doormanPorts.pick = lowestFreePort
+	now := fixedTime
+	r.clock = func() time.Time { return now }
+	require.NoError(t, doormanErr(context.Background(), r, first, appTarget()))
+	port := first.Status.Doorman[0].DoormanPort
+
+	base := r.Client
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+			return errors.New("etcdserver: request timed out")
+		}})
+	first.Status.Phase = v1alpha1.PhaseRunning
+	require.Error(t, doormanErr(context.Background(), r, first, appTarget()))
+	assert.NotEmpty(t, first.Status.Doorman, "status names the port its slice still uses")
+
+	now = now.Add(2 * portDrain)
+	r.Client = base
+	require.NoError(t, doormanErr(context.Background(), r, second, billing))
+	assert.NotEqual(t, port, second.Status.Doorman[0].DoormanPort)
+}
+
+// Right after a slice is first written, the cache may not have it yet, so
+// the next write tries to create it again. That's the cache catching up,
+// not a routing failure: it's retried soon, without a warning.
+func TestRouteDoorman_AStaleCacheIsNotAFailure(t *testing.T) {
+	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
+		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+			return apierrors.NewAlreadyExists(discoveryv1.Resource("endpointslices"), obj.GetName())
+		}})
+
+	assert.Equal(t, staleCacheRetry, r.routeDoorman(context.Background(), workload, appTarget()))
+
+	assert.False(t, conditionFalseWith(workload, conditionWakeOnRequest, reasonRoutingFailed))
+	recorder := r.Recorder.(*events.FakeRecorder)
+	for len(recorder.Events) > 0 {
+		assert.NotContains(t, <-recorder.Events, reasonRoutingFailed)
+	}
 }
 
 // With watchNamespaces, the operator has a Role in each watched namespace

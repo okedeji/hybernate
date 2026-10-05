@@ -32,6 +32,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -84,6 +85,10 @@ const (
 	// endpointsReadTimeout bounds each uncached read of a Service's own
 	// EndpointSlices.
 	endpointsReadTimeout = 10 * time.Second
+
+	// staleCacheRetry is how soon a slice write the cache was too stale for
+	// is repeated.
+	staleCacheRetry = time.Second
 )
 
 // wakeOnRequest reports whether the workload's Services should route to the
@@ -182,7 +187,7 @@ func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.Ma
 	if err != nil {
 		return 0, err
 	}
-	routes, err := r.allocateRoutes(ctx, workload, plan.services)
+	routes, err := r.allocateRoutes(ctx, workload, plan.services, current)
 	if errors.Is(err, doorman.ErrNoFreePort) {
 		r.setCondition(workload, conditionWakeOnRequest, metav1.ConditionFalse, "NoFreePort", err.Error())
 		return recheck, nil
@@ -190,8 +195,11 @@ func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.Ma
 	if err != nil {
 		return 0, err
 	}
-	// Status names the ports before any slice sends traffic to them, so
-	// the doorman is never sent traffic for a port it can't place.
+	// Status is written after this reconcile, so a slice can send traffic
+	// to a port before the doorman serves it, and is refused meanwhile, as
+	// it would be without the doorman. A reconcile that fails before the
+	// write keeps the ports its slices already use, so they aren't moved
+	// on every retry.
 	workload.Status.Doorman = routes
 
 	keep := map[string]bool{}
@@ -201,7 +209,14 @@ func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.Ma
 		for _, family := range s.families {
 			name := doorman.SliceName(s.svc.Name, workload.Name, family)
 			keep[name] = true
-			if err := r.applyDoormanSlice(ctx, workload, s.svc, name, family, svcRoutes, endpoints[family]); err != nil {
+			err := r.applyDoormanSlice(ctx, workload, s.svc, name, family, svcRoutes, endpoints[family])
+			switch {
+			case err == nil:
+			// The cache hasn't caught up with a slice written moments
+			// ago: not a failure, just a write to repeat once it has.
+			case apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err):
+				recheck = shortest(recheck, staleCacheRetry)
+			default:
 				errs = append(errs, err)
 			}
 		}
@@ -216,17 +231,30 @@ func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.Ma
 	return recheck, nil
 }
 
+// shortest is the sooner of two requeue delays, where zero means none.
+func shortest(a, b time.Duration) time.Duration {
+	if a == 0 || (b != 0 && b < a) {
+		return b
+	}
+	return a
+}
+
 // removeDoorman stops routing the workload through the doorman: its slices
 // are deleted, not left to garbage collection, which an orphaning delete
-// would skip, and its ports start draining.
+// would skip. Only once they're gone do its ports leave status and start
+// draining: a port another workload could be given while a slice still
+// sends traffic to it would deliver that traffic to the wrong workload.
 func (r *Reconciler) removeDoorman(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	r.doormanPorts.release(workload.UID, r.now())
-	workload.Status.Doorman = nil
 	current, err := r.listDoormanSlices(ctx, workload)
 	if err != nil {
 		return err
 	}
-	return r.deleteDoormanSlices(ctx, current, nil)
+	if err := r.deleteDoormanSlices(ctx, current, nil); err != nil {
+		return err
+	}
+	r.doormanPorts.release(workload.UID, r.now())
+	workload.Status.Doorman = nil
+	return nil
 }
 
 // skippedServices are the Services that select the workload but aren't
@@ -489,8 +517,9 @@ func podTemplateLabels(target client.Object) map[string]string {
 }
 
 // allocateRoutes gives each Service port a doorman port, keeping the one
-// it has in status.
-func (r *Reconciler) allocateRoutes(ctx context.Context, workload *v1alpha1.ManagedWorkload, services []doormanService) ([]v1alpha1.DoormanRoute, error) {
+// it has in status or, failing that, in the workload's current slices.
+func (r *Reconciler) allocateRoutes(ctx context.Context, workload *v1alpha1.ManagedWorkload, services []doormanService,
+	current []discoveryv1.EndpointSlice) ([]v1alpha1.DoormanRoute, error) {
 	keys := make([]routeKey, 0, len(services))
 	for _, s := range services {
 		for _, port := range s.ports {
@@ -498,6 +527,13 @@ func (r *Reconciler) allocateRoutes(ctx context.Context, workload *v1alpha1.Mana
 		}
 	}
 	existing := map[routeKey]int32{}
+	for _, slice := range current {
+		for _, p := range slice.Ports {
+			if p.Name != nil && p.Port != nil {
+				existing[routeKey{service: slice.Labels[discoveryv1.LabelServiceName], portName: *p.Name}] = *p.Port
+			}
+		}
+	}
 	for _, route := range workload.Status.Doorman {
 		existing[routeKey{service: route.Service, portName: route.PortName}] = route.DoormanPort
 	}
