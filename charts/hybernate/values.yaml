@@ -5,6 +5,12 @@ image:
 
 imagePullSecrets: []
 
+# Installs the ManagedWorkload CRD and upgrades it with the release. It's
+# kept on uninstall, since deleting it deletes every ManagedWorkload. Set
+# false only if you manage the CRD yourself.
+crds:
+  install: true
+
 replicaCount: 1
 
 leaderElection:

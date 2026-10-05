@@ -44,8 +44,7 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	@# The Helm chart ships its own copy of the CRDs; keep it identical.
-	cp config/crd/bases/*.yaml charts/hybernate/crds/
+	./hack/chart-crds.sh config/crd/bases charts/hybernate/templates/crds
 
 .PHONY: prices
 prices: ## Regenerate the on-demand list prices nodes are priced at, before each release
