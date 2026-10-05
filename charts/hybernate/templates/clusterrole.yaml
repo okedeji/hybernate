@@ -37,3 +37,37 @@ subjects:
     name: {{ include "hybernate.serviceAccountName" $ }}
     namespace: {{ $.Release.Namespace }}
 {{- end }}
+{{- if and .Values.watchNamespaces .Values.doorman.enabled }}
+---
+{{- /*
+The operator finds the Ready doorman pods through the doorman Service's
+EndpointSlices, here in the release namespace, which needn't be watched.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "hybernate.fullname" . }}-doorman-endpoints
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "hybernate.fullname" . }}-doorman-endpoints
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "hybernate.fullname" . }}-doorman-endpoints
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hybernate.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -18,6 +18,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
@@ -27,6 +28,12 @@ import (
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -148,6 +155,15 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	cacheOpts := cacheOptions(watched)
+	if !runDoorman {
+		routedNamespace := doormanNamespace
+		if doormanService == "" {
+			routedNamespace = ""
+		}
+		cacheOpts = operatorCacheOptions(watched, routedNamespace)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -158,10 +174,12 @@ func main() {
 		LeaderElectionID: "479a98fc.hybernate.io",
 		Client: client.Options{
 			Cache: &client.CacheOptions{
-				DisableFor: []client.Object{&metricsv1beta1.PodMetrics{}},
+				// ConfigMaps are read one at a time, for the few a workload
+				// references; caching them would hold every one in the cluster.
+				DisableFor: []client.Object{&metricsv1beta1.PodMetrics{}, &corev1.ConfigMap{}},
 			},
 		},
-		Cache: cache.Options{DefaultNamespaces: namespaceCaches(watched)},
+		Cache: cacheOpts,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -253,9 +271,44 @@ func validatePrometheusURL(raw string) error {
 	return nil
 }
 
+// cacheOptions limits the cache to the watched namespaces, or leaves
+// it cluster-wide when there are none. Cluster-scoped objects, such as
+// nodes, are cached either way.
+func cacheOptions(watched []string) cache.Options {
+	return cache.Options{
+		DefaultNamespaces: namespaceCaches(watched),
+		DefaultTransform:  trimForCache,
+	}
+}
+
+// operatorCacheOptions adds to cacheOptions the operator's view of
+// EndpointSlices: only the doorman slices it writes into workloads'
+// namespaces, and the doorman Service's own slices in doormanNamespace,
+// which may be outside the watched namespaces. Empty doormanNamespace means
+// the doorman is disabled. Every other slice in the cluster is left out.
+func operatorCacheOptions(watched []string, doormanNamespace string) cache.Options {
+	opts := cacheOptions(watched)
+	doormanSlices := cache.Config{
+		LabelSelector: labels.SelectorFromSet(labels.Set{discoveryv1.LabelManagedBy: doorman.ManagedBy}),
+	}
+	slices := map[string]cache.Config{}
+	if len(watched) == 0 {
+		slices[cache.AllNamespaces] = doormanSlices
+	}
+	for _, ns := range watched {
+		slices[ns] = doormanSlices
+	}
+	if doormanNamespace != "" {
+		slices[doormanNamespace] = cache.Config{LabelSelector: labels.Everything()}
+	}
+	opts.ByObject = map[client.Object]cache.ByObject{
+		&discoveryv1.EndpointSlice{}: {Namespaces: slices},
+	}
+	return opts
+}
+
 // namespaceCaches limits the cache to the watched namespaces, or leaves it
-// cluster-wide when there are none. Cluster-scoped objects, such as nodes,
-// are cached either way.
+// cluster-wide when there are none.
 func namespaceCaches(namespaces []string) map[string]cache.Config {
 	if len(namespaces) == 0 {
 		return nil
@@ -265,6 +318,63 @@ func namespaceCaches(namespaces []string) map[string]cache.Config {
 		out[ns] = cache.Config{}
 	}
 	return out
+}
+
+// replicasOnly is all of a managed fields entry that gitops.ReplicasWriter
+// reads: that it set spec.replicas.
+var replicasOnly = &metav1.FieldsV1{Raw: []byte(`{"f:spec":{"f:replicas":{}}}`)}
+
+// trimForCache drops what the operator never reads from cached objects,
+// which on a large cluster is most of their size: managed fields, and
+// kubectl's copy of the last applied manifest. Deployments and StatefulSets
+// keep the managed fields entries that set spec.replicas, cut down to that,
+// which is how a GitOps tool undoing a pause is told apart from a person.
+// ManagedWorkloads keep the last applied manifest, since the operator
+// updates them whole and would otherwise delete it.
+func trimForCache(in any) (any, error) {
+	obj, err := meta.Accessor(in)
+	if err != nil {
+		return in, nil
+	}
+	switch in.(type) {
+	case *appsv1.Deployment, *appsv1.StatefulSet:
+		obj.SetManagedFields(replicasWriters(obj.GetManagedFields()))
+	default:
+		obj.SetManagedFields(nil)
+	}
+	if _, ok := in.(*v1alpha1.ManagedWorkload); !ok {
+		if annotations := obj.GetAnnotations(); annotations != nil {
+			delete(annotations, corev1.LastAppliedConfigAnnotation)
+		}
+	}
+	return in, nil
+}
+
+func replicasWriters(entries []metav1.ManagedFieldsEntry) []metav1.ManagedFieldsEntry {
+	var out []metav1.ManagedFieldsEntry
+	for _, entry := range entries {
+		if entry.FieldsV1 == nil || !setsSpecReplicas(entry.FieldsV1.Raw) {
+			continue
+		}
+		out = append(out, metav1.ManagedFieldsEntry{
+			Manager:   entry.Manager,
+			Operation: entry.Operation,
+			Time:      entry.Time,
+			FieldsV1:  replicasOnly,
+		})
+	}
+	return out
+}
+
+func setsSpecReplicas(raw []byte) bool {
+	var fields struct {
+		Spec map[string]json.RawMessage `json:"f:spec"`
+	}
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	_, ok := fields.Spec["f:replicas"]
+	return ok
 }
 
 // stringList is a flag of comma-separated values.
