@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,9 +50,23 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 	if workload.Status.Phase != v1alpha1.PhasePaused {
 		return nil
 	}
-	replicas := replicasFromTarget(target)
-	if replicas == 0 {
+	if replicasFromTarget(target) == 0 {
 		return r.clearGitOpsConflictIfHeld(ctx, workload)
+	}
+	// Just after a pause the cache can still hold the target as it was
+	// before it, which looks just like a scale-up. Only the API server can
+	// tell them apart.
+	replicas, err := r.liveReplicas(ctx, target)
+	if err != nil {
+		return err
+	}
+	if replicas == 0 {
+		return nil
+	}
+
+	// Someone else woke it, so it's only released, never scaled.
+	if err := r.pauser.Restore(ctx, workload); err != nil {
+		return fmt.Errorf("releasing a workload scaled up outside Hybernate: %w", err)
 	}
 
 	writer, found := gitops.ReplicasWriter(target.GetManagedFields())
@@ -61,19 +76,12 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 	}
 	now := r.clockTime()
 	workload.Status.LastScaledUp = &v1alpha1.ScaledUp{At: now, By: by, GitOps: string(writer.Tool), Replicas: replicas}
-	workload.Status.Pause = nil
 	r.resetActivity(workload, v1alpha1.ActivitySourceScaledUp)
-
-	log.FromContext(ctx).Info("paused workload scaled up outside Hybernate",
-		"workload", workload.Name, "namespace", workload.Namespace, "replicas", replicas, "by", by)
-	metrics.ExternalScaleUps.WithLabelValues(scaledUpBy(writer)).Inc()
-	r.emitEvent(workload, false, "Normal", ReasonScaledUp, actionCheckReplicas,
-		"scaled up to %d replicas by %s outside Hybernate; counted as activity", replicas, by)
+	var conflict string
 	if writer.FromGit() {
-		msg := fmt.Sprintf("%s set the replicas from Git, undoing the pause; Hybernate pauses it again from %s. %s",
+		conflict = fmt.Sprintf("%s set the replicas from Git, undoing the pause; Hybernate pauses it again from %s. %s",
 			writer.Tool, now.Add(gitOpsRetryAfter).UTC().Format("15:04 UTC"), strings.Join(gitops.Fix(writer.Tool), " "))
-		r.setCondition(workload, conditionGitOpsConflict, metav1.ConditionTrue, "PauseUndone", msg)
-		r.emitEvent(workload, false, "Warning", ReasonGitOpsConflict, actionCheckReplicas, "%s", msg)
+		r.setCondition(workload, conditionGitOpsConflict, metav1.ConditionTrue, "PauseUndone", conflict)
 	}
 
 	if err := r.wakeDependencies(ctx, workload); err != nil {
@@ -82,7 +90,26 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 	if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ScaledUp"); err != nil {
 		return err
 	}
+
+	log.FromContext(ctx).Info("paused workload scaled up outside Hybernate",
+		"workload", workload.Name, "namespace", workload.Namespace, "replicas", replicas, "by", by)
+	metrics.ExternalScaleUps.WithLabelValues(scaledUpBy(writer)).Inc()
+	r.emitEvent(workload, false, "Normal", ReasonScaledUp, actionCheckReplicas,
+		"scaled up to %d replicas by %s outside Hybernate; counted as activity", replicas, by)
+	if conflict != "" {
+		r.emitEvent(workload, false, "Warning", ReasonGitOpsConflict, actionCheckReplicas, "%s", conflict)
+	}
 	return nil
+}
+
+// liveReplicas reads the target's replicas from the API server: the scale
+// subresource is never served from the cache.
+func (r *Reconciler) liveReplicas(ctx context.Context, target client.Object) (int32, error) {
+	scale := &autoscalingv1.Scale{}
+	if err := r.SubResource("scale").Get(ctx, target.DeepCopyObject().(client.Object), scale); err != nil {
+		return 0, fmt.Errorf("reading the target's replicas: %w", err)
+	}
+	return scale.Spec.Replicas, nil
 }
 
 func scaledUpBy(w gitops.Writer) string {
@@ -114,27 +141,32 @@ func (r *Reconciler) clearGitOpsConflictIfHeld(ctx context.Context, workload *v1
 	if pause == nil || pause.PausedAt == nil || r.now().Sub(pause.PausedAt.Time) < gitOpsRetryAfter {
 		return nil
 	}
-	if !r.clearGitOpsConflict(workload) {
+	tool, cleared := r.clearGitOpsConflict(workload)
+	if !cleared {
 		return nil
 	}
 	if err := r.Status().Update(ctx, workload); err != nil {
 		return fmt.Errorf("clearing the GitOps conflict: %w", err)
 	}
+	r.announceGitOpsConflictResolved(workload, tool)
 	return nil
 }
 
 // clearGitOpsConflict removes the conflict, which a pause holding shows is
-// over, and says whether there was one. Scaling up clears the pause, so any
-// pause since began after the conflict.
-func (r *Reconciler) clearGitOpsConflict(workload *v1alpha1.ManagedWorkload) bool {
+// over, and returns the GitOps tool it was with, or false if there was none.
+// Scaling up clears the pause, so any pause since began after the conflict.
+func (r *Reconciler) clearGitOpsConflict(workload *v1alpha1.ManagedWorkload) (string, bool) {
 	s := workload.Status.LastScaledUp
 	if s == nil || !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionGitOpsConflict) {
-		return false
+		return "", false
 	}
 	meta.RemoveStatusCondition(&workload.Status.Conditions, conditionGitOpsConflict)
+	return s.GitOps, true
+}
+
+func (r *Reconciler) announceGitOpsConflictResolved(workload *v1alpha1.ManagedWorkload, tool string) {
 	r.emitEvent(workload, false, "Normal", ReasonGitOpsConflictResolved, actionCheckReplicas,
-		"a pause held, so %s leaves the replicas to Hybernate now", s.GitOps)
-	return true
+		"a pause held, so %s leaves the replicas to Hybernate now", tool)
 }
 
 const conditionAutoscaled = "Autoscaled"

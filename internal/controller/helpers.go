@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/prometheus/client_golang/prometheus"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -132,12 +131,6 @@ func (r *Reconciler) updatePredictionStatus(ctx context.Context, workload *v1alp
 // forgetForecast drops a deleted workload's engine and its metric series.
 func (r *Reconciler) forgetForecast(workload *v1alpha1.ManagedWorkload) {
 	r.engines.forget(workload.UID)
-	labels := prometheus.Labels{"namespace": workload.Namespace, "workload": workload.Name}
-	opmetrics.PredictionConfidence.DeletePartialMatch(labels)
-	opmetrics.PredictionPhase.DeletePartialMatch(labels)
-	opmetrics.PredictionDataPoints.DeletePartialMatch(labels)
-	opmetrics.PredictionAnomalies.DeletePartialMatch(labels)
-	opmetrics.PredictionRegimeChanges.DeletePartialMatch(labels)
 }
 
 const (

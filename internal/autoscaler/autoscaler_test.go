@@ -156,26 +156,68 @@ func TestFind_RemembersKEDAIsntInstalled(t *testing.T) {
 	assert.Equal(t, 3, lookups, "looked for again, in case KEDA was installed since")
 }
 
-func TestHoldKEDA(t *testing.T) {
-	c := withKEDA(t, keda("web", map[string]any{"scaleTargetRef": map[string]any{"name": "web"}}))
-	annotation := func() (string, bool) {
-		so := &unstructured.Unstructured{}
-		so.SetGroupVersionKind(scaledObject)
-		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "shop", Name: "web"}, so))
-		v, ok := so.GetAnnotations()[PausedReplicasAnnotation]
-		return v, ok
+func pausedReplicas(t *testing.T, c client.Client) (string, bool) {
+	t.Helper()
+	so := &unstructured.Unstructured{}
+	so.SetGroupVersionKind(scaledObject)
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "shop", Name: "web"}, so))
+	v, ok := so.GetAnnotations()[PausedReplicasAnnotation]
+	return v, ok
+}
+
+func TestHoldAndReleaseKEDA(t *testing.T) {
+	tests := []struct {
+		name     string
+		previous *string
+	}{
+		{name: "no paused-replicas of its own"},
+		{name: "its own paused-replicas", previous: ptr.To("2")},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			so := keda("web", map[string]any{"scaleTargetRef": map[string]any{"name": "web"}})
+			if tt.previous != nil {
+				so.SetAnnotations(map[string]string{PausedReplicasAnnotation: *tt.previous})
+			}
+			c := withKEDA(t, so)
 
-	require.NoError(t, HoldKEDA(context.Background(), c, "shop", "web", true))
-	v, ok := annotation()
-	assert.True(t, ok)
-	assert.Equal(t, "0", v)
+			a, found, err := NewFinder(c).FindNow(context.Background(), "shop", v1alpha1.TargetKindDeployment, "web")
+			require.NoError(t, err)
+			require.True(t, found)
+			assert.Equal(t, tt.previous, a.PausedReplicas)
 
-	require.NoError(t, HoldKEDA(context.Background(), c, "shop", "web", false))
-	_, ok = annotation()
-	assert.False(t, ok, "released")
+			require.NoError(t, HoldKEDA(context.Background(), c, "shop", "web", 0))
+			v, held := pausedReplicas(t, c)
+			assert.True(t, held)
+			assert.Equal(t, "0", v)
 
-	assert.NoError(t, HoldKEDA(context.Background(), c, "shop", "gone", false), "nothing to release")
+			require.NoError(t, HoldKEDA(context.Background(), c, "shop", "web", 3))
+			v, _ = pausedReplicas(t, c)
+			assert.Equal(t, "3", v)
+
+			require.NoError(t, ReleaseKEDA(context.Background(), c, "shop", "web", a.PausedReplicas))
+			v, held = pausedReplicas(t, c)
+			assert.Equal(t, tt.previous != nil, held, "the annotation is as the user left it")
+			if tt.previous != nil {
+				assert.Equal(t, *tt.previous, v)
+			}
+		})
+	}
+}
+
+// A ScaledObject deleted, or KEDA uninstalled, while a workload is paused
+// leaves nothing to hold or release, and mustn't wedge a resume.
+func TestReleaseKEDA_NothingToRelease(t *testing.T) {
+	scheme := runtime.NewScheme()
+	noKEDA := fake.NewClientBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{Patch: func(context.Context, client.WithWatch, client.Object,
+			client.Patch, ...client.PatchOption) error {
+			return &meta.NoKindMatchError{GroupKind: scaledObject.GroupKind()}
+		}}).Build()
+
+	assert.NoError(t, ReleaseKEDA(context.Background(), withKEDA(t), "shop", "gone", nil), "ScaledObject deleted")
+	assert.NoError(t, ReleaseKEDA(context.Background(), noKEDA, "shop", "web", nil), "KEDA uninstalled")
+	assert.NoError(t, HoldKEDA(context.Background(), noKEDA, "shop", "web", 0), "KEDA uninstalled")
 }
 
 func TestClamp(t *testing.T) {

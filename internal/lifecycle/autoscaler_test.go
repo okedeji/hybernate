@@ -85,31 +85,64 @@ func apiWorkload() *v1alpha1.ManagedWorkload {
 }
 
 // A workload KEDA scales is held at zero by KEDA while it's paused, so KEDA
-// doesn't scale it straight back up, and released when it resumes.
+// doesn't scale it straight back up. Resuming, KEDA holds it at the restored
+// replicas until they're Ready, so a ScaledObject that may scale to zero
+// can't take it back down as it starts, then gets back whatever
+// paused-replicas the user had set.
 func TestPauseAndResume_KEDA(t *testing.T) {
-	c := kedaClient(t, readyDeployment(3), scaledObjectFor(1))
-	scaler := &fakeScaler{replicas: 3}
-	p := newTestPauser(c, scaler)
-	workload := apiWorkload()
+	tests := []struct {
+		name     string
+		previous *string
+	}{
+		{name: "no paused-replicas of its own"},
+		{name: "the user's own paused-replicas", previous: ptr.To("2")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			so := scaledObjectFor(0)
+			if tt.previous != nil {
+				so.SetAnnotations(map[string]string{autoscaler.PausedReplicasAnnotation: *tt.previous})
+			}
+			dep := readyDeployment(3)
+			c := kedaClient(t, dep, so)
+			scaler := &fakeScaler{replicas: 3}
+			p := newTestPauser(c, scaler)
+			workload := apiWorkload()
 
-	done, err := p.Pause(context.Background(), workload)
-	require.NoError(t, err)
-	require.True(t, done)
+			require.NoError(t, p.Prepare(context.Background(), workload))
+			done, err := p.Pause(context.Background(), workload)
+			require.NoError(t, err)
+			require.True(t, done)
 
-	assert.Equal(t, "api-scaler", workload.Status.Pause.ScaledObject)
-	v, held := pausedAnnotation(t, c)
-	assert.True(t, held)
-	assert.Equal(t, "0", v)
-	assert.Equal(t, int32(0), scaler.replicas)
+			assert.Equal(t, "api-scaler", workload.Status.Pause.ScaledObject)
+			assert.Equal(t, tt.previous, workload.Status.Pause.ScaledObjectPausedReplicas)
+			v, held := pausedAnnotation(t, c)
+			assert.True(t, held)
+			assert.Equal(t, "0", v)
+			assert.Equal(t, int32(0), scaler.replicas)
 
-	done, err = p.Resume(context.Background(), workload)
-	require.NoError(t, err)
-	require.True(t, done)
+			dep.Status.ReadyReplicas = 0
+			require.NoError(t, c.Status().Update(context.Background(), dep))
+			done, err = p.Resume(context.Background(), workload)
+			require.NoError(t, err)
+			require.False(t, done)
+			v, _ = pausedAnnotation(t, c)
+			assert.Equal(t, "3", v, "held at the restored replicas while they start")
 
-	_, held = pausedAnnotation(t, c)
-	assert.False(t, held, "KEDA scales it again")
-	assert.Equal(t, int32(3), scaler.replicas)
-	assert.Nil(t, workload.Status.Pause)
+			dep.Status.ReadyReplicas = 3
+			require.NoError(t, c.Status().Update(context.Background(), dep))
+			done, err = p.Resume(context.Background(), workload)
+			require.NoError(t, err)
+			require.True(t, done)
+
+			v, held = pausedAnnotation(t, c)
+			assert.Equal(t, tt.previous != nil, held)
+			if tt.previous != nil {
+				assert.Equal(t, *tt.previous, v, "the user's own value is put back")
+			}
+			assert.Equal(t, int32(3), scaler.replicas)
+		})
+	}
 }
 
 // What a workload resumes to stays within its autoscaler's range, and is
@@ -157,7 +190,9 @@ func TestPause_HPAIsntHeld(t *testing.T) {
 	c := kedaClient(t, readyDeployment(3), hpa)
 	workload := apiWorkload()
 
-	done, err := newTestPauser(c, &fakeScaler{replicas: 3}).Pause(context.Background(), workload)
+	p := newTestPauser(c, &fakeScaler{replicas: 3})
+	require.NoError(t, p.Prepare(context.Background(), workload))
+	done, err := p.Pause(context.Background(), workload)
 
 	require.NoError(t, err)
 	require.True(t, done)

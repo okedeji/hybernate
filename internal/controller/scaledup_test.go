@@ -28,10 +28,12 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/autoscaler"
@@ -140,7 +142,7 @@ func TestHandlePause_WaitsAfterAGitOpsConflict(t *testing.T) {
 			r := newTestReconcilerWithReplicas(t, conflicted(fixedTime.Add(-tt.scaledUp)), pauser, 3)
 			w := getWorkload(t, r, "api")
 
-			result, err := r.handlePause(context.Background(), w)
+			result, err := r.handlePause(context.Background(), w, nil)
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantPause, pauser.pauseCalls > 0)
@@ -188,7 +190,7 @@ func TestGitOpsConflict_ClearsWhenAPauseHolds(t *testing.T) {
 		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{resumeDone: true}, 0)
 		w := getWorkload(t, r, "api")
 
-		_, err := r.handleResume(context.Background(), w)
+		_, err := r.handleResume(context.Background(), w, nil)
 		require.NoError(t, err)
 
 		assert.Nil(t, meta.FindStatusCondition(getWorkload(t, r, "api").Status.Conditions, conditionGitOpsConflict))
@@ -231,4 +233,61 @@ func TestReportAutoscaler(t *testing.T) {
 			assert.Contains(t, cond.Message, tt.want)
 		})
 	}
+}
+
+func pausedScaledObject(t *testing.T, r *Reconciler) (string, bool) {
+	t.Helper()
+	so := &unstructured.Unstructured{}
+	so.SetGroupVersionKind(kedaScaledObject)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "api-scaler"}, so))
+	v, ok := so.GetAnnotations()[autoscaler.PausedReplicasAnnotation]
+	return v, ok
+}
+
+// Someone scaling up a paused KEDA workload wakes it, and KEDA must be let
+// go too, or it holds the workload at zero again and never scales it.
+func TestWakeOnScaleUp_ReleasesTheKEDAHold(t *testing.T) {
+	so := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+		"scaleTargetRef": map[string]any{"name": "api"}}}}
+	so.SetGroupVersionKind(kedaScaledObject)
+	so.SetNamespace("default")
+	so.SetName("api-scaler")
+	so.SetAnnotations(map[string]string{autoscaler.PausedReplicasAnnotation: "0"})
+	workload := pausedWorkload(v1alpha1.PhasePaused)
+	workload.Status.Pause.ScaledObject = "api-scaler"
+	r := lifecycleReconciler(t, workload, 2, interceptor.Funcs{}, so)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	assert.Equal(t, v1alpha1.PhaseRunning, getWorkload(t, r, "api").Status.Phase)
+	_, held := pausedScaledObject(t, r)
+	assert.False(t, held, "KEDA scales it again")
+	assert.Equal(t, int32(2), targetReplicas(t, r), "left as they set it")
+}
+
+// Right after a pause the cache can still show the replicas from before it.
+// That is not a scale-up, and mustn't end the pause.
+func TestWakeOnScaleUp_StaleCacheIsNotAScaleUp(t *testing.T) {
+	workload := pausedWorkload(v1alpha1.PhasePaused)
+	stale := interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if d, ok := obj.(*appsv1.Deployment); ok {
+			d.Spec.Replicas = ptr.To(int32(3))
+		}
+		return nil
+	}}
+	r := lifecycleReconciler(t, workload, 0, stale)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	got := getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhasePaused, got.Status.Phase)
+	require.NotNil(t, got.Status.Pause)
+	assert.Equal(t, int32(3), got.Status.Pause.PreviousReplicas)
+	assert.Nil(t, got.Status.LastScaledUp)
 }

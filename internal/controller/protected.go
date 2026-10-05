@@ -52,29 +52,37 @@ func (r *Reconciler) inProtectedNamespace(ctx context.Context, workload *v1alpha
 }
 
 // reconcileProtected keeps a workload in a protected namespace running:
-// Hybernate pauses nothing there, and wakes what it had paused before the
-// namespace was protected, so protecting one never leaves a workload off.
+// Hybernate pauses nothing there, and hands back what it had paused, or was
+// pausing, before the namespace was protected, so protecting one never
+// leaves a workload off.
 func (r *Reconciler) reconcileProtected(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
-	if !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionProtected) {
-		r.emitEvent(workload, false, "Warning", ReasonProtected, actionCheckNamespace,
-			"namespace %s is protected, so Hybernate doesn't pause workloads in it", workload.Namespace)
-	}
+	reported := meta.IsStatusConditionTrue(workload.Status.Conditions, conditionProtected)
 	r.setCondition(workload, conditionProtected, metav1.ConditionTrue, "ProtectedNamespace",
 		fmt.Sprintf("namespace %s is protected, so Hybernate doesn't pause workloads in it; label it %s=%s to allow it",
 			workload.Namespace, v1alpha1.LabelAllowProtected, v1alpha1.True))
 
-	switch workload.Status.Phase {
-	case v1alpha1.PhasePaused, v1alpha1.PhaseResuming:
-		result, err := r.handleResume(ctx, workload)
-		if err != nil || result == nil {
-			return ctrl.Result{RequeueAfter: protectedRecheckInterval}, err
-		}
-		return *result, nil
-	case v1alpha1.PhaseIdle:
-		return r.transition(ctx, workload, v1alpha1.PhaseRunning, "Protected")
+	pause := workload.Status.Pause
+	released, err := r.releaseTarget(ctx, workload)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	if err := r.Status().Update(ctx, workload); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating status of a protected workload: %w", err)
+	switch {
+	case workload.Status.Phase != v1alpha1.PhaseRunning || released:
+		if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Protected"); err != nil {
+			return ctrl.Result{}, err
+		}
+	case !reported:
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating status of a protected workload: %w", err)
+		}
+	}
+	if !reported {
+		r.emitEvent(workload, false, "Warning", ReasonProtected, actionCheckNamespace,
+			"namespace %s is protected, so Hybernate doesn't pause workloads in it", workload.Namespace)
+	}
+	if released {
+		r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume,
+			"restored to %d replicas: namespace %s is protected", pause.PreviousReplicas, workload.Namespace)
 	}
 	return ctrl.Result{RequeueAfter: protectedRecheckInterval}, nil
 }

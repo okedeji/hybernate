@@ -520,3 +520,45 @@ func TestActivityClock_NoPrometheusConditionWithoutQueries(t *testing.T) {
 
 	assert.Nil(t, meta.FindStatusCondition(workload.Status.Conditions, conditionPrometheusAvailable))
 }
+
+// A paused workload wakes for any activity annotation set since the pause
+// began, whatever time it states: the doorman stamps to the second, so a
+// request can share the pause's second, and kubectl hybernate wake stamps
+// from a laptop clock that may be behind.
+func TestWokenByActivity(t *testing.T) {
+	pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
+	old := fixedTime.Add(-2 * time.Hour).Format(time.RFC3339)
+	skewed := fixedTime.Add(-90 * time.Minute).Format(time.RFC3339)
+	tests := []struct {
+		name        string
+		pausedAt    metav1.Time
+		recorded    *v1alpha1.WakeAnnotations
+		annotations map[string]string
+		want        bool
+	}{
+		{name: "a request in the second the pause completed", pausedAt: metav1.NewTime(fixedTime.Truncate(time.Second)),
+			annotations: map[string]string{v1alpha1.AnnotationLastRequest: fixedTime.Format(time.RFC3339)}, want: true},
+		{name: "a wake stamped by a clock behind the operator's", pausedAt: pausedAt,
+			recorded:    &v1alpha1.WakeAnnotations{Workload: map[string]string{v1alpha1.AnnotationLastActivity: old}},
+			annotations: map[string]string{v1alpha1.AnnotationLastActivity: skewed}, want: true},
+		{name: "the activity it was paused after", pausedAt: pausedAt,
+			recorded:    &v1alpha1.WakeAnnotations{Workload: map[string]string{v1alpha1.AnnotationLastActivity: old}},
+			annotations: map[string]string{v1alpha1.AnnotationLastActivity: old}},
+		{name: "no annotations", pausedAt: pausedAt, recorded: &v1alpha1.WakeAnnotations{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := pausedWorkload(v1alpha1.PhasePaused)
+			workload.Status.Pause.PausedAt = &tt.pausedAt
+			workload.Status.Pause.WakeAnnotations = tt.recorded
+			workload.Annotations = tt.annotations
+			pauser := &stubPauser{resumeDone: true}
+			r := newTestReconcilerWithReplicas(t, workload, pauser, 0)
+
+			_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, pauser.resumeCalls > 0)
+		})
+	}
+}

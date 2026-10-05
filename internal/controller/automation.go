@@ -166,13 +166,19 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	// If manual desiredState is set, prediction still learns but
 	// automation does not act. Status is updated above.
 	if workload.Spec.DesiredState != nil {
-		opmetrics.AutomationSkipped.WithLabelValues(workload.Namespace, workload.Name).Inc()
-		r.emitEvent(workload, false, "Normal", ReasonAutomationSkipped, actionEvaluate,
-			"automation skipped, desiredState is manually set to %s", *workload.Spec.DesiredState)
+		if err := r.reportManualOverride(ctx, workload); err != nil {
+			return nil, err
+		}
 		return &ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
 	}
+	r.clearCondition(workload, conditionManualOverride, "Automated")
 
 	if workload.Spec.IdlePolicy == nil {
+		if phase == v1alpha1.PhaseIdle {
+			if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "NoIdlePolicy"); err != nil {
+				return nil, err
+			}
+		}
 		return &ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
 	}
 
@@ -181,23 +187,41 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	return r.reconcileIdleClock(ctx, workload, target, engine)
 }
 
-// reconcileWake resumes a paused workload when an activity annotation asks
-// for it, or ahead of the demand a confident forecast predicts.
-func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
-	if workload.Spec.DesiredState != nil {
-		return nil, nil
+// reportManualOverride notes, once, that desiredState has taken over from
+// automation, which goes on learning the forecast but doesn't act on it.
+func (r *Reconciler) reportManualOverride(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
+	desired := *workload.Spec.DesiredState
+	msg := fmt.Sprintf("desiredState is %s, so automation doesn't pause or wake the workload", desired)
+	if c := meta.FindStatusCondition(workload.Status.Conditions, conditionManualOverride); c != nil &&
+		c.Status == metav1.ConditionTrue && c.Message == msg {
+		return nil
 	}
+	r.setCondition(workload, conditionManualOverride, metav1.ConditionTrue, "DesiredStateSet", msg)
+	if err := r.Status().Update(ctx, workload); err != nil {
+		return fmt.Errorf("recording the manual override: %w", err)
+	}
+	opmetrics.AutomationSkipped.WithLabelValues(workload.Namespace, workload.Name).Inc()
+	r.emitEvent(workload, false, "Normal", ReasonAutomationSkipped, actionEvaluate,
+		"automation skipped, desiredState is manually set to %s", desired)
+	return nil
+}
+
+// reconcileWake resumes a paused workload when an activity annotation asks
+// for it, or ahead of the demand a confident forecast predicts. Otherwise
+// it's looked at again when that forecast could next change its mind.
+func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
+	recheck := &ctrl.Result{RequeueAfter: pausedRecheck(r.now())}
+	if workload.Spec.DesiredState != nil {
+		return recheck, r.reportManualOverride(ctx, workload)
+	}
+	r.clearCondition(workload, conditionManualOverride, "Automated")
 
 	if r.wokenByActivity(ctx, workload, target) {
 		message := "activity annotation is newer than the pause, waking"
 		if wakeSource(workload) == v1alpha1.ActivitySourceRequest {
 			message = "a request is waiting, waking"
 		}
-		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonWokeByActivity, actionResume, "%s", message)
-		if workload.Spec.DryRun {
-			return nil, nil
-		}
-		return r.handleResume(ctx, workload)
+		return r.handleResume(ctx, workload, &wakeEvent{reason: ReasonWokeByActivity, message: message})
 	}
 
 	engine := r.forecastEngine(workload)
@@ -205,10 +229,10 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 	r.updatePredictionStatus(ctx, workload, engine)
 
 	if workload.Spec.IdlePolicy == nil || !workload.Spec.IdlePolicy.AutoResume {
-		return nil, nil
+		return recheck, nil
 	}
 	if engine.GetPhase() < forecast.DailyActive {
-		return nil, nil
+		return recheck, nil
 	}
 
 	// The workload is scaled to zero, so live requests can't be read. The
@@ -219,7 +243,7 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 		totalRequest = float64(workload.Status.Pause.Resources.CPUMillis) * float64(workload.Status.Pause.PreviousReplicas)
 	}
 	if totalRequest <= 0 {
-		return nil, nil
+		return recheck, nil
 	}
 	now := r.now()
 	predicted, when := engine.Predict(0, now), "this hour"
@@ -231,15 +255,11 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 	predictedPercent := predicted / totalRequest * 100
 	threshold := cpuThresholdFor(workload)
 	if predictedPercent < float64(threshold) {
-		return nil, nil
+		return recheck, nil
 	}
 
-	r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonAutoResume, actionResume,
-		"forecast expects %.0f%% utilization %s (threshold %d%%), waking ahead of demand", predictedPercent, when, threshold)
-	if workload.Spec.DryRun {
-		return nil, nil
-	}
-	return r.handleResume(ctx, workload)
+	return r.handleResume(ctx, workload, &wakeEvent{reason: ReasonAutoResume, message: fmt.Sprintf(
+		"forecast expects %.0f%% utilization %s (threshold %d%%), waking ahead of demand", predictedPercent, when, threshold)})
 }
 
 // autoResumeLead is how far ahead of a predicted busy hour a paused workload
@@ -248,6 +268,21 @@ const autoResumeLead = 15 * time.Minute
 
 func untilNextHour(now time.Time) time.Duration {
 	return now.Truncate(time.Hour).Add(time.Hour).Sub(now)
+}
+
+// pausedRecheck is when a paused workload is next looked at: when autoResume
+// could next decide differently, autoResumeLead before the hour and on it,
+// and at least every statusFlushInterval, so the forecast learns each quiet
+// hour and savings accrue steadily.
+func pausedRecheck(now time.Time) time.Duration {
+	wait := statusFlushInterval
+	next := untilNextHour(now)
+	for _, d := range []time.Duration{next - autoResumeLead, next} {
+		if d > 0 && d < wait {
+			wait = d
+		}
+	}
+	return wait
 }
 
 // observePausedHour feeds the forecast an hour of no demand while the

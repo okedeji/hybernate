@@ -243,21 +243,60 @@ func (r *Reconciler) activityAnnotations(ctx context.Context, obj client.Object,
 }
 
 // wakeSource is what to record as the activity that woke a paused workload:
-// a request the doorman stamped after the pause, or any other wake. It must
-// be read before the resume completes, which clears the pause.
+// a request the doorman stamped since the pause began, or any other wake. It
+// must be read before the resume completes, which clears the pause.
 func wakeSource(workload *v1alpha1.ManagedWorkload) v1alpha1.ActivitySource {
-	if workload.Status.Pause == nil || workload.Status.Pause.PausedAt == nil {
+	pause := workload.Status.Pause
+	if pause == nil {
 		return v1alpha1.ActivitySourceWoke
 	}
 	raw, ok := workload.Annotations[v1alpha1.AnnotationLastRequest]
 	if !ok {
 		return v1alpha1.ActivitySourceWoke
 	}
+	if pause.WakeAnnotations != nil && raw != pause.WakeAnnotations.Workload[v1alpha1.AnnotationLastRequest] {
+		return v1alpha1.ActivitySourceRequest
+	}
 	requested, err := time.Parse(time.RFC3339, raw)
-	if err != nil || !requested.After(workload.Status.Pause.PausedAt.Time) {
+	if err != nil || pause.PausedAt == nil || requested.Before(pause.PausedAt.Time) {
 		return v1alpha1.ActivitySourceWoke
 	}
 	return v1alpha1.ActivitySourceRequest
+}
+
+// activityAnnotations are the annotations that wake a paused workload.
+var activityAnnotations = []string{
+	v1alpha1.AnnotationLastActivity,
+	v1alpha1.AnnotationLastRequest,
+	v1alpha1.AnnotationActiveUntil,
+}
+
+// activityAnnotationValues is what obj's activity annotations are set to.
+func activityAnnotationValues(obj client.Object) map[string]string {
+	if obj == nil {
+		return nil
+	}
+	var values map[string]string
+	for _, key := range activityAnnotations {
+		if v, ok := obj.GetAnnotations()[key]; ok {
+			if values == nil {
+				values = map[string]string{}
+			}
+			values[key] = v
+		}
+	}
+	return values
+}
+
+// activityAnnotationChanged reports whether any of obj's activity
+// annotations was set to a value other than the one recorded.
+func activityAnnotationChanged(obj client.Object, recorded map[string]string) bool {
+	for _, key := range activityAnnotations {
+		if v := obj.GetAnnotations()[key]; v != "" && v != recorded[key] {
+			return true
+		}
+	}
+	return false
 }
 
 // cpuActive reports whether CPU usage is above the activity threshold, as a
@@ -348,10 +387,12 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 
 	if obs.activeUntil.After(now) || now.Before(pauseAt) {
 		if workload.Status.Phase == v1alpha1.PhaseIdle {
-			r.reportActivityResumed(workload)
+			source := workload.Status.Activity.LastActivitySource
+			slept, freed, measured := r.endWouldBePause(workload)
 			if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ActivityResumed"); err != nil {
 				return nil, err
 			}
+			r.reportActivityResumed(workload, source, slept, freed, measured)
 		}
 		return &ctrl.Result{RequeueAfter: nextCheck(now, pauseAt, obs.activeUntil)}, nil
 	}
@@ -369,29 +410,28 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 	idleFor := now.Sub(workload.Status.Activity.LastActivityTime.Time).Round(time.Minute)
 
 	if workload.Status.Phase != v1alpha1.PhaseIdle {
-		opmetrics.IdleDetections.WithLabelValues(workload.Namespace, workload.Name).Inc()
-		if workload.Spec.DryRun {
-			opmetrics.DryrunActions.WithLabelValues("idle_pause").Inc()
-		}
-		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleDetected, actionEvaluateIdle,
-			"no activity for %s, last seen from %s; pause", idleFor, workload.Status.Activity.LastActivitySource)
 		if workload.Spec.DryRun {
 			r.beginWouldBePause(ctx, workload)
 		}
 		if _, err := r.transition(ctx, workload, v1alpha1.PhaseIdle, "IdleDetected"); err != nil {
 			return nil, err
 		}
+		opmetrics.IdleDetections.WithLabelValues(workload.Namespace, workload.Name).Inc()
+		if workload.Spec.DryRun {
+			opmetrics.DryrunActions.WithLabelValues("idle_pause").Inc()
+		}
+		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleDetected, actionEvaluateIdle,
+			"no activity for %s, last seen from %s; pause", idleFor, workload.Status.Activity.LastActivitySource)
 	}
 
 	if workload.Spec.DryRun {
 		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 	}
-	return r.handlePause(ctx, workload)
+	return r.handlePause(ctx, workload, target)
 }
 
-func (r *Reconciler) reportActivityResumed(workload *v1alpha1.ManagedWorkload) {
-	source := workload.Status.Activity.LastActivitySource
-	slept, freed, measured := r.endWouldBePause(workload)
+func (r *Reconciler) reportActivityResumed(workload *v1alpha1.ManagedWorkload, source v1alpha1.ActivitySource,
+	slept time.Duration, freed float64, measured bool) {
 	if !measured {
 		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonActivityResumed, actionEvaluateIdle,
 			"activity resumed (%s), no longer idle", source)
@@ -433,20 +473,30 @@ func nextCheck(now, pauseAt, activeUntil time.Time) time.Duration {
 }
 
 // wokenByActivity reports whether a paused workload's annotations ask for it
-// to wake: a last-activity newer than the pause, or an active-until hold that
-// hasn't ended.
+// to wake: one set since the pause began, a last-activity no older than the
+// pause, or an active-until hold that hasn't ended. Annotations are stamped
+// to the second, and from clocks other than the operator's, such as a
+// laptop's, so a change counts whatever time it states.
 func (r *Reconciler) wokenByActivity(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) bool {
 	now := r.now()
 	var pausedAt time.Time
-	if workload.Status.Pause != nil && workload.Status.Pause.PausedAt != nil {
-		pausedAt = workload.Status.Pause.PausedAt.Time
+	var recorded *v1alpha1.WakeAnnotations
+	if pause := workload.Status.Pause; pause != nil {
+		recorded = pause.WakeAnnotations
+		if pause.PausedAt != nil {
+			pausedAt = pause.PausedAt.Time
+		}
+	}
+	if recorded != nil && (activityAnnotationChanged(workload, recorded.Workload) ||
+		target != nil && activityAnnotationChanged(target, recorded.Target)) {
+		return true
 	}
 	for _, obj := range []client.Object{workload, target} {
 		if obj == nil {
 			continue
 		}
 		lastActivity, activeUntil := r.activityAnnotations(ctx, obj, now)
-		if lastActivity.After(pausedAt) || activeUntil.After(now) {
+		if (!lastActivity.IsZero() && !lastActivity.Before(pausedAt)) || activeUntil.After(now) {
 			return true
 		}
 	}

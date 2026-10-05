@@ -167,8 +167,8 @@ func automationWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload 
 
 // --- Tests ---
 
-func TestAutomation_SkipsNonRunningPhase(t *testing.T) {
-	for _, phase := range []v1alpha1.WorkloadPhase{v1alpha1.PhasePaused, v1alpha1.PhasePausing} {
+func TestAutomation_SkipsTransitions(t *testing.T) {
+	for _, phase := range []v1alpha1.WorkloadPhase{v1alpha1.PhasePausing, v1alpha1.PhaseResuming} {
 		t.Run(string(phase), func(t *testing.T) {
 			workload := automationWorkload(phase)
 			engine := &stubForecaster{phase: forecast.DailyActive}
@@ -179,6 +179,67 @@ func TestAutomation_SkipsNonRunningPhase(t *testing.T) {
 			assert.Nil(t, result)
 		})
 	}
+}
+
+// A paused workload is looked at again by time alone, or autoResume never
+// fires, the forecast never learns its quiet hours, and savings only accrue
+// when something unrelated happens to touch it.
+func TestPausedRecheck(t *testing.T) {
+	tests := []struct {
+		name string
+		at   time.Time
+		want time.Duration
+	}{
+		{name: "at the flush interval", at: fixedTime.Add(10 * time.Minute), want: statusFlushInterval},
+		{name: "when autoResume next looks ahead", at: fixedTime.Add(42 * time.Minute), want: 3 * time.Minute},
+		{name: "on the hour", at: fixedTime.Add(58 * time.Minute), want: 2 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, pausedRecheck(tt.at))
+		})
+	}
+}
+
+func TestAutomation_PausedIsRequeued(t *testing.T) {
+	for _, desired := range []*v1alpha1.DesiredState{nil, desiredState(v1alpha1.DesiredStatePaused)} {
+		workload := pausedForecastWorkload()
+		workload.Spec.DesiredState = desired
+		r := newAutomationReconciler(t, workload, &stubForecaster{phase: forecast.Observing}, automationOpts{})
+		r.clock = func() time.Time { return fixedTime.Add(10 * time.Minute) }
+
+		result, err := r.reconcileAutomation(context.Background(), workload, nil)
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, statusFlushInterval, result.RequeueAfter)
+	}
+}
+
+// autoResume fires through the requeues a paused workload schedules itself,
+// with nothing else touching it.
+func TestAutoResume_FiresOnTimeAlone(t *testing.T) {
+	workload := pausedForecastWorkload()
+	workload.Finalizers = []string{finalizerName}
+	engine := &stubForecaster{phase: forecast.DailyActive, predictByHour: map[int]float64{0: 1, 1: 50}}
+	pauser := &stubPauser{resumeDone: true}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{pauser: pauser})
+	require.NoError(t, r.Create(context.Background(), targetDeploymentWithReplicas("api", "default", 0)))
+	now := fixedTime.Add(3 * time.Minute)
+	r.clock = func() time.Time { return now }
+
+	for range 20 {
+		result, err := r.Reconcile(context.Background(), reconcileFor("api"))
+		require.NoError(t, err)
+		if pauser.resumeCalls > 0 {
+			break
+		}
+		require.Positive(t, result.RequeueAfter, "a paused workload at %s must be requeued", now.Format("15:04"))
+		now = now.Add(result.RequeueAfter)
+	}
+
+	require.Equal(t, 1, pauser.resumeCalls, "autoResume never fired")
+	assert.Equal(t, fixedTime.Add(time.Hour-autoResumeLead), now, "woken as the lead before the busy hour begins")
 }
 
 func TestAutomation_DesiredStateStillUpdatesStatus(t *testing.T) {

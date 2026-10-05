@@ -254,7 +254,7 @@ func TestDependencies_WakingWakesDependencies(t *testing.T) {
 	unrelated := depWorkload("default", "redis", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
 	r := depReconciler(t, &stubPauser{resumeDone: true}, api, postgres, unrelated, postgresTarget(1, 1))
 
-	_, err := r.handleResume(context.Background(), api)
+	_, err := r.handleResume(context.Background(), api, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, fixedTime.UTC().Format(time.RFC3339),
@@ -299,7 +299,7 @@ func TestDependencies_WaitForReady(t *testing.T) {
 			}
 			r := depReconciler(t, pauser, objs...)
 
-			result, err := r.handleResume(context.Background(), api)
+			result, err := r.handleResume(context.Background(), api, nil)
 			require.NoError(t, err)
 
 			if tt.managed != nil {
@@ -327,7 +327,7 @@ func TestDependencies_WaitForMissingDependencyDoesNotBlock(t *testing.T) {
 	pauser := &stubPauser{resumeDone: true}
 	r := depReconciler(t, pauser, api)
 
-	_, err := r.handleResume(context.Background(), api)
+	_, err := r.handleResume(context.Background(), api, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, pauser.resumeCalls)
@@ -365,7 +365,7 @@ func TestDependencies_ManualPauseWarnsWhenDependentsAwake(t *testing.T) {
 	pauser := &stubPauser{pauseDone: true}
 	r := depReconciler(t, pauser, postgres, api, postgresTarget(1, 1))
 
-	_, err := r.reconcileDesiredState(context.Background(), postgres)
+	_, err := r.reconcileDesiredState(context.Background(), postgres, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, pauser.pauseCalls, "a manual pause still wins")
@@ -405,7 +405,7 @@ func TestDependencies_ScaleUpWakesDependencies(t *testing.T) {
 	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhasePaused, postgresRef())
 	api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1, PausedAt: &pausedAt}
 	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
-	r := depReconciler(t, &stubPauser{}, api, postgres)
+	r := depReconciler(t, &stubPauser{}, api, postgres, targetDeploymentWithReplicas("api", "default", 1))
 
 	require.NoError(t, r.wakeOnScaleUp(context.Background(), api, scaledBy("kubectl-scale", 1)))
 
@@ -517,7 +517,7 @@ func TestDependencies_UnwatchedNamespaceDoesNotBlock(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Contains(t, cond.Message, "doesn't watch namespace shared")
 
-	_, err = r.handleResume(ctx, &w)
+	_, err = r.handleResume(ctx, &w, nil)
 	require.NoError(t, err, "waking isn't blocked by a dependency it can't see")
 	assert.Equal(t, 1, pauser.resumeCalls)
 	assert.Equal(t, v1alpha1.PhaseRunning, w.Status.Phase)

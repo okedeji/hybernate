@@ -18,8 +18,10 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -27,8 +29,14 @@ import (
 	"github.com/okedeji/hybernate/internal/autoscaler"
 )
 
-// Pauser handles pausing and resuming workloads. Each method is safe to call
-// multiple times — progress is checkpointed in the ManagedWorkload status.
+// ErrNotPrepared means Pause was called without the record Prepare makes,
+// from which the pause would be undone.
+var ErrNotPrepared = errors.New("pause not prepared")
+
+// Pauser pauses and resumes workloads. A pause is recorded in the
+// ManagedWorkload's status by Prepare, and the caller persists that record
+// before Pause changes anything, so every step can be repeated after an
+// interruption and undone exactly.
 type Pauser struct {
 	client      client.Client
 	scaler      WorkloadScaler
@@ -47,59 +55,64 @@ func NewPauser(c client.Client, autoscalers *autoscaler.Finder) *Pauser {
 	}
 }
 
-// Pause drives a workload toward the Paused state. Returns true when complete.
-// PVCs are left intact — they persist independently of the workload's replica count.
+// Prepare records in workload.Status.Pause what pausing will change: the
+// replicas, and the KEDA ScaledObject with its own paused-replicas
+// annotation. It changes nothing in the cluster.
+func (p *Pauser) Prepare(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
+	target, err := getTarget(ctx, p.client, workload)
+	if err != nil {
+		return fmt.Errorf("getting target workload: %w", err)
+	}
+	scale, err := p.scaler.GetScale(ctx, target)
+	if err != nil {
+		return fmt.Errorf("getting current replicas: %w", err)
+	}
+	pause := &v1alpha1.PauseStatus{PreviousReplicas: scale.Spec.Replicas}
+	a, found, err := p.autoscalers.FindNow(ctx, workload.Namespace, workload.Spec.Target.Kind, workload.Spec.Target.Name)
+	if err != nil {
+		return fmt.Errorf("finding the workload's autoscaler: %w", err)
+	}
+	if found && a.Kind == autoscaler.KEDA {
+		pause.ScaledObject = a.Name
+		pause.ScaledObjectPausedReplicas = a.PausedReplicas
+	}
+	workload.Status.Pause = pause
+	return nil
+}
+
+// Pause scales a prepared workload to zero, holding its KEDA ScaledObject
+// there, and returns true when it's done. PVCs are left intact: they persist
+// independently of the replica count.
 func (p *Pauser) Pause(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error) {
+	pause := workload.Status.Pause
+	if pause == nil {
+		return false, ErrNotPrepared
+	}
 	target, err := getTarget(ctx, p.client, workload)
 	if err != nil {
 		return false, fmt.Errorf("getting target workload: %w", err)
 	}
-
-	// The controller creates Status.Pause before calling Pause, to hold the
-	// resource snapshot, so a nil check can't tell whether the replica count
-	// was recorded. PausedAt is only set once the workload has been paused.
-	if workload.Status.Pause == nil {
-		workload.Status.Pause = &v1alpha1.PauseStatus{}
-	}
-	if workload.Status.Pause.PausedAt == nil {
-		scale, err := p.scaler.GetScale(ctx, target)
-		if err != nil {
-			return false, fmt.Errorf("getting current replicas: %w", err)
-		}
-		// Keep a recorded count if a previous attempt already scaled to zero.
-		if scale.Spec.Replicas > 0 {
-			workload.Status.Pause.PreviousReplicas = scale.Spec.Replicas
-		}
-		a, found, err := p.autoscalers.FindNow(ctx, workload.Namespace, workload.Spec.Target.Kind,
-			workload.Spec.Target.Name)
-		if err != nil {
-			return false, fmt.Errorf("finding the workload's autoscaler: %w", err)
-		}
-		if found && a.Kind == autoscaler.KEDA {
-			workload.Status.Pause.ScaledObject = a.Name
-		}
-	}
-	if so := workload.Status.Pause.ScaledObject; so != "" {
-		if err := autoscaler.HoldKEDA(ctx, p.client, workload.Namespace, so, true); err != nil {
+	if so := pause.ScaledObject; so != "" {
+		if err := autoscaler.HoldKEDA(ctx, p.client, workload.Namespace, so, 0); err != nil {
 			return false, err
 		}
 	}
-
 	if err := scaleTo(ctx, p.scaler, target, 0); err != nil {
 		return false, fmt.Errorf("scaling to zero: %w", err)
 	}
-
-	if workload.Status.Pause.PausedAt == nil {
+	if pause.PausedAt == nil {
 		now := p.clock()
-		workload.Status.Pause.PausedAt = &now
+		pause.PausedAt = &now
 	}
-
 	return true, nil
 }
 
-// Resume drives a workload from Paused back to Running. Returns true when complete.
+// Resume scales a paused workload back up and returns true once its pods are
+// Ready. The pause record is left for the caller to clear as it records the
+// workload Running, so a retry after that write fails can resume again.
 func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error) {
-	if workload.Status.Pause == nil {
+	pause := workload.Status.Pause
+	if pause == nil {
 		return true, nil
 	}
 
@@ -113,16 +126,17 @@ func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload)
 		return false, err
 	}
 
-	if err := scaleTo(ctx, p.scaler, target, replicas); err != nil {
-		return false, fmt.Errorf("scaling to %d: %w", replicas, err)
-	}
-	// Released after scaling up, so KEDA starts from the restored replicas,
-	// including a ScaledObject that would otherwise stay at zero until a
-	// trigger fires.
-	if so := workload.Status.Pause.ScaledObject; so != "" {
-		if err := autoscaler.HoldKEDA(ctx, p.client, workload.Namespace, so, false); err != nil {
+	// KEDA holds the workload at the restored replicas until they're Ready.
+	// Released any earlier, a ScaledObject that may scale to zero, with no
+	// trigger active, could take it back down while it starts, and the two
+	// would fight over the replicas for as long as that lasted.
+	if so := pause.ScaledObject; so != "" {
+		if err := autoscaler.HoldKEDA(ctx, p.client, workload.Namespace, so, replicas); err != nil {
 			return false, err
 		}
+	}
+	if err := scaleTo(ctx, p.scaler, target, replicas); err != nil {
+		return false, fmt.Errorf("scaling to %d: %w", replicas, err)
 	}
 
 	ready, err := checkReady(ctx, p.client, target, replicas)
@@ -133,8 +147,60 @@ func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload)
 		return false, nil
 	}
 
-	workload.Status.Pause = nil
+	if err := p.releaseKEDA(ctx, workload); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+// Restore hands a paused workload back without waiting for it: scaled back
+// to its recorded replicas if it's still at zero, and its ScaledObject
+// released. It's for when Hybernate stops managing the workload, or someone
+// else has already woken it, so it never scales down what's running. A
+// target that's gone has nothing to scale. The pause record is left for the
+// caller to clear once it has persisted the outcome.
+func (p *Pauser) Restore(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
+	if workload.Status.Pause == nil {
+		return nil
+	}
+	target, err := getTarget(ctx, p.client, workload)
+	switch {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return fmt.Errorf("getting target workload: %w", err)
+	default:
+		if err := p.scaleUpFromZero(ctx, workload, target); err != nil {
+			return err
+		}
+	}
+	return p.releaseKEDA(ctx, workload)
+}
+
+func (p *Pauser) scaleUpFromZero(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) error {
+	scale, err := p.scaler.GetScale(ctx, target)
+	if err != nil {
+		return fmt.Errorf("getting current replicas: %w", err)
+	}
+	if scale.Spec.Replicas > 0 {
+		return nil
+	}
+	replicas, err := p.resumeReplicas(ctx, workload)
+	if err != nil {
+		return err
+	}
+	scale.Spec.Replicas = replicas
+	if err := p.scaler.UpdateScale(ctx, target, scale); err != nil {
+		return fmt.Errorf("updating scale to %d: %w", replicas, err)
+	}
+	return nil
+}
+
+func (p *Pauser) releaseKEDA(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
+	pause := workload.Status.Pause
+	if pause.ScaledObject == "" {
+		return nil
+	}
+	return autoscaler.ReleaseKEDA(ctx, p.client, workload.Namespace, pause.ScaledObject, pause.ScaledObjectPausedReplicas)
 }
 
 // resumeReplicas is what a paused workload is scaled back to: what it ran

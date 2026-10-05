@@ -185,7 +185,7 @@ func TestLearnedDependencies_HoldAndWake(t *testing.T) {
 		postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
 		r := depReconciler(t, &stubPauser{resumeDone: true}, api, postgres, postgresTarget(1, 1))
 
-		_, err := r.handleResume(context.Background(), api)
+		_, err := r.handleResume(context.Background(), api, nil)
 		require.NoError(t, err)
 
 		assert.Equal(t, fixedTime.UTC().Format(time.RFC3339),
