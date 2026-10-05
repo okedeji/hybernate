@@ -765,7 +765,8 @@ func heldCount(s *Server) int {
 }
 
 // Scanning the doorman's ports wakes only as many workloads as one source
-// may wake.
+// may wake at once. A caller over the limit isn't dropped: it's held, and
+// its workload is woken once the source's allowance refills.
 func TestServer_WakesAreLimitedPerSource(t *testing.T) {
 	first, second := freePort(t), freePort(t)
 	other := pausedWorkload("billing", second, time.Minute)
@@ -775,17 +776,95 @@ func TestServer_WakesAreLimitedPerSource(t *testing.T) {
 		l.sourceWakeEvery = time.Hour
 		s.admission = newAdmission(l)
 	}, pausedWorkload("api", first, time.Minute), other)
-	before := testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("dev", "billing", resultLimited))
+	billing := types.NamespacedName{Namespace: "dev", Name: "billing"}
 
 	send(t, dial(t, first), "hello\n")
 	require.Eventually(t, func() bool { return lastRequest(t, c) != "" }, 5*time.Second, 20*time.Millisecond)
 	conn := dial(t, second)
 	send(t, conn, "hello\n")
 
-	closedWithin(t, conn)
-	assert.Equal(t, before+1, testutil.ToFloat64(opmetrics.DoormanWakes.WithLabelValues("dev", "billing", resultLimited)))
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "dev", Name: "billing"}, other))
-	assert.Empty(t, other.Annotations[v1alpha1.AnnotationLastRequest])
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2500*time.Millisecond)))
+	_, err := conn.Read(make([]byte, 1))
+	var netErr net.Error
+	require.True(t, errors.As(err, &netErr) && netErr.Timeout(), "the connection is held, not closed: %v", err)
+	require.NoError(t, c.Get(context.Background(), billing, other))
+	assert.Empty(t, other.Annotations[v1alpha1.AnnotationLastRequest], "the limit holds back the wake")
+}
+
+func TestServer_RetriesALimitedWake(t *testing.T) {
+	first, second := freePort(t), freePort(t)
+	other := pausedWorkload("billing", second, time.Minute)
+	_, c := startServerWith(t, func(s *Server) {
+		l := defaultLimits
+		l.sourceWakeBurst = 1
+		l.sourceWakeEvery = time.Second
+		s.admission = newAdmission(l)
+	}, pausedWorkload("api", first, time.Minute), other)
+	billing := types.NamespacedName{Namespace: "dev", Name: "billing"}
+
+	send(t, dial(t, first), "hello\n")
+	require.Eventually(t, func() bool { return lastRequest(t, c) != "" }, 5*time.Second, 20*time.Millisecond)
+	send(t, dial(t, second), "hello\n")
+
+	require.Eventually(t, func() bool {
+		require.NoError(t, c.Get(context.Background(), billing, other))
+		return other.Annotations[v1alpha1.AnnotationLastRequest] != ""
+	}, 5*time.Second, 50*time.Millisecond, "woken once the source may wake again")
+}
+
+// A browser is shown the waking-up page even when its wake is held back,
+// rather than a dropped connection its ingress turns into a 502.
+func TestServer_ServesThePageWhenWakesAreLimited(t *testing.T) {
+	first, second := freePort(t), freePort(t)
+	_, c := startServerWith(t, func(s *Server) {
+		l := defaultLimits
+		l.sourceWakeBurst = 1
+		l.sourceWakeEvery = time.Hour
+		s.admission = newAdmission(l)
+	}, pausedWorkload("api", first, time.Minute), pausedWorkload("billing", second, time.Minute))
+
+	send(t, dial(t, first), "hello\n")
+	require.Eventually(t, func() bool { return lastRequest(t, c) != "" }, 5*time.Second, 20*time.Millisecond)
+	conn := dial(t, second)
+	send(t, conn, browserGET)
+
+	resp, body := readResponse(t, conn)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Contains(t, body, "<html")
+}
+
+// A wake refused because the doorman as a whole is at its limit leaves the
+// source's own allowance alone, so it may wake as soon as the doorman can.
+func TestAdmission_AWakeRefusedOverallDoesNotSpendTheSources(t *testing.T) {
+	a := newAdmission(limits{
+		sourceWakeEvery: time.Hour, sourceWakeBurst: 1,
+		wakeEvery: time.Second, wakeBurst: 1,
+	})
+	now := time.Now()
+	first, second := netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2")
+
+	require.True(t, a.allowWake(first, now))
+	require.False(t, a.allowWake(second, now), "the doorman's allowance is spent")
+
+	assert.True(t, a.allowWake(second, now.Add(time.Second)))
+}
+
+// Behind an ingress, every user comes from one address. A burst of
+// connections to one workload can't take the places the others need.
+func TestAdmission_HeldConnectionsAreCappedPerWorkload(t *testing.T) {
+	a := newAdmission(limits{maxHeld: 100, maxHeldPerSource: 50, maxHeldPerSourceWorkload: 2})
+	now := time.Now()
+	ingress := netip.MustParseAddr("10.0.0.1")
+	shop := types.NamespacedName{Namespace: "dev", Name: "shop"}
+	billing := types.NamespacedName{Namespace: "dev", Name: "billing"}
+
+	require.True(t, a.hold(ingress, shop, now))
+	require.True(t, a.hold(ingress, shop, now))
+	assert.False(t, a.hold(ingress, shop, now), "shop is at its cap")
+	assert.True(t, a.hold(ingress, billing, now), "billing still has room")
+
+	a.release(ingress, shop, now)
+	assert.True(t, a.hold(ingress, shop, now))
 }
 
 // Two routes claiming one port would send one workload's callers to the

@@ -79,7 +79,7 @@ func (s *Server) handle(ctx context.Context, port int32, rt route, conn net.Conn
 	logger := log.FromContext(ctx).WithName("doorman").WithValues(
 		"workload", rt.workload.Name, "namespace", rt.workload.Namespace, "service", rt.service)
 
-	if !s.admission.hold(from, start) {
+	if !s.admission.hold(from, rt.workload, start) {
 		s.record(rt, resultLimited, start)
 		logger.V(1).Info("refusing connection: too many held", "source", from.String())
 		return
@@ -89,7 +89,7 @@ func (s *Server) handle(ctx context.Context, port int32, rt route, conn net.Conn
 	unhold := func() {
 		if held {
 			held = false
-			s.admission.release(from, s.now())
+			s.admission.release(from, rt.workload, s.now())
 			opmetrics.DoormanHeldConnections.Dec()
 		}
 	}
@@ -175,10 +175,9 @@ func (h *heldConn) hold(ctx context.Context) (net.Conn, string) {
 		return nil, resultIgnored
 	}
 
+	// A wake over the limits is retried while the connection is held, and
+	// a browser still gets the page, which reloads and asks again.
 	wakeErr := h.requestWake(waitCtx, h.route, h.from)
-	if errors.Is(wakeErr, errWakeLimited) {
-		return nil, resultLimited
-	}
 	if isHTTP && h.route.page && isPageLoad(req) {
 		h.servePage(waitCtx, req)
 		return nil, resultPage
@@ -207,9 +206,7 @@ func (h *heldConn) await(ctx, waitCtx context.Context, wakeErr error) (net.Conn,
 		}
 		if wakeErr != nil && !current.draining() && h.now().Sub(lastWake) >= wakeRetryInterval {
 			lastWake = h.now()
-			if wakeErr = h.requestWake(waitCtx, h.route, h.from); errors.Is(wakeErr, errWakeLimited) {
-				return nil, resultLimited
-			}
+			wakeErr = h.requestWake(waitCtx, h.route, h.from)
 		}
 
 		retry := time.NewTimer(dialRetryInterval)
@@ -228,6 +225,8 @@ func (h *heldConn) await(ctx, waitCtx context.Context, wakeErr error) (net.Conn,
 			switch {
 			case ctx.Err() != nil:
 				return nil, resultCanceled
+			case errors.Is(wakeErr, errWakeLimited):
+				return nil, resultLimited
 			case dialFailed || wakeErr != nil:
 				return nil, resultError
 			default:
