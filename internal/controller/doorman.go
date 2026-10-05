@@ -118,10 +118,23 @@ func (r *Reconciler) routeDoorman(ctx context.Context, workload *v1alpha1.Manage
 	r.setCondition(workload, conditionWakeOnRequest, metav1.ConditionFalse, reasonRoutingFailed,
 		fmt.Sprintf("requests may not wake the workload; retrying: %v", err))
 	if !failing {
-		r.emitEvent(workload, false, "Warning", reasonRoutingFailed, actionRouteDoorman,
-			"requests may not wake the workload: %v", err)
+		r.announceRouting(ctx, workload, reasonRoutingFailed, "requests may not wake the workload: %v", err)
 	}
 	return r.doormanFailures.next(workload.UID)
+}
+
+// announceRouting warns about a change in the workload's routing once the
+// condition reporting it is written. A pause or wake in progress is retried
+// every few seconds without writing status, so a change announced but left
+// unwritten would be announced again on every retry. If the write fails,
+// the change is announced when a later reconcile finds it again.
+func (r *Reconciler) announceRouting(ctx context.Context, workload *v1alpha1.ManagedWorkload, reason, msgFmt string, args ...any) {
+	if err := r.Status().Update(ctx, workload); err != nil {
+		log.FromContext(ctx).Error(err, "recording a change in doorman routing",
+			"workload", workload.Name, "namespace", workload.Namespace, "reason", reason)
+		return
+	}
+	r.emitEvent(workload, false, "Warning", reason, actionRouteDoorman, msgFmt, args...)
 }
 
 // reconcileDoorman makes the workload's doorman EndpointSlices and routes
@@ -180,7 +193,7 @@ func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.Ma
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	r.reportDoorman(workload, routes, plan.skipped)
+	r.reportDoorman(ctx, workload, routes, plan.skipped)
 	return nil
 }
 
@@ -215,7 +228,8 @@ func (s skippedServices) notes() string {
 // reportDoorman sets the WakeOnRequest condition. Requests through a Service
 // left unrouted because of its load balancer fail while the workload is
 // paused, so a warning event says so whenever that list changes.
-func (r *Reconciler) reportDoorman(workload *v1alpha1.ManagedWorkload, routes []v1alpha1.DoormanRoute, skipped skippedServices) {
+func (r *Reconciler) reportDoorman(ctx context.Context, workload *v1alpha1.ManagedWorkload,
+	routes []v1alpha1.DoormanRoute, skipped skippedServices) {
 	status, reason, message := metav1.ConditionTrue, "DoormanRouted", "requests are held and wake the workload"
 	switch {
 	case len(routes) > 0:
@@ -240,7 +254,7 @@ func (r *Reconciler) reportDoorman(workload *v1alpha1.ManagedWorkload, routes []
 	previous := meta.FindStatusCondition(workload.Status.Conditions, conditionWakeOnRequest)
 	r.setCondition(workload, conditionWakeOnRequest, status, reason, message)
 	if len(skipped.unsupported) > 0 && (previous == nil || previous.Message != message) {
-		r.emitEvent(workload, false, "Warning", "UnsupportedLoadBalancer", actionRouteDoorman,
+		r.announceRouting(ctx, workload, "UnsupportedLoadBalancer",
 			"requests to Services %s won't wake the workload: GKE container-native load balancing (NEGs) can't use the doorman",
 			strings.Join(skipped.unsupported, ", "))
 	}

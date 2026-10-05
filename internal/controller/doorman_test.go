@@ -755,6 +755,49 @@ func TestReconcile_DoormanFailureDoesNotBlockTheLifecycle(t *testing.T) {
 	assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
 }
 
+// A wake that takes a while is reconciled every few seconds without
+// anything else to write. A routing failure meanwhile is recorded as it's
+// announced, so it's announced once, not on every retry.
+func TestReconcile_RoutingFailureWhileWakingIsAnnouncedOnce(t *testing.T) {
+	r, pauser := pausedRouted(t)
+	pauser.resumeDone = false
+	w := fetch(t, r, "api")
+	w.Annotations = map[string]string{v1alpha1.AnnotationLastRequest: fixedTime.UTC().Format(time.RFC3339)}
+	require.NoError(t, r.Update(context.Background(), w))
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+	require.Equal(t, v1alpha1.PhaseResuming, fetch(t, r, "api").Status.Phase)
+	recorder := r.Recorder.(*events.FakeRecorder)
+	for len(recorder.Events) > 0 {
+		<-recorder.Events
+	}
+
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			o := client.ListOptions{}
+			o.ApplyOptions(opts)
+			if o.Namespace == r.DoormanNamespace {
+				return errors.New("unable to list endpointslices")
+			}
+			return c.List(ctx, list, opts...)
+		}})
+	for range 3 {
+		_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+		require.NoError(t, err)
+	}
+
+	var warnings int
+	for len(recorder.Events) > 0 {
+		if strings.Contains(<-recorder.Events, reasonRoutingFailed) {
+			warnings++
+		}
+	}
+	assert.Equal(t, 1, warnings)
+	got := fetch(t, r, "api")
+	assert.Equal(t, v1alpha1.PhaseResuming, got.Status.Phase)
+	assert.True(t, conditionIs(got, conditionWakeOnRequest, metav1.ConditionFalse, reasonRoutingFailed), "and recorded")
+}
+
 func TestRouteDoorman_ReportsFailuresAndBacksOff(t *testing.T) {
 	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
