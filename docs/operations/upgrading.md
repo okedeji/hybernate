@@ -46,7 +46,8 @@ Hybernate follows these CRD versioning rules:
 The forecast engine state is serialized in each ManagedWorkload's status. On upgrade:
 
 - Compatible state versions are imported automatically
-- Incompatible versions cause the engine to reset and re-learn from scratch (a warning event is emitted)
+- Incompatible versions cause the engine to reset and re-learn from scratch (a `ForecastReset` warning event is emitted)
+- Before v0.2.0, the state was kept in a `<name>-prediction-state` ConfigMap beside each ManagedWorkload. It isn't migrated: the engine re-learns. The old ConfigMaps are no longer read, are deleted along with their ManagedWorkload, and can be deleted now
 
 ## Rollback
 

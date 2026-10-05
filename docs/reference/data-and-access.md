@@ -10,7 +10,7 @@ Everything the Hybernate operator and its doorman read, write, and send, for a s
 | Pods | What a workload's pods request, sidecars included, to price it; and which pod sent a request that woke a workload | Read when needed, not cached |
 | Pod metrics (`metrics.k8s.io`) | CPU use, the activity clock's main signal | Read when needed, not cached |
 | Services, EndpointSlices | Where to route a paused workload's requests, and which workload an address in an environment names | Watched |
-| ConfigMaps | Only the ones a managed workload takes environment variables from, to learn its dependencies; and its own forecast state | Read one by one, not cached; its own are written |
+| ConfigMaps | Only the ones a managed workload takes environment variables from, to learn its dependencies | Read one by one, not cached; never written |
 | PersistentVolumeClaims | Their size, to price the storage a paused workload keeps | Watched |
 | HorizontalPodAutoscalers, KEDA ScaledObjects | What scales a workload, and its range | Watched |
 | Namespaces | Their labels: opt-in, settings, and protection | Watched |
@@ -26,8 +26,7 @@ Everything the Hybernate operator and its doorman read, write, and send, for a s
 | Deployments, StatefulSets | Their replica count, through the scale subresource, and nothing else: no other field, and never a delete |
 | KEDA ScaledObjects | The `autoscaling.keda.sh/paused-replicas` annotation, while their workload is paused |
 | EndpointSlices | Its own, routing a paused workload's Services to the doorman; deleted when the workload wakes |
-| ManagedWorkloads | Its own status, the ones it creates for labelled workloads, and the doorman's wake annotations |
-| ConfigMaps | Its own, holding each workload's forecast state |
+| ManagedWorkloads | Its own status, including each workload's forecast state, the ones it creates for labelled workloads, and the doorman's wake annotations |
 | Events | On ManagedWorkloads and workloads, to say what it did and why |
 | Leases | Leader election, in its own namespace |
 

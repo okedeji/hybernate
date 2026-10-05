@@ -27,7 +27,7 @@
 | `wake.maxWait` | duration | No | `2m` | How long a request is held while the workload wakes |
 | `wake.page` | bool | No | `true` | Answer a browser loading a page with a waking-up page instead of holding it |
 | `prediction` | `PredictionSpec` | Yes | | Forecast engine config |
-| `prediction.confidence` | int (0-100) | No | `85` | Confidence threshold |
+| `prediction.confidence` | int (50-100) | No | `85` | Confidence threshold |
 | `costTracking` | `CostTrackingSpec` | No | | Custom cost rate overrides |
 | `costTracking.rates` | `CostRates` | No | AWS defaults | Custom cost rates |
 | `dryRun` | bool | No | `false` | Evaluate without acting |
@@ -73,6 +73,7 @@
 | `prediction.dailyConfidence` | int | Daily accuracy % |
 | `prediction.weeklyPhase` | string | Weekly season phase |
 | `prediction.weeklyConfidence` | int | Weekly accuracy % |
+| `prediction.state` | string | The engine's learned state, gzipped and base64-encoded |
 | `cost` | `CostStatus` | Cost data |
 | `cost.currentMonthCPUHours` | quantity | vCPU-hours this month |
 | `cost.currentMonthMemoryHours` | quantity | GiB-hours this month |
