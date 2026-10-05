@@ -373,6 +373,26 @@ func TestActivityClock_ForecastVetoEventFollowsTheWrite(t *testing.T) {
 	assert.Equal(t, 1, vetoEvents(recorder))
 }
 
+// A dry-run workload gone Idle is measuring a would-be pause, which a real
+// pause would already be. The forecast doesn't hold back a pause it's too
+// late for, so it doesn't say it does.
+func TestActivityClock_ForecastDoesNotVetoAPauseUnderWay(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	workload.Spec.DryRun = true
+	workload.Status.Phase = v1alpha1.PhaseIdle
+	engine := &stubForecaster{phase: forecast.DailyActive, predictValue: 300}
+	metrics := idleCPU
+	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &metrics})
+
+	_, err := r.reconcileAutomation(context.Background(), workload, target)
+	require.NoError(t, err)
+
+	assert.Equal(t, v1alpha1.PhaseIdle, workload.Status.Phase)
+	assert.False(t, meta.IsStatusConditionTrue(workload.Status.Conditions, conditionIdleVetoed))
+	assert.Zero(t, vetoEvents(r.Recorder.(*events.FakeRecorder)))
+}
+
 func TestForecastHourAhead(t *testing.T) {
 	kolkata, err := time.LoadLocation("Asia/Kolkata")
 	require.NoError(t, err)

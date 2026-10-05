@@ -405,9 +405,13 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		return &ctrl.Result{RequeueAfter: nextCheck(now, pauseAt, obs.activeUntil)}, nil
 	}
 
-	var predicted float64
-	if vetoed, predicted = r.forecastVeto(ctx, workload, engine); vetoed {
-		return r.reportIdleVetoed(ctx, workload, predicted)
+	// The forecast only holds back a pause not yet decided. Idle has decided
+	// it, and in dry-run measures it as under way, as a real one would be.
+	if workload.Status.Phase == v1alpha1.PhaseRunning {
+		var predicted float64
+		if vetoed, predicted = r.forecastVeto(ctx, workload, engine); vetoed {
+			return r.reportIdleVetoed(ctx, workload, predicted)
+		}
 	}
 
 	if held, err := r.dependencyHold(ctx, workload); held != nil || err != nil {
