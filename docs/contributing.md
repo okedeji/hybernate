@@ -4,11 +4,13 @@
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+ (`go.mod` pins the toolchain)
 - Docker
 - kubectl
-- [Kind](https://kind.sigs.k8s.io/) (for local testing)
-- golangci-lint
+- [Kind](https://kind.sigs.k8s.io/) (for the end-to-end and Helm tests)
+- Helm and promtool, only for `make check-chart` and `make test-alerts`
+
+`make` downloads controller-gen, kustomize, setup-envtest and golangci-lint into `bin/` as it needs them.
 
 ### Clone and Build
 
@@ -21,14 +23,17 @@ make build
 ### Run Tests
 
 ```bash
-# Unit tests (uses envtest for K8s API)
+# Unit and integration tests (uses envtest for the K8s API)
 make test
 
 # Lint
 make lint
 
-# E2E tests (requires Kind cluster)
+# E2E tests: creates a Kind cluster, runs, and deletes it (KIND_NODE_IMAGE picks the Kubernetes version)
 make test-e2e
+
+# Install the Helm chart into Kind, and pause and wake a workload through the doorman
+make test-helm-smoke
 ```
 
 ### Run Locally
@@ -56,13 +61,19 @@ cmd/kubectl-hybernate/main.go  # kubectl plugin
 api/v1alpha1/                  # CRD type definitions
 internal/controller/           # Reconcilers
 internal/forecast/             # Holt-Winters engine
-internal/signal/               # Signal interface and implementations
+internal/signal/               # Prometheus activity queries
 internal/lifecycle/            # Pause and resume
+internal/autoscaler/           # HPA and KEDA
+internal/gitops/               # Argo CD and Flux detection
 internal/discovery/            # Cluster scan for kubectl hybernate scan
 internal/doorman/              # Wake on request
-internal/cost/                 # Cost accumulation
-internal/metrics/              # Prometheus metrics
-config/                        # CRD, RBAC, deployment manifests
+internal/cost/                 # Cost rates and node list prices
+internal/metrics/              # Prometheus metrics, and the Metrics API reader
+charts/hybernate/              # Helm chart
+config/                        # CRD, RBAC, kustomize manifests
+test/e2e/                      # End-to-end tests, in Kind
+test/docs/                     # Validates the docs' ManagedWorkload YAML against the CRD
+docs/                          # This site (mkdocs)
 ```
 
 ## Code Standards
@@ -102,9 +113,17 @@ One logical change per commit. Generated code gets its own commit.
 
 - [ ] Tests pass (`make test`)
 - [ ] Lint passes (`make lint`)
-- [ ] CRD manifests regenerated if types changed (`make manifests`)
+- [ ] CRD manifests regenerated if types changed (`make manifests`), and generated code is current (`make verify-generated`)
 - [ ] DeepCopy regenerated if types changed (`make generate`)
+- [ ] The chart still lints and renders, with RBAC matching `config/rbac` (`make check-chart`), if you changed it or RBAC
+- [ ] Alert rules still pass their tests (`make test-alerts`), if you changed them
 - [ ] Documentation updated if user-facing behavior changed
+
+CI also runs the end-to-end tests on Kubernetes 1.26 and 1.37, the Helm smoke test, and `make vulncheck`.
+
+## Documentation
+
+The docs are built with mkdocs: `pip install -r docs/requirements.txt`, then `mkdocs serve`. `make test` creates every ManagedWorkload shown in a `yaml` block in `README.md` and `docs/`, and in `config/samples/`, against the real CRD, so a doc example that doesn't validate fails the build. Put `<!-- snippet -->` on the line before a block that's deliberately partial. Links to `https://okedeji.io/hybernate` in the code must point at a page in `docs/`.
 
 ## Regenerating Generated Code
 

@@ -1,6 +1,6 @@
 # Hybernate
 
-[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.26+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 
@@ -17,11 +17,18 @@ Hybernate fixes this by:
 - **Detecting idle workloads** with a per-workload activity clock: CPU, deploys, Prometheus queries, and activity annotations from your own tooling, with no learning period
 - **Learning demand patterns** via a per-workload Holt-Winters forecasting model that tracks daily and weekly seasonality
 - **Acting automatically** by pausing idle workloads and resuming proactively before users arrive
-- **Tracking savings** with per-workload cost accounting, resource reduction metrics, and cluster-wide aggregation
+- **Tracking savings** with per-workload cost accounting on what pods request, the resources each pause frees, and a cluster-wide total in `kubectl hybernate status`
 
 ## How It Works
 
-![How It Works](docs/assets/how-it-works.png)
+```mermaid
+flowchart TD
+    label["Deployment, StatefulSet, or namespace<br/>labelled hybernate.io/managed: &quot;true&quot;"] --> mw["ManagedWorkload<br/>settings from annotations"]
+    mw --> running["Running<br/>activity clock: CPU, deploys,<br/>activity annotations, Prometheus"]
+    running -- "no activity for idleAfter,<br/>and no forecast of demand" --> paused["Paused<br/>scaled to zero; Services<br/>routed to the doorman"]
+    paused -- "a request, an activity annotation,<br/>or autoResume ahead of demand" --> resuming["Resuming<br/>replicas restored,<br/>dependencies woken"]
+    resuming -- "pods Ready;<br/>held requests passed through" --> running
+```
 
 1. You label a Deployment, StatefulSet, or namespace `hybernate.io/managed: "true"`
 2. The operator tracks when the workload was last active: CPU, deploys, and activity annotations
@@ -43,10 +50,12 @@ kubectl hybernate scan
 
 ```bash
 helm install hybernate oci://ghcr.io/okedeji/charts/hybernate \
-  --version v0.1.7 \
+  --version 0.2.0 \
   --namespace hybernate-system \
   --create-namespace
 ```
+
+Hybernate supports Kubernetes 1.26 and later, and is tested in CI on 1.26 and 1.37. The chart installs the operator, the doorman that wakes paused workloads on request, and the ManagedWorkload CRD.
 
 **Opt a workload in, measuring first:**
 
@@ -86,23 +95,41 @@ kubectl hybernate enable my-api -n staging
 - **`kubectl hybernate status`** shows what Hybernate is doing in a cluster on one screen: each workload's state, when it pauses next or what holds it awake, what needs attention, what it has saved, and the latest pauses and wakes with what caused them
 - **`kubectl hybernate wake`** wakes a paused workload from the terminal and waits until it's Running
 - **`kubectl hybernate enable`** ends dry-run once you trust what you've measured, and says what to change in Git when Argo CD or Flux applies the workload
-- **Cost tracking** with per-workload resource consumption, estimated savings, and resources freed
+- **Cost tracking** per workload, for the current month: what it cost, what pausing saved, and a projection for the month, priced at the list price of the nodes it runs on
 - **Dry-run mode** to observe every decision the operator would make without it taking action
 
 ### Observability
 
-- **Prometheus metrics** for operator health, lifecycle transitions, and prediction state, with alerting rules for the Helm chart
-- **Kubernetes events** for every state change, visible in `kubectl describe`
+- **Prometheus metrics** for operator health, lifecycle transitions, wakes on request, and prediction state, with alerting rules in the Helm chart
+- **Kubernetes events** for every state change, visible in `kubectl describe`, and status conditions that say why a workload isn't paused or woken
 
 ## Architecture
 
-![Architecture](docs/assets/architecture.png)
+```mermaid
+flowchart TB
+    subgraph operator["Operator Deployment"]
+        optin["Opt-in reconcilers<br/>Deployments, StatefulSets"]
+        mwr["ManagedWorkload reconciler<br/>activity clock, pause and resume,<br/>dependencies, cost"]
+        forecast["Forecast engine<br/>one per workload"]
+        optin --> mwr
+        mwr --- forecast
+    end
+    subgraph doorman["Doorman Deployment"]
+        door["Holds requests to paused workloads,<br/>wakes them, passes requests through"]
+    end
+    clients["Clients, ingress controllers,<br/>load balancers"] -- "Service of a paused workload" --> door
+    door -- "hybernate.io/last-request" --> api
+    mwr --> api["Kubernetes API server"]
+    mwr --> ms["metrics-server"]
+    mwr -.-> prom["Prometheus<br/>optional"]
+```
 
 | Component | Description |
 |-----------|-------------|
 | **ManagedWorkload** | Per-workload CR that defines idle policy, wake behaviour, and cost tracking |
 | **Opt-in controller** | Creates and updates a ManagedWorkload for each labelled workload, from its annotations |
-| **Forecast Engine** | Per-workload Holt-Winters model that learns demand patterns, confirms idle detection, and wakes workloads ahead of demand |
+| **Doorman** | Holds requests to a paused workload's Services, wakes it, and passes them through once it's Ready |
+| **Forecast Engine** | Per-workload Holt-Winters model that learns demand patterns, holds off a pause when demand is expected, and wakes workloads ahead of it |
 
 ## Documentation
 
@@ -113,7 +140,7 @@ Full docs at **[okedeji.io/hybernate](https://okedeji.io/hybernate)**
 - [Opting In](https://okedeji.io/hybernate/guides/opt-in/): the label, every setting, and GitOps
 - [Idle Detection](https://okedeji.io/hybernate/concepts/idle-detection/): how the activity clock decides when to pause
 - [Forecasting](https://okedeji.io/hybernate/concepts/forecasting/): the Holt-Winters prediction engine
-- [Cost Tracking](https://okedeji.io/hybernate/concepts/cost-tracking/): resource reduction vs. estimated savings
+- [Cost Tracking](https://okedeji.io/hybernate/concepts/cost-tracking/): what a workload costs, and what pausing saves
 - [API Reference](https://okedeji.io/hybernate/reference/api/): complete CRD field reference
 - [Metrics Reference](https://okedeji.io/hybernate/reference/metrics/): all Prometheus metrics
 
