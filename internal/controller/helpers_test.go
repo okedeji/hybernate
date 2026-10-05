@@ -91,11 +91,20 @@ func forecastWorkload() *v1alpha1.ManagedWorkload {
 	return w
 }
 
+// watch reconciles the workload once a minute until until, inclusive.
+func (fr *forecastReconciler) watch(t *testing.T, workload *v1alpha1.ManagedWorkload, until time.Time) {
+	t.Helper()
+	for ; !fr.now.After(until); fr.now = fr.now.Add(time.Minute) {
+		fr.reconcile(t, workload)
+	}
+	fr.now = until
+}
+
 func TestForecastState_LivesInStatusNotConfigMaps(t *testing.T) {
 	workload := forecastWorkload()
 	fr := newForecastReconciler(t, workload, nil)
 
-	fr.reconcile(t, workload)
+	fr.watch(t, workload, fixedTime.Add(time.Hour))
 
 	require.NotNil(t, workload.Status.Prediction)
 	assert.NotEmpty(t, workload.Status.Prediction.State)
@@ -108,36 +117,44 @@ func TestForecastState_LivesInStatusNotConfigMaps(t *testing.T) {
 	assert.Empty(t, cms.Items, "the operator writes no ConfigMaps")
 }
 
-func TestForecastState_WrittenOnceAnHour(t *testing.T) {
+func TestForecastState_ChangesOnceAnHour(t *testing.T) {
 	workload := forecastWorkload()
 	fr := newForecastReconciler(t, workload, nil)
+	fr.reconcile(t, workload)
+	state := workload.Status.Prediction.State
 
-	assert.True(t, fr.reconcile(t, workload), "an observed hour is written straight away")
-	fr.now = fixedTime.Add(time.Minute)
-	assert.False(t, fr.reconcile(t, workload), "nothing has changed until the next hour")
-	fr.now = fixedTime.Add(time.Hour)
-	assert.True(t, fr.reconcile(t, workload))
+	var changedAt []time.Time
+	for fr.now = fixedTime.Add(time.Minute); !fr.now.After(fixedTime.Add(2 * time.Hour)); fr.now = fr.now.Add(time.Minute) {
+		fr.reconcile(t, workload)
+		if workload.Status.Prediction.State != state {
+			state = workload.Status.Prediction.State
+			changedAt = append(changedAt, fr.now)
+		}
+	}
+
+	assert.Equal(t, []time.Time{fixedTime.Add(time.Hour), fixedTime.Add(2 * time.Hour)}, changedAt,
+		"as each hour ends")
 }
 
 // TestForecastState_SurvivesARestart: a restarted operator, or a new leader,
-// picks up from status, and doesn't feed the hour already fed a second time.
+// picks up from status. The hour the restart interrupted is skipped rather
+// than learned from the part of it seen after.
 func TestForecastState_SurvivesARestart(t *testing.T) {
 	workload := forecastWorkload()
 	fr := newForecastReconciler(t, workload, nil)
-	fr.reconcile(t, workload)
-	fr.now = fixedTime.Add(time.Hour)
-	fr.reconcile(t, workload)
+	fr.watch(t, workload, fixedTime.Add(2*time.Hour))
 
 	restarted := newForecastReconciler(t, workload, fr.Client)
-	restarted.now = fixedTime.Add(time.Hour + 30*time.Minute)
-	restarted.reconcile(t, workload)
+	restarted.now = fixedTime.Add(2*time.Hour + 30*time.Minute)
+	restarted.watch(t, workload, fixedTime.Add(3*time.Hour))
 
 	engine, err := restarted.engines.getOrCreate(workload.UID, forecast.Settings{}, "")
 	require.NoError(t, err)
-	assert.Equal(t, 2, engine.GetDataPoints(), "the hour fed before the restart isn't fed again")
+	assert.Equal(t, 2, engine.GetDataPoints(), "the hours before the restart are restored, and the one it interrupted skipped")
+	assert.True(t, engine.Observed(fixedTime.Add(time.Hour)))
+	assert.False(t, engine.Observed(fixedTime.Add(2*time.Hour)))
 
-	restarted.now = fixedTime.Add(2 * time.Hour)
-	restarted.reconcile(t, workload)
+	restarted.watch(t, workload, fixedTime.Add(4*time.Hour))
 	assert.Equal(t, 3, engine.GetDataPoints())
 }
 
@@ -164,7 +181,7 @@ func TestForecastState_UnreadableStateStartsAfreshWithAWarning(t *testing.T) {
 
 			restored, err := forecast.ImportEngine(workload.Status.Prediction.State, forecast.Settings{})
 			require.NoError(t, err, "the bad state is replaced")
-			assert.Equal(t, 1, restored.GetDataPoints(), "the engine started afresh")
+			assert.Zero(t, restored.GetDataPoints(), "the engine started afresh")
 			assert.Contains(t, drainEvents(t, fr.Reconciler), "Warning "+ReasonForecastReset)
 		})
 	}
@@ -222,11 +239,11 @@ func TestEngineRegistry_ForgetsADeletedWorkload(t *testing.T) {
 func TestForecast_RejectedObservationDoesNotBlockAutomation(t *testing.T) {
 	workload := automationWorkload(v1alpha1.PhaseRunning)
 	engine := &stubForecaster{phase: forecast.Observing, observeErr: forecast.ErrInvalidObservation}
-	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &stubMetrics{cpuMillis: 10}, needsFeed: true})
+	metrics := &stubMetrics{}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: metrics})
 
-	result, err := r.reconcileAutomation(context.Background(), workload, nil)
-	require.NoError(t, err)
-	require.NotNil(t, result)
+	lookEveryMinute(t, r, workload, metrics, fixedTime, fixedTime.Add(time.Hour), func(time.Time) float64 { return 10 })
+
 	assert.Zero(t, engine.observeCalls)
 	assert.NotNil(t, workload.Status.Prediction)
 }

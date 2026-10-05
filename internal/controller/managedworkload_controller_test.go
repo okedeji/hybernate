@@ -501,8 +501,8 @@ func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
 
 	result, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
-	// Automation requeues for prediction learning (Observing phase).
-	assert.Equal(t, 1*time.Hour, result.RequeueAfter)
+	// Automation requeues for the forecast to go on learning.
+	assert.Equal(t, activityCheckInterval, result.RequeueAfter)
 	assert.Equal(t, 0, pauser.pauseCalls)
 	assert.Equal(t, 0, pauser.resumeCalls)
 }

@@ -69,14 +69,16 @@ type listPricer interface {
 	ListRates(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cost.Rates, bool, error)
 }
 
-// engineRegistry holds each workload's forecast engine between reconciles.
-// The engine in memory is the authority while the operator runs; the state
-// it exports to the workload's status is where a restarted operator, or a
-// new leader, picks up. Engines are keyed by UID, so a workload deleted and
-// created again under the same name starts afresh.
+// engineRegistry holds each workload's forecast engine between reconciles,
+// and the hour of demand it is seeing. The engine in memory is the
+// authority while the operator runs; the state it exports to the workload's
+// status is where a restarted operator, or a new leader, picks up. The hour
+// under way is in memory only. Engines are keyed by UID, so a workload
+// deleted and created again under the same name starts afresh.
 type engineRegistry struct {
 	mu        sync.Mutex
 	engines   map[types.UID]forecaster
+	hours     map[types.UID]demandHour
 	newEngine func() forecaster
 	restore   func(state string) (forecaster, error)
 }
@@ -84,6 +86,7 @@ type engineRegistry struct {
 func newEngineRegistry(newEngine func() forecaster) *engineRegistry {
 	return &engineRegistry{
 		engines:   make(map[types.UID]forecaster),
+		hours:     make(map[types.UID]demandHour),
 		newEngine: newEngine,
 		restore: func(state string) (forecaster, error) {
 			e, err := forecast.ImportEngine(state, forecast.Settings{})
@@ -127,7 +130,49 @@ func (reg *engineRegistry) load(state string) (forecaster, error) {
 func (reg *engineRegistry) forget(uid types.UID) {
 	reg.mu.Lock()
 	delete(reg.engines, uid)
+	delete(reg.hours, uid)
 	reg.mu.Unlock()
+}
+
+// demandHour is what has been seen of a workload's demand in one hour of
+// the forecast's clock.
+type demandHour struct {
+	start time.Time
+	// peak is the most CPU, in millicores, any one look found.
+	peak        float64
+	first, last time.Time
+	// blind is set by a look that couldn't see demand: the workload was
+	// paused where a request wouldn't wake it.
+	blind bool
+}
+
+// whole reports whether the hour was seen from its start to its end, with
+// no look that was blind to demand. An operator that started partway
+// through the hour, or stopped looking before it ended, may have missed its
+// busiest minutes, and the forecast would learn a busy hour as a quiet one.
+// A gap within the hour isn't held against it: a slow wake or pause leaves
+// one, and the looks either side of it show the demand around it.
+func (h demandHour) whole() bool {
+	return !h.blind && h.first.Sub(h.start) <= unobservedGap && h.start.Add(time.Hour).Sub(h.last) <= unobservedGap
+}
+
+// see adds a look at a workload's demand, made at now in the hour that
+// began at start. When the look is the first since an hour ended, that
+// hour is returned, if it was seen whole.
+func (reg *engineRegistry) see(uid types.UID, start, now time.Time, demand float64, visible bool) (demandHour, bool) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+
+	prev, ok := reg.hours[uid]
+	h := prev
+	if !ok || !prev.start.Equal(start) {
+		h = demandHour{start: start, first: now}
+	}
+	h.last = now
+	h.peak = max(h.peak, demand)
+	h.blind = h.blind || !visible
+	reg.hours[uid] = h
+	return prev, ok && prev.start.Before(start) && prev.whole()
 }
 
 func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
@@ -146,28 +191,27 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	logger := log.FromContext(ctx)
 	engine := r.forecastEngine(workload)
 
-	// Feed engine hourly — prediction learns regardless of desiredState.
-	if now := r.now(); r.metrics != nil && !engine.Observed(now) {
-		metric, err := r.observedCPU(ctx, workload)
-		if err != nil {
+	// The forecast learns whether or not automation acts on it, so every
+	// awake workload is looked at as often as the activity clock looks,
+	// for the forecast to see each hour's busiest minutes.
+	var usage float64
+	if r.metrics != nil {
+		var err error
+		if usage, err = r.observedCPU(ctx, workload); err != nil {
 			r.clearIdleVeto(workload)
 			return r.reportMetricsUnavailable(ctx, workload, err)
 		}
 		r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionTrue, "MetricsReported", "")
-		r.observeHour(ctx, workload, engine, metric, now)
+		r.seeDemand(ctx, workload, engine, r.awakeDemand(workload, usage), true)
 	}
-
-	// Always update prediction status so the user sees progress.
 	r.updatePredictionStatus(ctx, workload, engine)
 
-	// If manual desiredState is set, prediction still learns but
-	// automation does not act. Status is updated above.
 	if workload.Spec.DesiredState != nil {
 		r.clearIdleVeto(workload)
 		if err := r.reportManualOverride(ctx, workload); err != nil {
 			return nil, err
 		}
-		return &ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
+		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 	}
 	r.clearCondition(workload, conditionManualOverride, "Automated")
 
@@ -178,12 +222,12 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 				return nil, err
 			}
 		}
-		return &ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
+		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 	}
 
 	logger.V(1).Info("automation tick", "workload", workload.Name, "namespace", workload.Namespace,
 		"engine_phase", engine.GetPhase(), "data_points", engine.GetDataPoints())
-	return r.reconcileIdleClock(ctx, workload, target, engine)
+	return r.reconcileIdleClock(ctx, workload, target, engine, usage)
 }
 
 // reportManualOverride notes, once, that desiredState has taken over from
@@ -211,22 +255,24 @@ func (r *Reconciler) reportManualOverride(ctx context.Context, workload *v1alpha
 func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	recheck := &ctrl.Result{RequeueAfter: r.pausedRecheck()}
 	r.clearIdleVeto(workload)
-	if workload.Spec.DesiredState != nil {
+	engine := r.forecastEngine(workload)
+	manual := workload.Spec.DesiredState != nil
+	woken := !manual && r.wokenByActivity(ctx, workload, target)
+	r.seePausedDemand(ctx, workload, engine, manual, woken)
+	r.updatePredictionStatus(ctx, workload, engine)
+
+	if manual {
 		return recheck, r.reportManualOverride(ctx, workload)
 	}
 	r.clearCondition(workload, conditionManualOverride, "Automated")
 
-	if r.wokenByActivity(ctx, workload, target) {
+	if woken {
 		message := "activity annotation is newer than the pause, waking"
 		if wakeSource(workload) == v1alpha1.ActivitySourceRequest {
 			message = "a request is waiting, waking"
 		}
 		return r.handleResume(ctx, workload, &wakeEvent{reason: ReasonWokeByActivity, message: message})
 	}
-
-	engine := r.forecastEngine(workload)
-	r.observePausedHour(ctx, workload, engine)
-	r.updatePredictionStatus(ctx, workload, engine)
 
 	if workload.Spec.IdlePolicy == nil || !workload.Spec.IdlePolicy.AutoResume {
 		return recheck, nil
@@ -235,13 +281,7 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 		return recheck, nil
 	}
 
-	// The workload is scaled to zero, so live requests can't be read. The
-	// snapshot taken at pause time converts predicted millicores to a share
-	// of what the workload requests across all its replicas.
-	var totalRequest float64
-	if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
-		totalRequest = float64(workload.Status.Pause.Resources.CPUMillis) * float64(workload.Status.Pause.PreviousReplicas)
-	}
+	totalRequest := pausedRequest(workload)
 	if totalRequest <= 0 {
 		return recheck, nil
 	}
@@ -302,31 +342,81 @@ func (r *Reconciler) pausedRecheck() time.Duration {
 	return wait
 }
 
-// observePausedHour feeds the forecast an hour of no demand while the
-// workload is paused behind the doorman: any request would have woken it,
-// so an hour paused is an hour nobody asked for it. Without the doorman,
-// demand while paused can't be seen, and nothing is recorded.
-func (r *Reconciler) observePausedHour(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster) {
-	if !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionWakeOnRequest) {
-		return
+// pausedRequest is the CPU the workload requested across its replicas
+// before it paused, from the snapshot taken then: scaled to zero, it has no
+// pods to read requests from.
+func pausedRequest(workload *v1alpha1.ManagedWorkload) float64 {
+	pause := workload.Status.Pause
+	if pause == nil || pause.Resources == nil {
+		return 0
 	}
-	if now := r.now(); !engine.Observed(now) {
-		r.observeHour(ctx, workload, engine, 0, now)
-	}
+	return float64(pause.Resources.CPUMillis) * float64(pause.PreviousReplicas)
 }
 
-// observeHour feeds the forecast the demand seen this hour. A rejected
-// observation is logged and the hour tried again on the next reconcile:
-// it means a bad metric, which mustn't hold up the workload's automation.
-func (r *Reconciler) observeHour(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, demand float64, now time.Time) {
-	prediction, err := engine.Observe(demand, now)
+// seePausedDemand is a look at a paused workload's demand. Behind the
+// doorman, any request would have woken it, so a look that finds it still
+// paused found no demand, and one that finds a request waking it found
+// some. Without the doorman, or under a manual pause that requests don't
+// end, demand can't be seen at all.
+//
+// The demand a wake shows is at least twice the activity threshold, of
+// what the workload requested: the forecast approaches a pattern it is
+// learning from below, so an hour seen at the threshold itself would never
+// quite be forecast to reach it. Once awake, the workload's own usage
+// counts if it's more.
+func (r *Reconciler) seePausedDemand(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, manual, woken bool) {
+	routed := meta.IsStatusConditionTrue(workload.Status.Conditions, conditionWakeOnRequest)
+	var demand float64
+	if woken {
+		demand = 2 * pausedRequest(workload) * float64(cpuThresholdFor(workload)) / 100
+	}
+	r.seeDemand(ctx, workload, engine, demand, (routed || woken) && !manual)
+}
+
+// resumeWarmup is how long after a wake an awake workload's usage isn't
+// counted as demand. An autoResume wake lands at most autoResumeLead before
+// the hour it's for, so that long covers what such a wake brings about.
+const resumeWarmup = autoResumeLead
+
+// awakeDemand is the demand an awake workload's usage shows. Starting up,
+// filling caches and compiling hot paths isn't anyone asking for it.
+// Counted, an autoResume wake would teach the forecast that the hour it
+// woke in is busy, and a week later it would wake an hour earlier, and
+// earlier again the week after. A wake by request shows its demand anyway.
+func (r *Reconciler) awakeDemand(workload *v1alpha1.ManagedWorkload, usage float64) float64 {
+	if woke := workload.Status.LastActedAt; woke != nil && r.now().Sub(woke.Time) < resumeWarmup {
+		return 0
+	}
+	return usage
+}
+
+// seeDemand adds a look at the workload's demand to the hour under way, and
+// once an hour is over, feeds the forecast the peak seen in it. The peak,
+// not the mean, is what the forecast's decisions need: the activity clock
+// counts a workload as active for any minute above the threshold, so an
+// hour busy for its last ten minutes is an hour it must be awake for.
+func (r *Reconciler) seeDemand(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, demand float64, visible bool) {
+	now := r.now()
+	hour, ended := r.engines.see(workload.UID, r.hourStart(now), now, demand, visible)
+	if !ended || engine.Observed(hour.start) {
+		return
+	}
+	r.observeHour(ctx, workload, engine, hour)
+}
+
+// observeHour feeds the forecast an hour that has ended. A rejected
+// observation means a bad metric: it's logged, and the hour is skipped
+// rather than holding up the workload's automation.
+func (r *Reconciler) observeHour(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, hour demandHour) {
+	prediction, err := engine.Observe(hour.peak, hour.start)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "feeding the forecast",
-			"workload", workload.Name, "namespace", workload.Namespace, "cpu_millis", demand)
+			"workload", workload.Name, "namespace", workload.Namespace, "cpu_millis", hour.peak)
 		return
 	}
 	r.emitEvent(workload, false, "Normal", ReasonPredictionFed, actionForecast,
-		"fed %.0fm CPU, forecast %.0fm, phase %s", demand, prediction, engine.GetPhase())
+		"the hour from %s peaked at %.0fm CPU, forecast %.0fm, phase %s",
+		hour.start.UTC().Format("15:04 UTC"), hour.peak, prediction, engine.GetPhase())
 
 	if engine.RegimeChanged() {
 		opmetrics.PredictionRegimeChanges.WithLabelValues(workload.Namespace, workload.Name).Inc()

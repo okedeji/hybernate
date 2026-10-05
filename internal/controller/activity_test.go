@@ -286,6 +286,11 @@ func TestActivityClock_ForecastVeto(t *testing.T) {
 		{name: "confident forecast of demand defers the pause", engine: &stubForecaster{phase: forecast.DailyActive, predictValue: 300}},
 		{name: "confident forecast of no demand", engine: &stubForecaster{phase: forecast.DailyActive, predictValue: 20}, wantPause: true},
 		{name: "unconfident forecast is ignored", engine: &stubForecaster{phase: forecast.DailySuggesting, predictValue: 300}, wantPause: true},
+		// autoResume would wake it straight back for the rest of this hour.
+		{name: "demand forecast for the rest of this hour", engine: &stubForecaster{phase: forecast.DailyActive,
+			predictByHour: map[int]float64{0: 300, 1: 20}}},
+		{name: "demand forecast for the next hour", engine: &stubForecaster{phase: forecast.DailyActive,
+			predictByHour: map[int]float64{0: 20, 1: 300}}},
 	}
 
 	for _, tt := range tests {
@@ -316,7 +321,7 @@ func vetoEvents(recorder *events.FakeRecorder) int {
 func TestActivityClock_ForecastVetoIsACondition(t *testing.T) {
 	target := clockTarget("app:v1", nil)
 	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
-	engine := &stubForecaster{phase: forecast.DailyActive, predictValue: 300}
+	engine := &stubForecaster{phase: forecast.DailyActive, predictByHour: map[int]float64{0: 20, 1: 300}}
 	metrics := idleCPU
 	pauser := &stubPauser{pauseDone: true}
 	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &metrics, pauser: pauser})
@@ -337,7 +342,7 @@ func TestActivityClock_ForecastVetoIsACondition(t *testing.T) {
 	written := getWorkload(t, r, "api")
 	assert.True(t, meta.IsStatusConditionTrue(written.Status.Conditions, conditionIdleVetoed), "and it's written")
 
-	engine.predictValue = 20
+	engine.predictByHour[1] = 20
 	_, err := r.reconcileAutomation(context.Background(), workload, target)
 	require.NoError(t, err)
 
@@ -393,16 +398,31 @@ func TestActivityClock_ForecastDoesNotVetoAPauseUnderWay(t *testing.T) {
 	assert.Zero(t, vetoEvents(r.Recorder.(*events.FakeRecorder)))
 }
 
-func TestForecastHourAhead(t *testing.T) {
+func TestHourStart(t *testing.T) {
 	kolkata, err := time.LoadLocation("Asia/Kolkata")
 	require.NoError(t, err)
-	r := &Reconciler{clock: func() time.Time { return fixedTime.Add(10 * time.Minute) }}
-
-	assert.Equal(t, fixedTime.Add(time.Hour), r.forecastHourAhead().UTC(), "13:00 UTC, the hour an hour from 12:10")
-
-	r.Timezone = kolkata
-	assert.Equal(t, fixedTime.Add(30*time.Minute), r.forecastHourAhead().UTC(),
-		"18:00 in Kolkata: its hours start at half past in UTC")
+	newYork, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	tests := []struct {
+		name string
+		loc  *time.Location
+		at   time.Time
+		want time.Time
+	}{
+		{name: "UTC", at: fixedTime.Add(10 * time.Minute), want: fixedTime},
+		{name: "hours at half past in UTC", loc: kolkata, at: fixedTime.Add(10 * time.Minute),
+			want: fixedTime.Add(-30 * time.Minute)},
+		{name: "the first 1am of a clock change", loc: newYork, at: time.Date(2026, 11, 1, 5, 40, 0, 0, time.UTC),
+			want: time.Date(2026, 11, 1, 5, 0, 0, 0, time.UTC)},
+		{name: "the repeated 1am", loc: newYork, at: time.Date(2026, 11, 1, 6, 40, 0, 0, time.UTC),
+			want: time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Reconciler{Timezone: tt.loc}
+			assert.True(t, tt.want.Equal(r.hourStart(tt.at)), "got %s", r.hourStart(tt.at).UTC())
+		})
+	}
 }
 
 func TestActivityClock_DryRunReportsIdleOnceWithoutPausing(t *testing.T) {
