@@ -82,9 +82,10 @@ type OptInReconciler struct {
 // Reconcile makes the workload's label-created ManagedWorkload match its
 // labels and annotations. A ManagedWorkload someone wrote for the workload
 // always wins, and the label then does nothing.
-func (r *OptInReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *OptInReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, optInTimeout)
 	defer cancel()
+	defer func() { res, retErr = retryIfStale(ctx, res, retErr) }()
 
 	obj := r.newWorkload()
 	if err := r.Get(ctx, req.NamespacedName, obj); err != nil {

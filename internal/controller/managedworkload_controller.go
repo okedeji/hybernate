@@ -150,6 +150,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 
 	var doormanRetry time.Duration
 	defer func() {
+		res, retErr = retryIfStale(ctx, res, retErr)
 		if retErr != nil {
 			metrics.ReconcileErrors.WithLabelValues("managedworkload").Inc()
 			return

@@ -157,13 +157,17 @@ var _ = ginkgo.Describe("A pause interrupted by a conflict", func() {
 			clock:       time.Now,
 		}
 
+		// The conflict is retried promptly rather than reported, so the
+		// interruption shows as that retry.
+		var res ctrl.Result
 		for range 3 {
-			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: "api"}})
-			if err != nil {
+			res, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: "api"}})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if res.RequeueAfter == staleRetry {
 				break
 			}
 		}
-		gomega.Expect(apierrors.IsConflict(err)).To(gomega.BeTrue(), "got %v", err)
+		gomega.Expect(res.RequeueAfter).To(gomega.Equal(staleRetry), "the pause was interrupted by a conflict")
 	})
 
 	replicas := func() int32 {

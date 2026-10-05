@@ -20,6 +20,10 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -202,4 +206,21 @@ func inWatchedNamespaces(watched []string) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(ns client.Object) bool {
 		return len(watched) == 0 || slices.Contains(watched, ns.GetName())
 	})
+}
+
+// staleRetry is how soon a reconcile whose write lost to a newer one runs
+// again, against the newer object.
+const staleRetry = time.Second
+
+// retryIfStale turns a write that lost to a newer one, a conflict or a
+// create racing the cache, into a prompt retry. Several writers update a
+// ManagedWorkload (the operator, the opt-in controller, the doorman and
+// users), so these are routine, and logging each as a reconcile error
+// would bury real ones.
+func retryIfStale(ctx context.Context, res ctrl.Result, err error) (ctrl.Result, error) {
+	if !apierrors.IsConflict(err) && !apierrors.IsAlreadyExists(err) {
+		return res, err
+	}
+	logf.FromContext(ctx).V(1).Info("retrying against a newer object", "reason", err.Error())
+	return ctrl.Result{RequeueAfter: staleRetry}, nil
 }

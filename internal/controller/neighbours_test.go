@@ -18,12 +18,18 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -75,4 +81,30 @@ func TestPhaseChanged(t *testing.T) {
 		"a status write within the phase")
 	assert.True(t, p.Delete(event.DeleteEvent{Object: paused}), "a workload going away")
 	assert.False(t, p.Create(event.CreateEvent{Object: paused}), "a new workload routes nothing yet")
+}
+
+func TestRetryIfStale(t *testing.T) {
+	gr := schema.GroupResource{Group: "hybernate.io", Resource: "managedworkloads"}
+	busy := ctrl.Result{RequeueAfter: time.Minute}
+	tests := []struct {
+		name    string
+		err     error
+		want    ctrl.Result
+		wantErr bool
+	}{
+		{name: "a conflict, wrapped", err: fmt.Errorf("updating status: %w", apierrors.NewConflict(gr, "api", errors.New("stale"))),
+			want: ctrl.Result{RequeueAfter: staleRetry}},
+		{name: "a create racing the cache", err: fmt.Errorf("creating: %w", apierrors.NewAlreadyExists(gr, "api")),
+			want: ctrl.Result{RequeueAfter: staleRetry}},
+		{name: "any other error", err: errors.New("etcdserver: request timed out"), want: busy, wantErr: true},
+		{name: "no error", want: busy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := retryIfStale(context.Background(), busy, tt.err)
+
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantErr, err != nil)
+		})
+	}
 }

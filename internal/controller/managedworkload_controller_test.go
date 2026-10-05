@@ -1038,8 +1038,9 @@ func TestPause_InterruptedBeforePausedKeepsTheReplicaCount(t *testing.T) {
 	workload := lifecycleWorkload("api", desiredState(v1alpha1.DesiredStatePaused), v1alpha1.PhaseRunning)
 	r := lifecycleReconciler(t, workload, 3, failStatusWrite(inPhase(v1alpha1.PhasePaused)))
 
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.Error(t, err)
+	res, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err, "a conflict is retried, not reported")
+	require.Equal(t, staleRetry, res.RequeueAfter)
 	interrupted := getWorkload(t, r, "api")
 	require.Equal(t, v1alpha1.PhasePausing, interrupted.Status.Phase)
 	require.Equal(t, int32(0), targetReplicas(t, r))
@@ -1064,8 +1065,9 @@ func TestPause_InterruptedBeforePausedKeepsTheReplicaCount(t *testing.T) {
 func TestDelete_DuringAnInterruptedPauseRestoresTheReplicas(t *testing.T) {
 	workload := lifecycleWorkload("api", desiredState(v1alpha1.DesiredStatePaused), v1alpha1.PhaseRunning)
 	r := lifecycleReconciler(t, workload, 3, failStatusWrite(inPhase(v1alpha1.PhasePaused)))
-	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
-	require.Error(t, err)
+	res, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err, "a conflict is retried, not reported")
+	require.Equal(t, staleRetry, res.RequeueAfter)
 	require.Equal(t, int32(0), targetReplicas(t, r))
 
 	require.NoError(t, r.Delete(context.Background(), getWorkload(t, r, "api")))
@@ -1253,8 +1255,9 @@ func TestReconcile_IdleDetectionIsCountedOnce(t *testing.T) {
 		LastEvaluatedTime: ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second)))}
 	r := lifecycleReconciler(t, workload, 1, failStatusWrite(inPhase(v1alpha1.PhaseIdle)))
 
-	_, err := r.Reconcile(context.Background(), reconcileFor("counted-once"))
-	require.Error(t, err)
+	res, err := r.Reconcile(context.Background(), reconcileFor("counted-once"))
+	require.NoError(t, err, "a conflict is retried, not reported")
+	require.Equal(t, staleRetry, res.RequeueAfter)
 	_, err = r.Reconcile(context.Background(), reconcileFor("counted-once"))
 	require.NoError(t, err)
 
