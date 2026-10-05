@@ -74,6 +74,12 @@ func (a Autoscaler) Clamp(n int32) int32 {
 	return min(max(n, a.Min), a.Max)
 }
 
+// HeldAt reports whether a ScaledObject's paused-replicas annotation already
+// holds its target at n replicas.
+func (a Autoscaler) HeldAt(n int32) bool {
+	return a.PausedReplicas != nil && *a.PausedReplicas == strconv.Itoa(int(n))
+}
+
 // kedaRecheck is how long Find remembers that KEDA isn't installed. The
 // client asks the API server for all its API groups each time it looks up a
 // kind it doesn't know, which on every reconcile of every workload adds up.

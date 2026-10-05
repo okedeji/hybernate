@@ -32,6 +32,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/autoscaler"
@@ -200,4 +201,31 @@ func TestPause_HPAIsntHeld(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, done)
 	assert.Empty(t, workload.Status.Pause.ScaledObject)
+}
+
+// A resume retried while its pods start doesn't annotate a ScaledObject
+// that already holds the replicas it's resuming to.
+func TestResume_HoldsKEDAOnce(t *testing.T) {
+	dep := readyDeployment(0)
+	dep.Status.ReadyReplicas = 0
+	patches := 0
+	c := interceptor.NewClient(kedaClient(t, dep, scaledObjectFor(0)).(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			patches++
+			return c.Patch(ctx, obj, patch, opts...)
+		}})
+	workload := apiWorkload()
+	workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3, ScaledObject: "api-scaler"}
+	p := newTestPauser(c, &fakeScaler{})
+
+	for range 3 {
+		done, err := p.Resume(context.Background(), workload)
+		require.NoError(t, err)
+		require.False(t, done)
+	}
+
+	assert.Equal(t, 1, patches)
+	v, _ := pausedAnnotation(t, c)
+	assert.Equal(t, "3", v)
 }

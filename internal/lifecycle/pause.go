@@ -121,7 +121,7 @@ func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload)
 		return false, fmt.Errorf("getting target workload: %w", err)
 	}
 
-	replicas, _, err := p.resumeReplicas(ctx, workload)
+	replicas, a, err := p.resumeReplicas(ctx, workload)
 	if err != nil {
 		return false, err
 	}
@@ -130,7 +130,8 @@ func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload)
 	// Released any earlier, a ScaledObject that may scale to zero, with no
 	// trigger active, could take it back down while it starts, and the two
 	// would fight over the replicas for as long as that lasted.
-	if so := pause.ScaledObject; so != "" {
+	held := a.Kind == autoscaler.KEDA && a.Name == pause.ScaledObject && a.HeldAt(replicas)
+	if so := pause.ScaledObject; so != "" && !held {
 		if err := autoscaler.HoldKEDA(ctx, p.client, workload.Namespace, so, replicas); err != nil {
 			return false, err
 		}

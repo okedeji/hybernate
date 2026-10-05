@@ -468,7 +468,7 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 		return nil, fmt.Errorf("resuming workload: %w", err)
 	}
 	if !done {
-		return &ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return &ctrl.Result{RequeueAfter: resumeRecheck(r.sinceTransition(workload))}, nil
 	}
 
 	r.stampLastActed(workload)
@@ -485,6 +485,15 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 	}
 	r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume, "resumed")
 	return &result, nil
+}
+
+// resumeRecheck is when a resume waiting for its pods to be Ready is looked
+// at again: after as long again as it has waited, from 5 seconds up to a
+// minute. Pods becoming Ready requeue it through the target watch anyway,
+// so this paces only pods that never do, each retry of which annotates the
+// ScaledObject and reads the autoscalers and the scale.
+func resumeRecheck(waited time.Duration) time.Duration {
+	return min(max(waited, 5*time.Second), time.Minute)
 }
 
 // --- Finalizer ---

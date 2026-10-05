@@ -304,6 +304,32 @@ func TestReconcile_ResumeNotReadyRequeues(t *testing.T) {
 	assert.Equal(t, 5*time.Second, result.RequeueAfter)
 }
 
+// Pods that never become Ready back the resume's retries off, from 5s to a
+// minute, rather than annotating, listing and scaling every 5s forever.
+func TestReconcile_ResumeNotReadyBacksOff(t *testing.T) {
+	tests := []struct {
+		waited, want time.Duration
+	}{
+		{waited: 0, want: 5 * time.Second},
+		{waited: 20 * time.Second, want: 20 * time.Second},
+		{waited: time.Hour, want: time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.waited.String(), func(t *testing.T) {
+			workload := pausedWorkload(v1alpha1.PhaseResuming)
+			workload.Status.LastTransitionTime = ptr.To(metav1.NewTime(fixedTime.Add(-tt.waited)))
+			pauser := &stubPauser{resumeDone: false}
+			r := newTestReconcilerWithReplicas(t, workload, pauser, 3)
+
+			result, err := r.Reconcile(context.Background(), reconcileFor("api"))
+
+			require.NoError(t, err)
+			assert.Equal(t, 1, pauser.resumeCalls)
+			assert.Equal(t, tt.want, result.RequeueAfter)
+		})
+	}
+}
+
 // --- Finalizer + Deletion ---
 
 func TestReconcile_FinalizerAddedOnFirstReconcile(t *testing.T) {
