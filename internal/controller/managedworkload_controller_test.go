@@ -1282,6 +1282,9 @@ func TestReconcile_WorkloadsInParallel(t *testing.T) {
 	for i := range n {
 		name := fmt.Sprintf("app-%d", i)
 		w := lifecycleWorkload(name, nil, v1alpha1.PhaseRunning)
+		// The fake client sets no UIDs, and state is kept by UID, so without
+		// one every workload would share one forecast, as none can for real.
+		w.UID = types.UID(name)
 		if i%2 == 0 {
 			w.Spec.DesiredState = desiredState(v1alpha1.DesiredStatePaused)
 		} else {
