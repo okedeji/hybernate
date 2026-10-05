@@ -192,11 +192,19 @@ jobs:
           test -n "$digest"
           cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/hybernate@${digest}
 
-      - name: Sign the release files' checksums
+      # The release uploads each file under its base name, so they're hashed
+      # from one directory: checksums.txt then names them as users download
+      # them, and sha256sum --check finds each one beside it.
+      - name: Collect the release files
         run: |
-          sha256sum dist/install.yaml hybernate-*.tgz kubectl-hybernate-*.tar.gz krew-hybernate.yaml sbom.spdx.json \
-            > checksums.txt
-          cosign sign-blob --yes --bundle checksums.txt.sigstore.json checksums.txt
+          mkdir release
+          cp dist/install.yaml hybernate-*.tgz kubectl-hybernate-*.tar.gz krew-hybernate.yaml sbom.spdx.json release/
+
+      - name: Sign the release files' checksums
+        working-directory: release
+        run: |
+          sha256sum -- * > ../checksums.txt
+          cosign sign-blob --yes --bundle ../checksums.txt.sigstore.json ../checksums.txt
 
       - name: Attest the release files' build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
@@ -221,11 +229,7 @@ jobs:
           body_path: release-notes.md
           prerelease: ${{ steps.tags.outputs.prerelease }}
           files: |
-            dist/install.yaml
-            hybernate-*.tgz
-            kubectl-hybernate-*.tar.gz
-            krew-hybernate.yaml
-            sbom.spdx.json
+            release/*
             checksums.txt
             checksums.txt.sigstore.json
             vulnerabilities.txt
