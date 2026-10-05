@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,6 +127,9 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	if limit, ok := softMemoryLimit(os.Getenv("GOMEMLIMIT"), os.Getenv(envMemoryLimit)); ok {
+		debug.SetMemoryLimit(limit)
+	}
 	if err := validatePatterns(protected); err != nil {
 		setupLog.Error(err, "invalid --protected-namespaces")
 		os.Exit(1)
@@ -256,6 +261,25 @@ func main() {
 		setupLog.Error(err, "manager exited with error")
 		os.Exit(1)
 	}
+}
+
+// envMemoryLimit is the container's memory limit in bytes, which the
+// manifests set from the pod's resources.
+const envMemoryLimit = "MEMORY_LIMIT"
+
+// softMemoryLimit is the limit for Go's garbage collector: 90% of the
+// container's, leaving the rest for what the runtime holds outside the
+// heap, such as goroutine stacks and the memory it has yet to return.
+// GOMEMLIMIT, when set, is left for the runtime to apply as given.
+func softMemoryLimit(gomemlimit, containerLimit string) (int64, bool) {
+	if gomemlimit != "" {
+		return 0, false
+	}
+	limit, err := strconv.ParseInt(containerLimit, 10, 64)
+	if err != nil || limit <= 0 {
+		return 0, false
+	}
+	return limit / 10 * 9, true
 }
 
 func envOr(key, fallback string) string {

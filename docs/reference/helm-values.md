@@ -61,7 +61,7 @@ The CRD is a chart template with `helm.sh/resource-policy: keep`, so `helm unins
 | `resources.limits.cpu` | `500m` | CPU limit |
 | `resources.limits.memory` | `512Mi` | Memory limit |
 
-The operator caches the cluster's Deployments, StatefulSets, Services, PVCs, HPAs, Nodes and Namespaces, or only the watched namespaces' with `watchNamespaces`, so its memory grows with the cluster. Raise the limit on clusters with many thousands of workloads. The limit is passed to Go's garbage collector as `GOMEMLIMIT`, so it works harder near the limit rather than letting the operator be OOM-killed.
+The operator caches the cluster's Deployments, StatefulSets, Services, PVCs, HPAs, Nodes and Namespaces, or only the watched namespaces' with `watchNamespaces`, so its memory grows with the cluster. Raise the limit on clusters with many thousands of workloads. Go's garbage collector is given a soft limit of 90% of the memory limit, for the operator and the doorman alike, leaving the rest for memory outside its heap, so it works harder near the limit rather than letting either be OOM-killed. Setting `GOMEMLIMIT` in the pod overrides it.
 
 ## Namespaces
 

@@ -41,6 +41,30 @@ import (
 	"github.com/okedeji/hybernate/internal/gitops"
 )
 
+// The garbage collector aims below the container's limit, leaving room for
+// memory outside the heap, rather than at it, where the kernel kills first.
+func TestSoftMemoryLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		gomemlimit string
+		container  string
+		want       int64
+		wantOK     bool
+	}{
+		{name: "90% of the container's limit", container: "268435456", want: 241591905, wantOK: true},
+		{name: "GOMEMLIMIT set by hand wins", gomemlimit: "200MiB", container: "268435456"},
+		{name: "no limit", container: ""},
+		{name: "unparseable", container: "256Mi"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := softMemoryLimit(tt.gomemlimit, tt.container)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestValidatePrometheusURL(t *testing.T) {
 	tests := []struct {
 		name    string

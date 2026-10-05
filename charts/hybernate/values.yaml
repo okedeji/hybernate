@@ -31,9 +31,9 @@ timezone: UTC
 # The operator caches the cluster's Deployments, StatefulSets, Services,
 # PVCs, HPAs, nodes and namespaces (or only the watched namespaces'), so its
 # memory grows with the cluster. Raise the limit on clusters with many
-# thousands of workloads. The garbage collector is told the limit through
-# GOMEMLIMIT, and works harder near it rather than letting the operator be
-# OOM-killed.
+# thousands of workloads. The garbage collector aims at 90% of the limit,
+# leaving the rest for memory outside its heap, and works harder near it
+# rather than letting the operator be OOM-killed.
 resources:
   limits:
     cpu: 500m
