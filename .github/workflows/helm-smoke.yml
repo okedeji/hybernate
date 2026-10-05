@@ -2,6 +2,7 @@ name: Helm Smoke Test
 
 on:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -17,14 +18,11 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-
-      - name: Install the latest version of kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-
+      - uses: ./.github/actions/setup-kind
+        with:
+          version: v0.33.0
+          sha256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
       - name: Install Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
-      - name: Install the chart with watchNamespaces and pause and resume a workload
+      - name: Install the chart with watchNamespaces, and pause and wake a workload through the doorman
         run: make test-helm-smoke

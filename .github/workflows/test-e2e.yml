@@ -2,14 +2,29 @@ name: E2E Tests
 
 on:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   test-e2e:
-    name: E2E
+    name: E2E (Kubernetes ${{ matrix.kubernetes }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Kubernetes Hybernate supports, on the last kind
+          # release with a node image for it.
+          - kubernetes: "1.26"
+            kind: v0.25.0
+            kind-sha256: b22ff7e5c02b8011e82cc3223d069d178b9e1543f1deb21e936d11764780a3d8
+            node-image: kindest/node:v1.26.15@sha256:c79602a44b4056d7e48dc20f7504350f1e87530fe953428b792def00bc1076dd
+          - kubernetes: "1.37"
+            kind: v0.33.0
+            kind-sha256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+            node-image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
     steps:
       - name: Clone the code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -17,17 +32,9 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-
-      - name: Install the latest version of kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-
-      - name: Verify kind installation
-        run: kind version
-
+      - uses: ./.github/actions/setup-kind
+        with:
+          version: ${{ matrix.kind }}
+          sha256: ${{ matrix.kind-sha256 }}
       - name: Running Test e2e
-        run: |
-          go mod tidy
-          make test-e2e
+        run: make test-e2e KIND_NODE_IMAGE=${{ matrix.node-image }}

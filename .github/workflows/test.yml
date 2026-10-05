@@ -2,6 +2,7 @@ name: Tests
 
 on:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -17,8 +18,42 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-
       - name: Running Tests
-        run: |
-          go mod tidy
-          make test
+        run: make test
+
+  generated:
+    name: Generated files and go.mod
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      # Regenerates the CRDs, the chart's copy of them, RBAC and deepcopy
+      # code, and fails if any differ from what's committed, or if go.mod
+      # and go.sum aren't tidy.
+      - run: make verify-generated
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      # Lints the chart, renders it for EKS-, GKE- and AKS-style versions,
+      # and checks it grants the operator what config/rbac/role.yaml does.
+      - run: make check-chart
+
+  alerts:
+    name: Alert rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - run: make test-alerts

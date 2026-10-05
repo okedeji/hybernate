@@ -21,7 +21,6 @@ package e2e
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"testing"
 
@@ -50,14 +49,10 @@ var (
 	// metricsServerManifest is pinned so the idle clock spec doesn't change
 	// under the suite; its image is preloaded by the Makefile.
 	metricsServerManifest = "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml"
-	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
-	shouldCleanupCertManager = false
 )
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
-// The default setup requires Kind and CertManager.
-//
-// To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+// The default setup requires Kind.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting hybernate e2e test suite\n")
@@ -80,8 +75,6 @@ var _ = SynchronizedBeforeSuite(func() {
 	By("loading the manager image on Kind")
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
-
-	setupCertManager()
 
 	By("installing metrics-server, which the activity clock needs to read CPU")
 	_, err = utils.Run(exec.Command("kubectl", "apply", "-f", metricsServerManifest))
@@ -120,39 +113,4 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 	_, _ = utils.Run(exec.Command("make", "undeploy"))
 	_, _ = utils.Run(exec.Command("make", "uninstall"))
 	_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", namespace))
-
-	teardownCertManager()
 })
-
-// setupCertManager installs CertManager if needed for webhook tests.
-// Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.
-func setupCertManager() {
-	if os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true" {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager installation (CERT_MANAGER_INSTALL_SKIP=true)\n")
-		return
-	}
-
-	By("checking if CertManager is already installed")
-	if utils.IsCertManagerCRDsInstalled() {
-		_, _ = fmt.Fprintf(GinkgoWriter, "CertManager is already installed. Skipping installation.\n")
-		return
-	}
-
-	// Mark for cleanup before installation to handle interruptions and partial installs.
-	shouldCleanupCertManager = true
-
-	By("installing CertManager")
-	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
-}
-
-// teardownCertManager uninstalls CertManager if it was installed by setupCertManager.
-// This ensures we only remove what we installed.
-func teardownCertManager() {
-	if !shouldCleanupCertManager {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager cleanup (not installed by this suite)\n")
-		return
-	}
-
-	By("uninstalling CertManager")
-	utils.UninstallCertManager()
-}

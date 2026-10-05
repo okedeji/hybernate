@@ -1,0 +1,24 @@
+name: Set up kind
+description: Installs a pinned kind release for linux/amd64, checking it against a pinned checksum.
+
+inputs:
+  version:
+    description: The kind release, such as v0.33.0.
+    required: true
+  sha256:
+    description: The SHA-256 of that release's kind-linux-amd64.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        SHA256: ${{ inputs.sha256 }}
+      run: |
+        curl -fsSLo kind "https://github.com/kubernetes-sigs/kind/releases/download/${VERSION}/kind-linux-amd64"
+        echo "${SHA256}  kind" | sha256sum --check --strict
+        chmod +x kind
+        sudo mv kind /usr/local/bin/kind
+        kind version
