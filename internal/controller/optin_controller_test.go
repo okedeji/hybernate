@@ -337,6 +337,29 @@ func TestOptIn_DeploymentAndStatefulSetWithTheSameName(t *testing.T) {
 	}
 }
 
+// An earlier version gave a ManagedWorkload an owner reference to each of
+// a Deployment and a StatefulSet sharing a name. It keeps only its own
+// target's, so deleting that target deletes it, and deleting the other
+// doesn't.
+func TestOptIn_DropsAnotherWorkloadsOwnerReference(t *testing.T) {
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev", UID: "uid-sts-api"}}
+	deployment := optInDeployment("api", nil, nil)
+	r, _ := optInReconciler(t, optInNamespace(managedLabel, nil), deployment, sts)
+	reconcileOptIn(t, r, "api")
+	mw, ok := managedWorkload(t, r, "api")
+	require.True(t, ok)
+	mw.OwnerReferences = append(mw.OwnerReferences, metav1.OwnerReference{APIVersion: "apps/v1",
+		Kind: "StatefulSet", Name: "api", UID: sts.UID})
+	require.NoError(t, r.Update(context.Background(), mw))
+
+	reconcileOptIn(t, r, "api")
+
+	mw, ok = managedWorkload(t, r, "api")
+	require.True(t, ok)
+	require.Len(t, mw.OwnerReferences, 1)
+	assert.Equal(t, deployment.UID, mw.OwnerReferences[0].UID)
+}
+
 // Rerunning either reconciler once both exist writes nothing.
 func TestOptIn_SameNameIsStable(t *testing.T) {
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev", UID: "uid-sts-api"}}

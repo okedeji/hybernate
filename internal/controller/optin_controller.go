@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -222,6 +223,12 @@ func (r *OptInReconciler) update(ctx context.Context, obj client.Object, ours *v
 	mw := ours.DeepCopy()
 	keepUserSettings(&spec, &ours.Spec)
 	mw.Spec = spec
+	// An earlier version could also make a Deployment and a StatefulSet
+	// sharing a name both owners, so deleting its own target left it behind.
+	mw.OwnerReferences = slices.DeleteFunc(mw.OwnerReferences, func(ref metav1.OwnerReference) bool {
+		return ref.APIVersion == appsv1.SchemeGroupVersion.String() && ref.UID != obj.GetUID() &&
+			(ref.Kind == string(v1alpha1.TargetKindDeployment) || ref.Kind == string(v1alpha1.TargetKindStatefulSet))
+	})
 	if err := controllerutil.SetOwnerReference(obj, mw, r.Scheme); err != nil {
 		return fmt.Errorf("owning managed workload %s: %w", mw.Name, err)
 	}
