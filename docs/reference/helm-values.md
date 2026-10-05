@@ -154,8 +154,14 @@ The doorman uses the operator image, the `metrics.*` settings, `logLevel` and `l
 | Value | Default | Description |
 |-------|---------|-------------|
 | `networkPolicy.enabled` | `false` | Create NetworkPolicies for the operator and the doorman |
+| `doorman.networkPolicy.egress.enabled` | `false` | Create an egress NetworkPolicy allowing the doorman to connect only to `podCIDRs` and the API server |
+| `doorman.networkPolicy.egress.podCIDRs` | `[]` | The cluster's pod CIDRs, in every IP family it uses. Required when enabled |
+| `doorman.networkPolicy.egress.apiServer` | `[]` | CIDRs of the API server's endpoints (`kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes`), not the `kubernetes` Service's ClusterIP. Required when enabled |
+| `doorman.networkPolicy.egress.apiServerPorts` | `[443, 6443]` | The API server endpoints' ports |
 
 When enabled, the operator's and the doorman's metrics port admits only namespaces labelled `metrics: enabled`, and the doorman's routing ports (TCP 20000-29999) admit every source, since every client of a paused workload's Services is sent to them. To narrow who can reach the doorman, see [Restricting who can reach the doorman](../concepts/wake-on-request.md#restricting-who-can-reach-the-doorman).
+
+The doorman's egress policy is separate from `networkPolicy.enabled`, and needs a CNI that enforces egress policies. The doorman needs no DNS: it reaches the API server by address, and pods by their endpoint addresses. If a routed workload uses `hostNetwork`, add your node CIDRs to `podCIDRs`.
 
 ## Service Account
 

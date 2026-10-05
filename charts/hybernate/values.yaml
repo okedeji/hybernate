@@ -115,6 +115,21 @@ doorman:
     requests:
       cpu: 10m
       memory: 64Mi
+  networkPolicy:
+    # Limits where the doorman can connect: to pods, to pass on the
+    # connections it holds, and to the API server. The doorman refuses
+    # addresses that can't be a pod's, such as cloud metadata services;
+    # this enforces it in the network as well. It needs a CNI that enforces
+    # NetworkPolicy, and both lists, in every IP family the cluster uses.
+    egress:
+      enabled: false
+      # The cluster's pod CIDRs, e.g. [10.244.0.0/16, fd00:10:244::/56].
+      podCIDRs: []
+      # The API server's addresses as pods reach them, which are its
+      # endpoints, not the kubernetes Service's ClusterIP: see
+      # kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes
+      apiServer: []
+      apiServerPorts: [443, 6443]
 
 networkPolicy:
   enabled: false

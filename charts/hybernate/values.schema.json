@@ -91,7 +91,25 @@
             "enabled": {"type": "boolean"}
           }
         },
-        "topologySpreadConstraints": {"type": "array"}
+        "topologySpreadConstraints": {"type": "array"},
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "egress": {
+              "type": "object",
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "podCIDRs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "apiServer": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "apiServerPorts": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {"type": "integer", "minimum": 1, "maximum": 65535}
+                }
+              }
+            }
+          }
+        }
       }
     },
     "networkPolicy": {
