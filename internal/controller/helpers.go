@@ -19,8 +19,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
@@ -190,4 +193,13 @@ func withRates(rates cost.Rates, r *v1alpha1.CostRates) cost.Rates {
 		rates.StoragePerMonth = r.StoragePerMonth.AsApproximateFloat64()
 	}
 	return rates
+}
+
+// inWatchedNamespaces passes events for the namespaces Hybernate works in,
+// or every namespace when watched is empty. A namespaced install's cache
+// holds nothing from the others, so listing in them only fails.
+func inWatchedNamespaces(watched []string) predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(ns client.Object) bool {
+		return len(watched) == 0 || slices.Contains(watched, ns.GetName())
+	})
 }

@@ -70,6 +70,9 @@ type OptInReconciler struct {
 	// aren't opted in, whatever their labels, unless the namespace is
 	// labelled to allow it.
 	ProtectedNamespaces []string
+	// WatchNamespaces are the namespaces Hybernate works in, or every
+	// namespace when empty.
+	WatchNamespaces []string
 }
 
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
@@ -307,7 +310,7 @@ func (r *OptInReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("optin-"+string(r.Kind)).
 		For(r.newWorkload(), builder.WithPredicates(metadataChanged)).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.workloadsInNamespace),
-			builder.WithPredicates(metadataChanged)).
+			builder.WithPredicates(metadataChanged, inWatchedNamespaces(r.WatchNamespaces))).
 		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.targetOf),
 			builder.WithPredicates(specOrLabelsChanged)).
 		Complete(r)
