@@ -378,6 +378,15 @@ func TestMeasured(t *testing.T) {
 				Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseIdle, LastTransitionTime: &idleSince,
 					DryRun: d}}
 		}()},
+		{name: "never more than the time measured", wantHours: 48, mw: func() *v1alpha1.ManagedWorkload {
+			d := summary()
+			d.Resources = &v1alpha1.ResourceSnapshot{Replicas: 1}
+			idleBefore := metav1.NewTime(since.Add(-12 * time.Hour))
+			return &v1alpha1.ManagedWorkload{
+				Spec: v1alpha1.ManagedWorkloadSpec{DryRun: true},
+				Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseIdle, LastTransitionTime: &idleBefore,
+					DryRun: d}}
+		}()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

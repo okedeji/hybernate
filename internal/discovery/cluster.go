@@ -179,6 +179,11 @@ type Slept struct {
 type Totals struct {
 	Workloads   int     `json:"workloads"`
 	MonthlyCost float64 `json:"monthlyCost"`
+	// SavingsBasis is what the workloads in MonthlyCost cost a month on the
+	// basis their saving is estimated on: over the replayed history for
+	// those replayed, with the pods they ran then, and as they run now for
+	// the rest. What Replayed and Measured could save is a share of it.
+	SavingsBasis float64 `json:"savingsBasis"`
 	// Paused and PausedHourlyCost are what Hybernate has paused right now
 	// and what that frees each hour.
 	Paused           int     `json:"paused"`
@@ -375,6 +380,10 @@ func measured(mw *v1alpha1.ManagedWorkload, hourlyCost float64, now time.Time) *
 		slept += max(now.Sub(mw.Status.LastTransitionTime.Time), 0)
 		wakes--
 	}
+	measuring := max(now.Sub(d.Since.Time), 0)
+	// However the recorded times line up, what it would have freed is never
+	// more than what it cost meanwhile.
+	slept = min(slept, measuring)
 	m := &Measured{
 		Since:      d.Since.Time,
 		Pauses:     int(d.Pauses),
@@ -382,8 +391,8 @@ func measured(mw *v1alpha1.ManagedWorkload, hourlyCost float64, now time.Time) *
 		SleptHours: slept.Hours(),
 		Freed:      hourlyCost * slept.Hours(),
 	}
-	if measuring := now.Sub(d.Since.Time).Hours(); measuring > 0 {
-		m.MonthlyFreed = m.Freed / measuring * hoursPerMonth
+	if measuring > 0 {
+		m.MonthlyFreed = m.Freed / measuring.Hours() * hoursPerMonth
 	}
 	return m
 }
@@ -570,7 +579,8 @@ func totals(workloads []Workload) Totals {
 			t.Live++
 			t.SavedThisMonth += w.SavedThisMonth
 		}
-		if h := w.History; h != nil && !w.Managed && !w.Protected {
+		replayed := w.History != nil && !w.Managed && !w.Protected
+		if h := w.History; replayed {
 			t.Replayed.Workloads++
 			if h.SleepHours > 0 {
 				t.Replayed.Sleepers++
@@ -590,6 +600,11 @@ func totals(workloads []Workload) Totals {
 			continue
 		}
 		t.MonthlyCost += w.MonthlyCost
+		if replayed {
+			t.SavingsBasis += w.History.MonthlyCost
+		} else {
+			t.SavingsBasis += w.MonthlyCost
+		}
 		if w.State == StateIdle {
 			t.Idle++
 			t.IdleCPUMillis += w.PodCPURequestMillis * int64(w.Replicas)

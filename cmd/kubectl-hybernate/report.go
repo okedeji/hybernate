@@ -364,8 +364,15 @@ func headlineFor(t discovery.Totals, over string) (headline, []fact) {
 	case r.Sleepers > 0 || t.DryRun > 0:
 		could := r.MonthlyFreed + t.Measured.MonthlyFreed
 		f := figure{Value: dollars(could), Label: "could be saved a month"}
-		if t.MonthlyCost > 0 {
-			f.Detail = fmt.Sprintf("%d%% of what these workloads cost", int(could/t.MonthlyCost*100+0.5))
+		// The share is of what the workloads cost on the saving's own basis.
+		// A workload that ran more pods in its history than it runs now
+		// would otherwise be shown saving more than it costs.
+		if t.SavingsBasis > 0 {
+			of := "what these workloads cost"
+			if r.Workloads > 0 {
+				of += " over the same time"
+			}
+			f.Detail = fmt.Sprintf("%d%% of %s", int(could/t.SavingsBasis*100+0.5), of)
 		}
 		h.Figures = append(h.Figures, f)
 	case t.Idle > 0:

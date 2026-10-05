@@ -68,6 +68,12 @@ type History struct {
 	// MonthlyFreed that over an average month at the same rate.
 	Freed        float64 `json:"freed"`
 	MonthlyFreed float64 `json:"monthlyFreed"`
+	// Cost is what the pods running during RunningHours cost, and
+	// MonthlyCost that over an average month. They count the pods the
+	// workload ran then, as Freed does, which can be more or fewer than it
+	// runs now, so Freed is always a share of Cost.
+	Cost        float64 `json:"cost"`
+	MonthlyCost float64 `json:"monthlyCost"`
 }
 
 // replay is one workload's recorded history, and the clock's settings to
@@ -125,6 +131,7 @@ func (r replay) run() History {
 			continue
 		}
 		h.RunningHours += stepHours
+		h.Cost += float64(pods) * r.podHourly * stepHours
 		if !active {
 			h.QuietHours += stepHours
 		}
@@ -135,6 +142,7 @@ func (r replay) run() History {
 	}
 	if h.Hours > 0 {
 		h.MonthlyFreed = h.Freed / h.Hours * hoursPerMonth
+		h.MonthlyCost = h.Cost / h.Hours * hoursPerMonth
 	}
 	return h
 }

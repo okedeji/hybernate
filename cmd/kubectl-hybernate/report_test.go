@@ -76,8 +76,8 @@ func historyResult() scanResult {
 					Unmeasured: "no CPU requests"},
 			},
 			Notes: []string{"the history replay sees CPU and rollouts only"},
-			Totals: discovery.Totals{Workloads: 5, MonthlyCost: 446, Paused: 1, PausedHourlyCost: 0.07, Idle: 2,
-				IdleCPUMillis:   2500,
+			Totals: discovery.Totals{Workloads: 5, MonthlyCost: 446, SavingsBasis: 446, Paused: 1, PausedHourlyCost: 0.07,
+				Idle: 2, IdleCPUMillis: 2500,
 				IdleMemoryBytes: 6 << 30, IdleHourlyCost: 0.32, IdleMonthlyCost: 236,
 				Replayed: discovery.ReplayTotals{Workloads: 2, Sleepers: 1, SleepHours: 167, Freed: 32, MonthlyFreed: 139},
 				Measured: discovery.Measured{Pauses: 4, SleptHours: 41, Freed: 5.33, MonthlyFreed: 40}, DryRun: 1,
@@ -103,7 +103,7 @@ func TestWriteHTML_History(t *testing.T) {
 	assert.Contains(t, got, `<div class="figure"><b>$4</b><span>saved by Hybernate this month</span>`+
 		`<small>so far, pausing 1 live workload</small></div>`)
 	assert.Contains(t, got, `<div class="figure"><b>$179</b><span>could be saved a month</span>`+
-		`<small>40% of what these workloads cost</small></div>`,
+		`<small>40% of what these workloads cost over the same time</small></div>`,
 		"what history shows for unmanaged workloads, plus what dry-run measured, against what they cost")
 	assert.NotContains(t, got, "Had Hybernate been pausing them", "the figures and facts say it")
 	assert.Contains(t, got, "It&#39;s idle once it has had no activity for 1h")
@@ -158,6 +158,20 @@ func TestWriteHTML_History(t *testing.T) {
 		"enable the one dry-run measured")
 	assert.NotContains(t, got, "<script src", "nothing loads from elsewhere")
 	assert.NotContains(t, got, "<link", "nothing loads from elsewhere")
+}
+
+// A workload that ran four pods all week and runs one now could save more
+// a month than it costs now. The share is of what it cost over the same
+// history, so it's never over 100%.
+func TestHeadlineFor_SavingsShareIsOfTheirOwnCost(t *testing.T) {
+	totals := discovery.Totals{Workloads: 1, MonthlyCost: 36.5, SavingsBasis: 146,
+		Replayed: discovery.ReplayTotals{Workloads: 1, Sleepers: 1, MonthlyFreed: 145}}
+
+	h, _ := headlineFor(totals, "the last 7 days")
+
+	require.Len(t, h.Figures, 2)
+	assert.Equal(t, "$145", h.Figures[1].Value)
+	assert.Equal(t, "99% of what these workloads cost over the same time", h.Figures[1].Detail)
 }
 
 func TestWriteHTML_ByNamespace(t *testing.T) {

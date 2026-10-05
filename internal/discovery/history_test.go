@@ -100,6 +100,8 @@ func TestReplay(t *testing.T) {
 			assert.Equal(t, tt.wantWakes, h.Wakes)
 			assert.InDelta(t, tt.wantFreed, h.Freed, 0.01)
 			assert.InDelta(t, tt.wantFreed/168*hoursPerMonth, h.MonthlyFreed, 0.01)
+			assert.InDelta(t, tt.wantRuning*2*0.05, h.Cost, 0.01, "both pods while they ran")
+			assert.InDelta(t, h.Cost/168*hoursPerMonth, h.MonthlyCost, 0.01)
 		})
 	}
 }
@@ -274,6 +276,36 @@ func TestScanCluster_ReplaysHistory(t *testing.T) {
 	assert.Equal(t, 1, report.Totals.Replayed.Sleepers)
 	assert.InDelta(t, idle.Freed, report.Totals.Replayed.Freed, 0.001)
 	assert.Equal(t, "idle-api", report.Workloads[0].Name, "most freed first")
+}
+
+// A workload that ran four pods all week, and runs one now, would have
+// freed four pods' worth: more than it costs now. What it could save is a
+// share of what it cost over the same history, never more than all of it.
+func TestScanCluster_SavingsAreAShareOfTheirOwnCost(t *testing.T) {
+	quiet := func(time.Time) float64 { return 0.001 }
+	suffixes := []string{"abcde", "fghij", "klmno", "pqrst"}
+	history := make([]series, 0, len(suffixes))
+	for _, suffix := range suffixes {
+		history = append(history, series{pod: "idle-api-7d9f8c6b5-" + suffix, container: "main", cores: quiet})
+	}
+	f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{testNamespace: history}}
+	objs := deploymentWithRollout("idle-api", testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, makePodMetrics("idle-api", testNamespace, "1m", "20Mi"))
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = newFakePrometheus(t, f), 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+	require.NoError(t, err)
+	w := byName(report)["idle-api"]
+	require.NotNil(t, w.History)
+	assert.InDelta(t, 4*w.HourlyCost*168, w.History.Cost, 0.01, "four pods all week, at today's prices")
+	assert.Greater(t, w.History.MonthlyFreed, w.MonthlyCost, "four pods freed is more than one costs")
+	totals := report.Totals
+	assert.InDelta(t, w.History.MonthlyCost, totals.SavingsBasis, 0.001)
+	share := totals.Replayed.MonthlyFreed / totals.SavingsBasis
+	assert.InDelta(t, (168-1)/168.0, share, 0.001, "asleep all but its first hour, of the pods it ran")
 }
 
 func TestScanCluster_SaysWhenPrometheusKeepsLessHistory(t *testing.T) {
