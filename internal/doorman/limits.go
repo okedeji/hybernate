@@ -29,9 +29,17 @@ import (
 // held connections well inside the pod's memory. An ingress controller
 // sends every user's traffic from one address, so the per-source limits
 // leave room for it to wake many environments at once.
+//
+// What held callers send while they wait is buffered, so that one who
+// leaves is noticed (see clientStream): up to maxBufferedPerConn each,
+// enough for most request bodies, and maxBuffered across them all, which
+// bounds the memory a flood of large uploads can take.
 type limits struct {
 	maxHeld          int
 	maxHeldPerSource int
+
+	maxBufferedPerConn int
+	maxBuffered        int
 
 	sourceWakeEvery time.Duration
 	sourceWakeBurst int
@@ -40,12 +48,14 @@ type limits struct {
 }
 
 var defaultLimits = limits{
-	maxHeld:          2048,
-	maxHeldPerSource: 512,
-	sourceWakeEvery:  2 * time.Second,
-	sourceWakeBurst:  30,
-	wakeEvery:        100 * time.Millisecond,
-	wakeBurst:        200,
+	maxHeld:            2048,
+	maxHeldPerSource:   512,
+	maxBufferedPerConn: 1 << 20,
+	maxBuffered:        32 << 20,
+	sourceWakeEvery:    2 * time.Second,
+	sourceWakeBurst:    30,
+	wakeEvery:          100 * time.Millisecond,
+	wakeBurst:          200,
 }
 
 // sourceIdle is how long a source with nothing held is remembered. Its wake
@@ -62,10 +72,29 @@ type source struct {
 type admission struct {
 	limits limits
 
-	mu      sync.Mutex
-	held    int
-	sources map[netip.Addr]*source
-	wakes   *rate.Limiter
+	mu       sync.Mutex
+	held     int
+	buffered int
+	sources  map[netip.Addr]*source
+	wakes    *rate.Limiter
+}
+
+// reserveBuffer takes n bytes of the held connections' buffer budget, if
+// they're free.
+func (a *admission) reserveBuffer(n int) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.buffered+n > a.limits.maxBuffered {
+		return false
+	}
+	a.buffered += n
+	return true
+}
+
+func (a *admission) releaseBuffer(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.buffered -= n
 }
 
 func newAdmission(l limits) *admission {

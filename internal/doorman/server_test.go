@@ -710,6 +710,54 @@ func TestServer_ACallerLeavingFreesItsPlace(t *testing.T) {
 	assert.Zero(t, heldCount(s))
 }
 
+// A caller that sent a request body before leaving frees its place too,
+// rather than staying held until maxWait because its body was never read.
+func TestServer_ACallerLeavingAfterSendingABodyFreesItsPlace(t *testing.T) {
+	port := freePort(t)
+	s, _ := startServer(t, pausedWorkload("api", port, time.Minute))
+	before := wakes(resultCanceled)
+
+	conn := dial(t, port)
+	send(t, conn, "POST /upload HTTP/1.1\r\nHost: shop\r\nContent-Length: 102400\r\n\r\n"+strings.Repeat("x", 100<<10))
+	require.Eventually(t, func() bool { return heldCount(s) == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, conn.Close())
+
+	require.Eventually(t, func() bool { return wakes(resultCanceled) == before+1 }, 5*time.Second, 10*time.Millisecond)
+	assert.Zero(t, heldCount(s))
+	assert.Zero(t, bufferedBytes(s), "its buffered body is let go")
+}
+
+// A body larger than a held connection may buffer still reaches the
+// workload whole and in order once it's Ready.
+func TestServer_HoldsALargeBodyIntact(t *testing.T) {
+	port := freePort(t)
+	s, c := startServer(t, pausedWorkload("api", port, time.Minute))
+	body := strings.Repeat("0123456789abcdef", (3<<20)/16)
+	request := "POST /upload HTTP/1.1\r\nHost: shop\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+
+	conn := dial(t, port)
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = conn.Write([]byte(request)) }) // fails only if the test has already failed
+	require.Eventually(t, func() bool { return lastRequest(t, c) != "" }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return bufferedBytes(s) >= defaultLimits.maxBufferedPerConn/2 }, 5*time.Second, 10*time.Millisecond)
+	assert.LessOrEqual(t, bufferedBytes(s), defaultLimits.maxBufferedPerConn, "a held connection buffers no more than its cap")
+	require.NoError(t, c.Create(context.Background(), readySlice(echoPort(t))))
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	got := make([]byte, len(request))
+	_, err := io.ReadFull(conn, got)
+	require.NoError(t, err)
+	assert.Equal(t, request, string(got))
+	wg.Wait()
+	assert.Zero(t, bufferedBytes(s), "a connection passed on stops counting against held ones")
+}
+
+func bufferedBytes(s *Server) int {
+	s.admission.mu.Lock()
+	defer s.admission.mu.Unlock()
+	return s.admission.buffered
+}
+
 func heldCount(s *Server) int {
 	s.admission.mu.Lock()
 	defer s.admission.mu.Unlock()

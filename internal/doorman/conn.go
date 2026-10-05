@@ -137,8 +137,7 @@ type heldConn struct {
 	// stream carries the rest of what the caller sends, read in the
 	// background while the connection is held so that a caller who leaves
 	// frees its place at once.
-	stream *io.PipeReader
-	gone   chan struct{}
+	stream *clientStream
 }
 
 // hold decides what becomes of the connection, and returns the connection
@@ -221,7 +220,7 @@ func (h *heldConn) await(ctx, waitCtx context.Context, wakeErr error) (net.Conn,
 		case <-changed:
 			retry.Stop()
 		case <-retry.C:
-		case <-h.gone:
+		case <-h.stream.gone:
 			retry.Stop()
 			return nil, resultCanceled
 		case <-waitCtx.Done():
@@ -255,15 +254,8 @@ func (h *heldConn) passThrough(ctx context.Context) (net.Conn, string) {
 
 // streamClient starts reading the caller in the background.
 func (h *heldConn) streamClient() {
-	r, w := io.Pipe()
-	h.stream, h.gone = r, make(chan struct{})
-	h.handling.Go(func() {
-		defer close(h.gone)
-		// Hiding the connection's WriteTo keeps the copy to this small
-		// buffer rather than one of io.Copy's own.
-		_, err := io.CopyBuffer(w, struct{ io.Reader }{h.conn}, make([]byte, clientBufferSize))
-		_ = w.CloseWithError(err) // a nil error gives the reader EOF
-	})
+	h.stream = newClientStream(h.conn, h.admission)
+	h.handling.Go(h.stream.run)
 }
 
 // reader is everything the caller sends, in order.
@@ -277,7 +269,7 @@ func (h *heldConn) reader() io.Reader {
 
 func (h *heldConn) close() {
 	if h.stream != nil {
-		_ = h.stream.Close() // unblocks the background read
+		h.stream.close()
 	}
 }
 
