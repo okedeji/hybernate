@@ -53,6 +53,8 @@ func (r *Reconciler) learnDependencies(ctx context.Context, workload *v1alpha1.M
 	if l := workload.Status.LearnedDependencies; l != nil && l.From == from && now.Sub(l.At.Time) < relearnAfter {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, dependencyTimeout)
+	defer cancel()
 
 	spec := podTemplateOf(target).Spec
 	configMaps, err := r.configMapsFor(ctx, workload.Namespace, spec)
@@ -251,6 +253,9 @@ func (r *Reconciler) learnFromWake(ctx context.Context, workload *v1alpha1.Manag
 	if ip == "" || wakeSource(workload) != v1alpha1.ActivitySourceRequest {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, dependencyTimeout)
+	defer cancel()
+
 	pod, found, err := r.podAt(ctx, ip)
 	if err != nil || !found {
 		return err
@@ -269,7 +274,9 @@ func (r *Reconciler) learnFromWake(ctx context.Context, workload *v1alpha1.Manag
 		return nil
 	}
 	if l == nil {
-		l = &v1alpha1.LearnedDependencies{}
+		// No From matches a pod template, so the dependent still learns
+		// from its environment on its next reconcile, keeping this.
+		l = &v1alpha1.LearnedDependencies{At: r.clockTime()}
 		dependent.Status.LearnedDependencies = l
 	}
 	l.Dependencies = append(l.Dependencies, learned)

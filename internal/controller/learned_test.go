@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -316,4 +317,44 @@ func TestLearnFromWake_WatchedNamespaces(t *testing.T) {
 	require.NoError(t, r.learnFromWake(context.Background(), postgres))
 
 	assert.Equal(t, []string{"default/postgres "}, learnedNames(fetch(t, r, "api")))
+}
+
+// The first dependency a workload learns may come from a wake, before it
+// has learned any from its environment. What's written then must pass the
+// CRD's validation, which the fake client doesn't check.
+func TestLearnFromWake_FirstLearnedIsValid(t *testing.T) {
+	cfg := startEnvtest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	scheme := testScheme(t)
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+
+	labels := map[string]string{"app": "api"}
+	container := corev1.Container{Name: "app", Image: "api:v1"}
+	require.NoError(t, c.Create(ctx, &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{container}}}},
+	}))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-x2", Namespace: "default", Labels: labels},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{container}}}
+	require.NoError(t, c.Create(ctx, pod))
+	pod.Status.PodIP = senderIP
+	pod.Status.PodIPs = []corev1.PodIP{{IP: senderIP}}
+	require.NoError(t, c.Status().Update(ctx, pod))
+	api := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85}},
+	}
+	require.NoError(t, c.Create(ctx, api))
+
+	r := &Reconciler{Client: c, PodReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(20),
+		clock: func() time.Time { return fixedTime }}
+	require.NoError(t, r.learnFromWake(ctx, wokenPostgres()))
+
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(api), api))
+	assert.Equal(t, []string{"default/postgres "}, learnedNames(api))
 }
