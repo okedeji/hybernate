@@ -82,14 +82,22 @@ func TestOptInSpec_DryRun(t *testing.T) {
 }
 
 // A bad value is reported and falls back to what the setting would be
-// without it; the other settings still apply.
+// without it, except dry-run, which turns on; the other settings still
+// apply.
 func TestOptInSpec_InvalidValues(t *testing.T) {
 	tests := []struct {
 		annotation string
 		value      string
 		check      func(t *testing.T, spec v1alpha1.ManagedWorkloadSpec)
 	}{
-		{v1alpha1.AnnotationDryRun, "yes", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) { assert.False(t, s.DryRun) }},
+		{v1alpha1.AnnotationDryRun, "yes", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) { assert.True(t, s.DryRun) }},
+		{v1alpha1.AnnotationIdleAfter, "0s", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
+			assert.Equal(t, time.Hour, s.IdlePolicy.IdleAfter.Duration)
+		}},
+		{v1alpha1.AnnotationWakeMaxWait, "0", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
+			assert.Equal(t, 2*time.Minute, s.Wake.MaxWait.Duration)
+		}},
+		{v1alpha1.AnnotationWakeOnRequest, "yes", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) { assert.True(t, *s.Wake.OnRequest) }},
 		{v1alpha1.AnnotationIdleAfter, "soon", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
 			assert.Equal(t, time.Hour, s.IdlePolicy.IdleAfter.Duration)
 		}},
@@ -134,4 +142,99 @@ func TestOptInSpec_DependsOn(t *testing.T) {
 	require.Len(t, problems, 2, "the unsupported kind and the malformed entry")
 	assert.Equal(t, "cronjob/report", problems[0].value)
 	assert.Equal(t, "bad", problems[1].value)
+}
+
+// A value on the workload that can't be read falls through to its
+// namespace's, then the default, as a missing one would; it's never taken
+// to mean the default. Dry-run fails safe instead: any value along the way
+// that can't be read turns it on.
+func TestOptInSpec_InvalidWorkloadValueFallsThrough(t *testing.T) {
+	tests := []struct {
+		name        string
+		workload    map[string]string
+		namespace   map[string]string
+		check       func(t *testing.T, s v1alpha1.ManagedWorkloadSpec)
+		wantOutcome string
+	}{
+		{name: "dry-run spelled differently keeps the namespace's dry-run",
+			workload:    map[string]string{v1alpha1.AnnotationDryRun: "True"},
+			namespace:   map[string]string{v1alpha1.AnnotationDryRun: "true"},
+			check:       func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) { assert.True(t, s.DryRun) },
+			wantOutcome: "dry-run is on, to be safe"},
+		{name: "an unreadable dry-run never goes live",
+			workload:    map[string]string{v1alpha1.AnnotationDryRun: "False"},
+			namespace:   map[string]string{v1alpha1.AnnotationDryRun: "false"},
+			check:       func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) { assert.True(t, s.DryRun) },
+			wantOutcome: "dry-run is on, to be safe"},
+		{name: "an unreadable dry-run on the namespace",
+			namespace:   map[string]string{v1alpha1.AnnotationDryRun: "yes"},
+			check:       func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) { assert.True(t, s.DryRun) },
+			wantOutcome: "dry-run is on, to be safe"},
+		{name: "idle-after",
+			workload:  map[string]string{v1alpha1.AnnotationIdleAfter: "soon"},
+			namespace: map[string]string{v1alpha1.AnnotationIdleAfter: "3h"},
+			check: func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
+				assert.Equal(t, 3*time.Hour, s.IdlePolicy.IdleAfter.Duration)
+			},
+			wantOutcome: "the namespace's value is used"},
+		{name: "idle-after unreadable on both",
+			workload:  map[string]string{v1alpha1.AnnotationIdleAfter: "soon"},
+			namespace: map[string]string{v1alpha1.AnnotationIdleAfter: "later"},
+			check: func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
+				assert.Equal(t, time.Hour, s.IdlePolicy.IdleAfter.Duration)
+			},
+			wantOutcome: "the default is used"},
+		{name: "cpu-threshold",
+			workload:  map[string]string{v1alpha1.AnnotationCPUThreshold: "0"},
+			namespace: map[string]string{v1alpha1.AnnotationCPUThreshold: "25"},
+			check: func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
+				assert.Equal(t, 25, s.IdlePolicy.Activity.CPUThreshold)
+			},
+			wantOutcome: "the namespace's value is used"},
+		{name: "wake-page",
+			workload:    map[string]string{v1alpha1.AnnotationWakePage: "no"},
+			namespace:   map[string]string{v1alpha1.AnnotationWakePage: "false"},
+			check:       func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) { assert.False(t, *s.Wake.Page) },
+			wantOutcome: "the namespace's value is used"},
+		{name: "depends-on with no readable entry",
+			workload:  map[string]string{v1alpha1.AnnotationDependsOn: "postgres"},
+			namespace: map[string]string{v1alpha1.AnnotationDependsOn: "shared/statefulset/postgres"},
+			check: func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
+				assert.Equal(t, []v1alpha1.DependencyRef{
+					{Namespace: "shared", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres"}}, s.DependsOn)
+			},
+			wantOutcome: "the namespace's value is used"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, problems := optInSpec(apiTarget, tt.workload, tt.namespace, DefaultOptInDefaults)
+
+			tt.check(t, spec)
+			require.NotEmpty(t, problems)
+			for _, p := range problems {
+				assert.Equal(t, tt.wantOutcome, p.outcome, p.String())
+			}
+		})
+	}
+}
+
+// A namespace's value that can't be read doesn't matter, and isn't
+// reported, when the workload sets its own.
+func TestOptInSpec_WorkloadValueShadowsNamespaceProblem(t *testing.T) {
+	spec, problems := optInSpec(apiTarget,
+		map[string]string{v1alpha1.AnnotationDryRun: "false"},
+		map[string]string{v1alpha1.AnnotationDryRun: "maybe"}, DefaultOptInDefaults)
+
+	assert.Empty(t, problems)
+	assert.False(t, spec.DryRun)
+}
+
+// An empty depends-on on a workload drops its namespace's.
+func TestOptInSpec_EmptyDependsOnDropsTheNamespaces(t *testing.T) {
+	spec, problems := optInSpec(apiTarget,
+		map[string]string{v1alpha1.AnnotationDependsOn: ""},
+		map[string]string{v1alpha1.AnnotationDependsOn: "statefulset/postgres"}, DefaultOptInDefaults)
+
+	assert.Empty(t, problems)
+	assert.Empty(t, spec.DependsOn)
 }

@@ -100,8 +100,7 @@ func (r *OptInReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	spec, problems := optInSpec(target, obj.GetAnnotations(), ns.GetAnnotations(), r.Defaults)
 	for _, p := range problems {
-		r.Recorder.Eventf(obj, nil, "Warning", ReasonInvalidSetting, actionOptIn,
-			"%s, so its default is used", p)
+		r.Recorder.Eventf(obj, nil, "Warning", ReasonInvalidSetting, actionOptIn, "%s", p)
 	}
 	return ctrl.Result{}, r.apply(ctx, obj, ours, spec)
 }
