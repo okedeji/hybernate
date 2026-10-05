@@ -45,79 +45,60 @@ var DefaultRates = Rates{
 	StoragePerMonth: 0.08,
 }
 
-// Snapshot holds accumulated resource consumption for a billing period.
-type Snapshot struct {
-	CPUHours           float64
-	MemoryHours        float64
-	StorageHours       float64
-	EstimatedSavedCost float64
+// hoursPerMonth is the average month that StoragePerMonth is priced over.
+const hoursPerMonth = 730
+
+// Hours are resource-hours: vCPU-hours and GiB-hours of memory and storage.
+type Hours struct {
+	CPU     float64
+	Memory  float64
+	Storage float64
 }
 
-const maxElapsed = 2 * time.Hour
-
-// Accumulate adds time-weighted resource usage to an existing snapshot.
-// elapsed is capped at 2h to bound error after operator restarts.
-func Accumulate(s Snapshot, cpuCores, memoryGiB, storageGiB float64, elapsed time.Duration) Snapshot {
-	hours := clampElapsed(elapsed)
-	s.CPUHours += cpuCores * hours
-	s.MemoryHours += memoryGiB * hours
-	s.StorageHours += storageGiB * hours
-	return s
-}
-
-// AccumulateSavings adds what a paused workload's compute would have cost.
-// Its PVCs stay while it's paused, so storage isn't saved.
-func AccumulateSavings(s Snapshot, cpuCores, memoryGiB float64, elapsed time.Duration, rates Rates) Snapshot {
-	hours := clampElapsed(elapsed)
-	s.EstimatedSavedCost += ComputeHourly(cpuCores, memoryGiB, rates) * hours
-	return s
+// Price is what h costs at r.
+func (h Hours) Price(r Rates) float64 {
+	return h.CPU*r.CPUPerHour + h.Memory*r.MemoryPerHour + h.Storage*r.StoragePerMonth/hoursPerMonth
 }
 
 // ComputeHourly is what an hour of the given CPU and memory costs.
 func ComputeHourly(cpuCores, memoryGiB float64, rates Rates) float64 {
-	return cpuCores*rates.CPUPerHour + memoryGiB*rates.MemoryPerHour
+	return Hours{CPU: cpuCores, Memory: memoryGiB}.Price(rates)
 }
 
-// TotalCost computes the dollar cost from accumulated resource consumption.
-func TotalCost(s Snapshot, rates Rates) float64 {
-	return s.CPUHours*rates.CPUPerHour +
-		s.MemoryHours*rates.MemoryPerHour +
-		s.StorageHours*storageHourlyRate(rates)
+// MaxInterval is the most of one interval between accumulations that
+// Counted counts.
+const MaxInterval = 2 * time.Hour
+
+// Counted is how much of an interval between accumulations counts. One
+// longer than MaxInterval means the operator wasn't running or the clock
+// jumped, and what the workload did meanwhile isn't known, so it counts as
+// MaxInterval: enough to cover a slow restart, without billing hours of
+// downtime at whatever phase the workload was last seen in. A negative one,
+// from the clock going back, counts as nothing.
+func Counted(d time.Duration) time.Duration {
+	return min(max(d, 0), MaxInterval)
 }
 
-// EstimateMonthlyCost projects the full-month cost based on usage so far.
-// Returns -1 when there's not enough data (day 1) so the caller can
-// display "pending" or omit the field.
-func EstimateMonthlyCost(s Snapshot, rates Rates, dayOfMonth, daysInMonth int) float64 {
-	if dayOfMonth <= 1 {
-		return -1
+// MonthOf is the start of the calendar month t falls in, in UTC.
+func MonthOf(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+// Project carries amount, accrued over tracked, to the whole of the UTC
+// month t falls in at the same rate. It's false until a day has been
+// tracked: a shorter stretch misses a daily pattern's quiet hours, or its
+// busy ones.
+func Project(amount float64, tracked time.Duration, t time.Time) (float64, bool) {
+	if tracked < 24*time.Hour {
+		return 0, false
 	}
-	costSoFar := TotalCost(s, rates)
-	return costSoFar / float64(dayOfMonth) * float64(daysInMonth)
-}
-
-// EstimatedCostWithoutManagement returns what the workload would have cost if
-// Hybernate hadn't acted — current spend plus estimated savings.
-func EstimatedCostWithoutManagement(s Snapshot, rates Rates) float64 {
-	return TotalCost(s, rates) + s.EstimatedSavedCost
+	start := MonthOf(t)
+	month := start.AddDate(0, 1, 0).Sub(start)
+	return amount * month.Hours() / tracked.Hours(), true
 }
 
 // FormatDollars formats a cost value as a dollar string.
 func FormatDollars(amount float64) string {
 	return fmt.Sprintf("$%.2f", amount)
-}
-
-// storageHourlyRate converts $/GiB-month to $/GiB-hour (730 hours/month avg).
-func storageHourlyRate(r Rates) float64 {
-	return r.StoragePerMonth / 730
-}
-
-func clampElapsed(d time.Duration) float64 {
-	if d > maxElapsed {
-		d = maxElapsed
-	}
-	if d < 0 {
-		return 0
-	}
-	return d.Hours()
 }

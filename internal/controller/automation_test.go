@@ -72,9 +72,7 @@ func (f *stubForecaster) AnomalyDetected() bool    { return f.anomalyDetected }
 
 type stubMetrics struct {
 	cpuMillis        float64
-	sidecarCPUMillis float64 // used by injected sidecars: cost, not activity
 	cpuPerReplica    float64
-	memoryBytes      float64
 	memoryPerReplica float64
 	replicas         int32
 	pvcBytes         float64
@@ -83,10 +81,6 @@ type stubMetrics struct {
 
 func (m *stubMetrics) WorkloadCPUMillis(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
 	return m.cpuMillis, m.err
-}
-
-func (m *stubMetrics) TotalCPUMillis(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
-	return m.cpuMillis + m.sidecarCPUMillis, m.err
 }
 
 func (m *stubMetrics) CPURequestPerReplica(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
@@ -102,10 +96,6 @@ func (m *stubMetrics) Replicas(_ context.Context, _ *v1alpha1.ManagedWorkload) (
 		return m.replicas, m.err
 	}
 	return 1, m.err
-}
-
-func (m *stubMetrics) TotalMemoryBytes(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
-	return m.memoryBytes, m.err
 }
 
 func (m *stubMetrics) TotalPVCBytes(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {

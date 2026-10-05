@@ -199,12 +199,3 @@ func withRates(rates cost.Rates, r *v1alpha1.CostRates) cost.Rates {
 	}
 	return rates
 }
-
-func parseDollarAmount(s string) float64 {
-	if len(s) < 2 || s[0] != '$' {
-		return 0
-	}
-	var v float64
-	_, _ = fmt.Sscanf(s[1:], "%f", &v)
-	return v
-}

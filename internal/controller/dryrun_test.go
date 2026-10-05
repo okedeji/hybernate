@@ -23,10 +23,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/cost"
 	"github.com/okedeji/hybernate/internal/forecast"
 )
 
@@ -78,6 +80,8 @@ func TestDryRun_ActivityEndsAWouldBePause(t *testing.T) {
 		Since:            metav1.NewTime(time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC)),
 		Pauses:           2,
 		Slept:            metav1.Duration{Duration: time.Hour},
+		FreedCPUHours:    resource.MustParse("2"),
+		FreedMemoryHours: resource.MustParse("2"),
 		EstimatedSavings: "$0.07",
 		Resources:        &v1alpha1.ResourceSnapshot{Replicas: 2, CPUMillis: 1000, MemoryBytes: gibibyte},
 	}
@@ -119,6 +123,32 @@ func TestDryRun_APauseThatBeganBeforeMeasuringIsNotCounted(t *testing.T) {
 	assert.NotContains(t, resumed[0], "would have slept")
 }
 
+// Would-be pauses add up to what they would have freed however short they
+// are and however small the workload: each one used to be rounded to the
+// cent as it was added, so a small workload never seemed worth pausing.
+func TestDryRun_ShortPausesOfSmallWorkloadsAddUp(t *testing.T) {
+	r := &Reconciler{clock: func() time.Time { return fixedTime }}
+	workload := automationWorkload(v1alpha1.PhaseIdle)
+	workload.Spec.DryRun = true
+	workload.Status.DryRun = measuring(fixedTime.Add(-24 * time.Hour))
+	idleSince := metav1.NewTime(fixedTime)
+	workload.Status.LastTransitionTime = &idleSince
+	workload.Status.Activity = &v1alpha1.ActivityStatus{LastActivityTime: metav1.NewTime(fixedTime.Add(3 * time.Minute))}
+
+	for range 480 {
+		workload.Status.DryRun.Pauses++
+		workload.Status.DryRun.Resources = &v1alpha1.ResourceSnapshot{Replicas: 1, CPUMillis: 10, MemoryBytes: 64 << 20}
+		_, _, measured := r.endWouldBePause(workload)
+		require.True(t, measured)
+	}
+
+	d := workload.Status.DryRun
+	assert.Equal(t, 24*time.Hour, d.Slept.Duration)
+	assert.InEpsilon(t, 0.01*24, d.FreedCPUHours.AsApproximateFloat64(), 0.001)
+	assert.InEpsilon(t, 0.0625*24, d.FreedMemoryHours.AsApproximateFloat64(), 0.001)
+	assert.Equal(t, cost.FormatDollars(cost.ComputeHourly(0.01, 0.0625, cost.DefaultRates)*24), d.EstimatedSavings)
+}
+
 func TestTrackDryRun(t *testing.T) {
 	r := &Reconciler{clock: func() time.Time { return fixedTime }}
 	workload := automationWorkload(v1alpha1.PhaseRunning)
@@ -142,7 +172,9 @@ func TestRoundedDuration(t *testing.T) {
 		in   time.Duration
 		want string
 	}{
+		{10 * time.Second, "under a minute"},
 		{30 * time.Second, "under a minute"},
+		{90 * time.Second, "2m"},
 		{45 * time.Minute, "45m"},
 		{3*time.Hour + 12*time.Minute, "3h12m"},
 		{3*time.Hour + 10*time.Minute, "3h10m"},

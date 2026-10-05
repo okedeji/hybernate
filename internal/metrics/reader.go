@@ -58,8 +58,9 @@ type Reader struct {
 }
 
 // NewReader returns a Reader. Pods are read through pods rather than c so
-// they needn't be cached: they're only read when a workload pauses, and a
-// cluster's pods are the largest thing an operator could cache.
+// they needn't be cached: they're read only when a workload pauses and
+// when its pricing is refreshed, at most hourly, and a cluster's pods are
+// the largest thing an operator could cache.
 func NewReader(c client.Client, pods client.Reader) *Reader {
 	return &Reader{client: c, pods: pods}
 }
@@ -70,64 +71,18 @@ func NewReader(c client.Client, pods client.Reader) *Reader {
 func (r *Reader) WorkloadCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	target, pods, err := r.podMetrics(ctx, workload)
-	if err != nil {
-		return 0, err
-	}
-	cpuMillis, _ := Usage(pods, podSpecFromTarget(target))
-	return float64(cpuMillis), nil
-}
-
-// TotalCPUMillis returns the CPU in millicores used by every container in
-// the workload's pods, sidecars included, for what it costs.
-func (r *Reader) TotalCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
-	defer cancel()
-	_, pods, err := r.podMetrics(ctx, workload)
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, pod := range pods {
-		for _, c := range pod.Containers {
-			total += c.Usage.Cpu().MilliValue()
-		}
-	}
-	return float64(total), nil
-}
-
-// TotalMemoryBytes returns the memory used by every container in the
-// workload's pods, sidecars included, for what it costs.
-func (r *Reader) TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
-	defer cancel()
-	_, pods, err := r.podMetrics(ctx, workload)
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, pod := range pods {
-		for _, c := range pod.Containers {
-			total += c.Usage.Memory().Value()
-		}
-	}
-	return float64(total), nil
-}
-
-// podMetrics returns the target and the metrics of the pods it runs.
-func (r *Reader) podMetrics(ctx context.Context, workload *v1alpha1.ManagedWorkload) (client.Object, []metricsv1beta1.PodMetrics, error) {
 	target, err := r.getTarget(ctx, workload)
 	if err != nil {
-		return nil, nil, err
+		return 0, err
 	}
 	selector, err := selectorFromTarget(target)
 	if err != nil {
-		return nil, nil, err
+		return 0, err
 	}
 	var list metricsv1beta1.PodMetricsList
 	if err := r.client.List(ctx, &list, client.InNamespace(workload.Namespace),
 		client.MatchingLabelsSelector{Selector: selector}); err != nil {
-		return nil, nil, fmt.Errorf("listing pod metrics for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
+		return 0, fmt.Errorf("listing pod metrics for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
 	}
 	pods := make([]metricsv1beta1.PodMetrics, 0, len(list.Items))
 	for _, pod := range list.Items {
@@ -136,9 +91,10 @@ func (r *Reader) podMetrics(ctx context.Context, workload *v1alpha1.ManagedWorkl
 		}
 	}
 	if len(pods) == 0 {
-		return nil, nil, fmt.Errorf("%w for %s/%s", ErrNoPodMetrics, workload.Namespace, workload.Spec.Target.Name)
+		return 0, fmt.Errorf("%w for %s/%s", ErrNoPodMetrics, workload.Namespace, workload.Spec.Target.Name)
 	}
-	return target, pods, nil
+	cpuMillis, _ := Usage(pods, podSpecFromTarget(target))
+	return float64(cpuMillis), nil
 }
 
 // CPURequestPerReplica returns the CPU request in millicores of one replica's

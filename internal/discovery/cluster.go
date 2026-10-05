@@ -485,7 +485,7 @@ func SavedThisMonth(mw *v1alpha1.ManagedWorkload) float64 {
 	if mw == nil || mw.Spec.DryRun || mw.Status.Cost == nil {
 		return 0
 	}
-	saved, err := strconv.ParseFloat(strings.TrimPrefix(mw.Status.Cost.EstimatedMonthlySavings, "$"), 64)
+	saved, err := strconv.ParseFloat(strings.TrimPrefix(mw.Status.Cost.SavedThisMonth, "$"), 64)
 	if err != nil {
 		return 0
 	}

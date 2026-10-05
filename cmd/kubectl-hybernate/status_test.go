@@ -75,7 +75,7 @@ func statusCluster() []client.Object {
 	api := statusWorkloadObj("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhasePaused, 3*time.Hour)
 	api.Status.Doorman = []v1alpha1.DoormanRoute{{Service: "api", DoormanPort: 20000}}
 	api.Status.Activity = activity(v1alpha1.ActivitySourceRequest, 4*time.Hour, -3*time.Hour)
-	api.Status.Cost = &v1alpha1.CostStatus{EstimatedMonthlySavings: "$12.40"}
+	api.Status.Cost = &v1alpha1.CostStatus{SavedThisMonth: "$12.40"}
 
 	postgres := statusWorkloadObj("preview-42", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhaseRunning,
 		5*time.Hour)
@@ -83,12 +83,12 @@ func statusCluster() []client.Object {
 	postgres.Status.Conditions = []metav1.Condition{
 		condition("HeldByDependents", metav1.ConditionTrue, "DependentsAwake", "held awake for preview-42/worker"),
 	}
-	postgres.Status.Cost = &v1alpha1.CostStatus{EstimatedMonthlySavings: "$30.05"}
+	postgres.Status.Cost = &v1alpha1.CostStatus{SavedThisMonth: "$30.05"}
 
 	web := statusWorkloadObj("preview-7", "web", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, 2*time.Hour)
 	web.Spec.DryRun = true
 	web.Status.Activity = activity(v1alpha1.ActivitySourceRollout, 15*time.Minute, 45*time.Minute)
-	web.Status.Cost = &v1alpha1.CostStatus{EstimatedMonthlySavings: "$9.00"}
+	web.Status.Cost = &v1alpha1.CostStatus{SavedThisMonth: "$9.00"}
 
 	worker := statusWorkloadObj("preview-7", "worker", v1alpha1.TargetKindDeployment, v1alpha1.PhaseResuming,
 		25*time.Minute)

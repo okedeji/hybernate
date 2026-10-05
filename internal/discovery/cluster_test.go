@@ -409,7 +409,7 @@ func TestScanCluster_ManagedBeforeItsClockStarts(t *testing.T) {
 // are summed apart, each for the workloads it applies to.
 func TestScanCluster_SavingsBySource(t *testing.T) {
 	live := managedFor("live", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
-		Cost: &v1alpha1.CostStatus{EstimatedMonthlySavings: "$12.40"}})
+		Cost: &v1alpha1.CostStatus{SavedThisMonth: "$12.40"}})
 	dry := managedFor("dry", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
 		DryRun: &v1alpha1.DryRunStatus{Since: metav1.NewTime(scanTime.Add(-73 * time.Hour)), Pauses: 2,
 			Slept: metav1.Duration{Duration: 10 * time.Hour}}})

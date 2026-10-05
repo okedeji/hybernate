@@ -131,15 +131,6 @@ func TestReader_InjectedSidecar(t *testing.T) {
 		assert.InDelta(t, 0.1, used/requested, 0.001, "10% of the app's own request, not 40%")
 	})
 
-	t.Run("cost counts the whole pod", func(t *testing.T) {
-		cpu, err := r.TotalCPUMillis(ctx, workload)
-		require.NoError(t, err)
-		assert.InDelta(t, 4, cpu, 0.001)
-		mem, err := r.TotalMemoryBytes(ctx, workload)
-		require.NoError(t, err)
-		assert.InDelta(t, 35*1024*1024, mem, 1)
-	})
-
 	t.Run("pausing frees the whole pod's requests", func(t *testing.T) {
 		cpu, mem, err := r.PodRequestsPerReplica(ctx, workload)
 		require.NoError(t, err)

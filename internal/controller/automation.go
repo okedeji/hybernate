@@ -53,13 +53,11 @@ type forecaster interface {
 // metricsReader measures a workload two ways. Activity compares the usage
 // of the workload's own containers with their requests, so an injected
 // sidecar's background work doesn't keep it awake. Cost counts the whole
-// pod, sidecars included, since that's what the workload costs and what
-// pausing frees.
+// pod's requests, sidecars included, since that's what the workload
+// reserves and what pausing frees.
 type metricsReader interface {
 	WorkloadCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 	CPURequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
-	TotalCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
-	TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 	PodRequestsPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cpuMillis, memBytes float64, err error)
 	Replicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error)
 	TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)

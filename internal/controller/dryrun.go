@@ -57,16 +57,20 @@ func (r *Reconciler) endWouldBePause(workload *v1alpha1.ManagedWorkload) (time.D
 		return 0, 0, false
 	}
 	slept := max(workload.Status.Activity.LastActivityTime.Sub(workload.Status.LastTransitionTime.Time), 0)
-	var freed float64
+	rates := resolveCostRates(workload)
+	var freed cost.Hours
 	if rs := d.Resources; rs != nil {
-		cores := float64(rs.Replicas) * float64(rs.CPUMillis) / 1000
-		gib := float64(rs.Replicas) * float64(rs.MemoryBytes) / bytesPerGiB
-		freed = cost.ComputeHourly(cores, gib, resolveCostRates(workload)) * slept.Hours()
+		cores, gib := requested(rs)
+		freed.CPU = addHours(&d.FreedCPUHours, cores, slept)
+		freed.Memory = addHours(&d.FreedMemoryHours, gib, slept)
 	}
 	d.Slept.Duration += slept
-	d.EstimatedSavings = cost.FormatDollars(parseDollarAmount(d.EstimatedSavings) + freed)
+	d.EstimatedSavings = cost.FormatDollars(cost.Hours{
+		CPU:    d.FreedCPUHours.AsApproximateFloat64(),
+		Memory: d.FreedMemoryHours.AsApproximateFloat64(),
+	}.Price(rates))
 	d.Resources = nil
-	return slept, freed, true
+	return slept, freed.Price(rates), true
 }
 
 // dryRunSummary describes what dry-run has measured so far, for events.

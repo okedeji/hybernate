@@ -35,7 +35,7 @@ func busyWorkloadReconciler(t *testing.T) (*Reconciler, *time.Time) {
 	workload := lifecycleWorkload("busy-app", nil, v1alpha1.PhaseRunning)
 	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
 	r := newTestReconciler(t, workload, &stubPauser{})
-	r.metrics = &stubMetrics{cpuMillis: 500, cpuPerReplica: 1000, replicas: 1, memoryBytes: 1 << 30}
+	r.metrics = &stubMetrics{cpuMillis: 500, cpuPerReplica: 1000, memoryPerReplica: 1 << 30, replicas: 1}
 	now := fixedTime
 	r.clock = func() time.Time { return now }
 	return r, &now
@@ -57,7 +57,7 @@ func TestReconcile_CostAccumulatesForRunningWorkloads(t *testing.T) {
 
 	cost := getWorkload(t, r, "busy-app").Status.Cost
 	require.NotNil(t, cost, "a running workload with automation must still have its cost tracked")
-	assert.Positive(t, cost.CurrentMonthCPUHours.AsApproximateFloat64())
+	assert.Positive(t, cost.AwakeCPUHours.AsApproximateFloat64())
 }
 
 func TestReconcile_StatusWritesAreBatched(t *testing.T) {
@@ -122,7 +122,7 @@ func TestWithoutVolatile(t *testing.T) {
 	evaluated := metav1.NewTime(fixedTime)
 	status := &v1alpha1.ManagedWorkloadStatus{
 		Phase: v1alpha1.PhaseRunning,
-		Cost:  &v1alpha1.CostStatus{EstimatedMonthlyCost: "$1.00"},
+		Cost:  &v1alpha1.CostStatus{CostThisMonth: "$1.00"},
 		Activity: &v1alpha1.ActivityStatus{
 			LastActivityTime:  metav1.NewTime(fixedTime),
 			LastEvaluatedTime: &evaluated,
