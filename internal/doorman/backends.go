@@ -75,11 +75,28 @@ func readyAddress(ep discoveryv1.Endpoint) (netip.Addr, bool) {
 	return addr.Unmap(), true
 }
 
+// cloudMetadata are the cloud metadata services outside link-local space:
+// AWS's IPv6 instance services, at fd00:ec2::254 and its neighbours, and
+// Alibaba Cloud's. The rest of unique-local and shared (100.64.0.0/10)
+// space stays routable, since pod networks are allocated from both.
+var cloudMetadata = []netip.Prefix{
+	netip.MustParsePrefix("fd00:ec2::/32"),
+	netip.MustParsePrefix("100.100.100.200/32"),
+}
+
 // routable reports whether addr could be a pod's. Loopback would reach the
-// doorman's own pod, and link-local the node's metadata service, which a
-// forged EndpointSlice could otherwise send the doorman to.
+// doorman's own pod, and link-local or cloudMetadata a metadata service,
+// which a forged EndpointSlice could otherwise send the doorman to.
 func routable(addr netip.Addr) bool {
-	return addr.IsGlobalUnicast()
+	if !addr.IsGlobalUnicast() {
+		return false
+	}
+	for _, p := range cloudMetadata {
+		if p.Contains(addr) {
+			return false
+		}
+	}
+	return true
 }
 
 func slicePort(slice *discoveryv1.EndpointSlice, name string) (int32, bool) {

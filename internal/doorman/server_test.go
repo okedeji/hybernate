@@ -299,6 +299,13 @@ func TestBackends_TrustOnlyTheServicesPods(t *testing.T) {
 		{name: "the node's metadata service", slice: func(s *discoveryv1.EndpointSlice) {
 			s.Endpoints[0].Addresses = []string{"169.254.169.254"}
 		}},
+		{name: "AWS's IPv6 metadata service", slice: func(s *discoveryv1.EndpointSlice) {
+			s.AddressType = discoveryv1.AddressTypeIPv6
+			s.Endpoints[0].Addresses = []string{"fd00:ec2::254"}
+		}},
+		{name: "Alibaba Cloud's metadata service", slice: func(s *discoveryv1.EndpointSlice) {
+			s.Endpoints[0].Addresses = []string{"100.100.100.200"}
+		}},
 		{name: "loopback", slice: func(*discoveryv1.EndpointSlice) {}},
 		{name: "not a pod", slice: func(s *discoveryv1.EndpointSlice) {
 			s.Endpoints[0].Addresses = []string{"10.0.0.9"}
@@ -327,6 +334,29 @@ func TestBackends_TrustOnlyTheServicesPods(t *testing.T) {
 			require.NoError(t, err)
 			assert.Empty(t, addrs)
 		})
+	}
+}
+
+// Pod networks are allocated from private, unique-local and shared address
+// space, so those stay routable around the metadata services refused.
+func TestRoutable(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{addr: "10.244.1.9", want: true},
+		{addr: "100.64.3.7", want: true},
+		{addr: "fd12:3456::7", want: true},
+		{addr: "2600:1f14::9", want: true},
+		{addr: "127.0.0.1"},
+		{addr: "169.254.169.254"},
+		{addr: "fd00:ec2::254"},
+		{addr: "fd00:ec2::253"},
+		{addr: "100.100.100.200"},
+		{addr: "::1"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, routable(netip.MustParseAddr(tt.addr)), tt.addr)
 	}
 }
 
