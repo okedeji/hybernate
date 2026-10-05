@@ -130,7 +130,7 @@ Pass --cpu-price and --memory-price for yours.
 - a table by namespace (with a filter), every workload with the same columns as the terminal (sortable, with a filter), and the dependencies found
 - what the numbers mean, in plain words, and the next steps
 
-Dependency addresses are left out of the page, since it's meant to be passed around; the terminal and JSON keep them. A scan covers one cluster, the current kubeconfig context or the one you name with `--context`; [Hybernate Hub](https://okedeji.io/hybernate/hub) shows every cluster together.
+Dependency addresses are left out of the page, since it's meant to be passed around; the terminal and JSON keep them. A scan covers one cluster, the current kubeconfig context or the one you name with `--context`.
 
 The file goes to your temporary directory unless you pass `--html FILE`. It opens only when the table is shown in a terminal on a machine with a desktop; piped output, `-o json`, CI, and SSH sessions get no report unless you ask for one with `--html`. `--open=false` keeps it from opening.
 
@@ -229,7 +229,7 @@ kubectl hybernate status --since 1h -o json
 | `--output` | `-o` | `table` | `table`, `json`, or `yaml` |
 | `--since` | | `24h` | How far back to list pauses and wakes |
 
-Your user needs `list` on `managedworkloads` and `events`, in every namespace or the ones passed with `-n`. Without access to events, it shows the rest and says so. For a dashboard, see [Hybernate Hub](https://okedeji.io/hybernate/hub).
+Your user needs `list` on `managedworkloads` and `events`, in every namespace or the ones passed with `-n`. Without access to events, it shows the rest and says so.
 
 ## Wake a Workload
 

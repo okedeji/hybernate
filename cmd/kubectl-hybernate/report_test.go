@@ -107,7 +107,7 @@ func TestWriteHTML_History(t *testing.T) {
 		"what history shows for unmanaged workloads, plus what dry-run measured, against what they cost")
 	assert.NotContains(t, got, "Had Hybernate been pausing them", "the figures and facts say it")
 	assert.Contains(t, got, "It&#39;s idle once it has had no activity for 1h")
-	assert.Contains(t, got, "Try Hybernate Hub")
+	assert.NotContains(t, got, "Hybernate Hub", "it has no page to send anyone to yet")
 	tip := "Hours Hybernate would have had it paused, measured since dry-run started for a dry-run workload, or " +
 		"from history over the last 7 days for an unmanaged one. Under it, how many times activity would have " +
 		"woken it, each a wait for someone."
@@ -118,9 +118,6 @@ func TestWriteHTML_History(t *testing.T) {
 	assert.Contains(t, got, "<div>1 of 2<span>unmanaged workloads would have slept over the last 7 days</span></div>")
 	assert.NotContains(t, got, "wakes over", "wakes are per workload, in the table")
 	assert.Contains(t, got, "<div>2 of 5<span>managed by Hybernate: 1 live, 1 in dry-run</span></div>")
-	assert.Contains(t, got, "This report covers one cluster, at list prices, from one scan. Hybernate Hub shows "+
-		"every cluster together")
-	assert.Contains(t, got, "Every cluster together, with verified savings")
 	assert.Contains(t, got, `data-filter="namespaces"`, "namespaces can be filtered like workloads")
 	assert.Contains(t, got, `<td class="ref">statefulset/postgres<span class="sub">preview-42</span></td>`,
 		"the namespace under the workload, not a column of its own")

@@ -71,7 +71,6 @@ type reportPage struct {
 	Tips         tips
 	Terms        []term
 	Mark         string
-	HubURL       string
 }
 
 type headline struct {
@@ -266,7 +265,6 @@ func buildReport(result scanResult, idleAfter time.Duration) reportPage {
 		IdleAfter: roundedDuration(idleAfter),
 		Over:      replayedOver(result.History),
 		Mark:      doorman.Mark,
-		HubURL:    hubURL,
 	}
 	if result.Totals.Workloads == 0 {
 		page.Empty = emptySentence(result)

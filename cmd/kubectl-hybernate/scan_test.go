@@ -78,7 +78,7 @@ func TestWriteTable(t *testing.T) {
 	assert.Contains(t, got, "kubectl label deployment checkout-api -n preview-42 hybernate.io/managed=true",
 		"next steps name a real idle workload")
 	assert.Contains(t, got, "kubectl annotate deployment checkout-api -n preview-42 hybernate.io/dry-run=true")
-	assert.Contains(t, got, "See every cluster together, with savings checked against your cloud bill")
+	assert.NotContains(t, got, "Hybernate Hub", "it has no page to send anyone to yet")
 }
 
 func TestWriteTable_Limit(t *testing.T) {

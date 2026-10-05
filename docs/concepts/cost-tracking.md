@@ -42,7 +42,7 @@ Resource hours are converted to dollars at rates per vCPU-hour and per GiB-hour.
 
 **Where the prices come from.** Hybernate ships with the on-demand Linux list price of every AWS, Google Cloud, and Azure instance type, in every region it's sold, taken from the providers' public price lists through [instances.vantage.sh](https://instances.vantage.sh) and refreshed each release. Nothing is looked up at runtime, so it works offline and air-gapped. Instances on GPU nodes are priced the same way, so a pod on a GPU node pays its share of the GPU too.
 
-**What list prices leave out.** Spot and preemptible nodes are priced at on-demand, so their workloads cost less than shown. Savings plans, reserved instances, committed-use discounts, and negotiated rates aren't known to Hybernate; set `costTracking.rates` for those, or see [Hybernate Hub](https://okedeji.io/hybernate/hub), which checks savings against your cloud bill.
+**What list prices leave out.** Spot and preemptible nodes are priced at on-demand, so their workloads cost less than shown. Savings plans, reserved instances, committed-use discounts, and negotiated rates aren't known to Hybernate; set `costTracking.rates` for those.
 
 Hybernate reads Nodes' metadata to do this: only their names and labels are cached.
 

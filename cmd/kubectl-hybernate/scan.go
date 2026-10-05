@@ -40,8 +40,6 @@ import (
 	"github.com/okedeji/hybernate/internal/discovery"
 )
 
-const hubURL = "https://okedeji.io/hybernate/hub"
-
 // defaultCPUThreshold matches the activity clock's default, so the scan
 // calls idle what Hybernate would pause.
 const defaultCPUThreshold = 10
@@ -519,8 +517,6 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 		p.line("")
 	}
 	writeNextSteps(p, result)
-	p.line("See every cluster together, with savings checked against your cloud bill and kept as history:")
-	p.line("Hybernate Hub, free for up to 2 clusters: %s", hubURL)
 	return p.err
 }
 
