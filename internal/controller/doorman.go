@@ -797,9 +797,9 @@ func (r *Reconciler) listDoormanSlices(ctx context.Context, workload *v1alpha1.M
 
 // deleteDoormanSlices removes the slices except those in keep, so a
 // workload that's awake again routes only to its own pods.
-func (r *Reconciler) deleteDoormanSlices(ctx context.Context, slices []discoveryv1.EndpointSlice, keep map[string]bool) error {
-	for i := range slices {
-		slice := &slices[i]
+func (r *Reconciler) deleteDoormanSlices(ctx context.Context, current []discoveryv1.EndpointSlice, keep map[string]bool) error {
+	for i := range current {
+		slice := &current[i]
 		if keep[slice.Name] {
 			continue
 		}

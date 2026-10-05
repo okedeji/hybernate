@@ -95,15 +95,16 @@ var _ = ginkgo.Describe("Doorman routing through the operator's cache", func() {
 	})
 
 	canary := func() (*v1alpha1.ManagedWorkload, *appsv1.Deployment) {
+		const name = "canary"
 		w := envtestWorkload(ns)
-		w.Name = "canary"
-		w.Spec.Target.Name = "canary"
+		w.Name = name
+		w.Spec.Target.Name = name
 		w.Spec.DesiredState = nil
 		gomega.Expect(k8sClient.Create(ctx, w)).To(gomega.Succeed())
 		w.Status.Phase = v1alpha1.PhasePaused
 		target := envtestDeployment(ns, 0)
-		target.Name = "canary"
-		target.Spec.Template.Labels = map[string]string{"app": "shop", "track": "canary"}
+		target.Name = name
+		target.Spec.Template.Labels = map[string]string{"app": "shop", "track": name}
 		return w, target
 	}
 	routedSlices := func() []discoveryv1.EndpointSlice {
