@@ -37,11 +37,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -74,6 +73,17 @@ const (
 	// letting go of ports claimed by workloads that went without releasing
 	// them.
 	portsReload = 30 * time.Minute
+
+	// servedRecheck is how soon a paused workload is reconciled again while
+	// a Service that selects it is left to other Ready pods. Those pods'
+	// endpoints aren't cached, so nothing reports them going, and until the
+	// workload is reconciled, requests through the Service fail rather than
+	// wake it.
+	servedRecheck = 30 * time.Second
+
+	// endpointsReadTimeout bounds each uncached read of a Service's own
+	// EndpointSlices.
+	endpointsReadTimeout = 10 * time.Second
 )
 
 // wakeOnRequest reports whether the workload's Services should route to the
@@ -105,13 +115,13 @@ func doormanEligible(workload *v1alpha1.ManagedWorkload) bool {
 // routeDoorman brings the workload's doorman routing up to date. Routing is
 // only ever a convenience on top of the lifecycle, so a failure is reported
 // on the WakeOnRequest condition and retried, and never stops the reconcile.
-// It returns how soon to retry, or zero.
+// It returns how soon to reconcile again, to retry or to recheck, or zero.
 func (r *Reconciler) routeDoorman(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) time.Duration {
 	failing := conditionFalseWith(workload, conditionWakeOnRequest, reasonRoutingFailed)
-	err := r.reconcileDoorman(ctx, workload, target)
+	recheck, err := r.reconcileDoorman(ctx, workload, target)
 	if err == nil {
 		r.doormanFailures.reset(workload.UID)
-		return 0
+		return recheck
 	}
 	log.FromContext(ctx).Error(err, "routing requests through the doorman",
 		"workload", workload.Name, "namespace", workload.Namespace)
@@ -138,38 +148,47 @@ func (r *Reconciler) announceRouting(ctx context.Context, workload *v1alpha1.Man
 }
 
 // reconcileDoorman makes the workload's doorman EndpointSlices and routes
-// match its phase.
-func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) error {
+// match its phase. It returns how soon to look again, or zero when only a
+// change the operator watches can alter them.
+func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (time.Duration, error) {
 	if r.DoormanService == "" {
 		r.clearCondition(workload, conditionWakeOnRequest, "DoormanDisabled")
-		return r.removeDoorman(ctx, workload)
+		return 0, r.removeDoorman(ctx, workload)
 	}
 	if !doormanEligible(workload) || target == nil {
 		r.clearCondition(workload, conditionWakeOnRequest, "NotPaused")
-		return r.removeDoorman(ctx, workload)
+		return 0, r.removeDoorman(ctx, workload)
 	}
 
 	endpoints, err := r.doormanEndpoints(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(endpoints) == 0 {
 		r.setCondition(workload, conditionWakeOnRequest, metav1.ConditionFalse, "DoormanUnavailable",
 			"no doorman pods are ready, so requests to this paused workload fail until one is")
-		return r.removeDoorman(ctx, workload)
+		return 0, r.removeDoorman(ctx, workload)
 	}
 
 	plan, err := r.planDoorman(ctx, workload, target, endpoints)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	var recheck time.Duration
+	if len(plan.skipped.served) > 0 {
+		recheck = servedRecheck
+	}
+	current, err := r.listDoormanSlices(ctx, workload)
+	if err != nil {
+		return 0, err
 	}
 	routes, err := r.allocateRoutes(ctx, workload, plan.services)
 	if errors.Is(err, doorman.ErrNoFreePort) {
 		r.setCondition(workload, conditionWakeOnRequest, metav1.ConditionFalse, "NoFreePort", err.Error())
-		return nil
+		return recheck, nil
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
 	// Status names the ports before any slice sends traffic to them, so
 	// the doorman is never sent traffic for a port it can't place.
@@ -187,14 +206,14 @@ func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.Ma
 			}
 		}
 	}
-	if err := r.deleteDoormanSlices(ctx, workload, keep); err != nil {
+	if err := r.deleteDoormanSlices(ctx, current, keep); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
-		return errors.Join(errs...)
+		return 0, errors.Join(errs...)
 	}
 	r.reportDoorman(ctx, workload, routes, plan.skipped)
-	return nil
+	return recheck, nil
 }
 
 // removeDoorman stops routing the workload through the doorman: its slices
@@ -203,7 +222,11 @@ func (r *Reconciler) reconcileDoorman(ctx context.Context, workload *v1alpha1.Ma
 func (r *Reconciler) removeDoorman(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
 	r.doormanPorts.release(workload.UID, r.now())
 	workload.Status.Doorman = nil
-	return r.deleteDoormanSlices(ctx, workload, nil)
+	current, err := r.listDoormanSlices(ctx, workload)
+	if err != nil {
+		return err
+	}
+	return r.deleteDoormanSlices(ctx, current, nil)
 }
 
 // skippedServices are the Services that select the workload but aren't
@@ -373,9 +396,14 @@ func (r *Reconciler) planDoorman(ctx context.Context, workload *v1alpha1.Managed
 
 // servedByOthers reports whether a Service's own EndpointSlices have a
 // Ready pod, which can only be another workload's while this one is paused.
+// They're read from the API server: the operator caches only the doorman's
+// slices, since caching every Service's would cost memory in proportion to
+// every pod in the cluster.
 func (r *Reconciler) servedByOthers(ctx context.Context, svc corev1.Service) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, endpointsReadTimeout)
+	defer cancel()
 	var list discoveryv1.EndpointSliceList
-	if err := r.List(ctx, &list, client.InNamespace(svc.Namespace),
+	if err := r.apiReader().List(ctx, &list, client.InNamespace(svc.Namespace),
 		client.MatchingLabels{discoveryv1.LabelServiceName: svc.Name}); err != nil {
 		return false, fmt.Errorf("listing endpoints of service %s: %w", svc.Name, err)
 	}
@@ -460,7 +488,8 @@ func podTemplateLabels(target client.Object) map[string]string {
 	}
 }
 
-// allocateRoutes gives each Service port a doorman port.
+// allocateRoutes gives each Service port a doorman port, keeping the one
+// it has in status.
 func (r *Reconciler) allocateRoutes(ctx context.Context, workload *v1alpha1.ManagedWorkload, services []doormanService) ([]v1alpha1.DoormanRoute, error) {
 	keys := make([]routeKey, 0, len(services))
 	for _, s := range services {
@@ -468,11 +497,21 @@ func (r *Reconciler) allocateRoutes(ctx context.Context, workload *v1alpha1.Mana
 			keys = append(keys, routeKey{service: s.svc.Name, portName: port.Name})
 		}
 	}
-	reader := r.PodReader
-	if reader == nil {
-		reader = r.Client
+	existing := map[routeKey]int32{}
+	for _, route := range workload.Status.Doorman {
+		existing[routeKey{service: route.Service, portName: route.PortName}] = route.DoormanPort
 	}
-	return r.doormanPorts.assign(ctx, routeReader{reader: reader, namespaces: r.WatchNamespaces}, r.now(), workload, keys)
+	reader := routeReader{reader: r.apiReader(), namespaces: r.WatchNamespaces}
+	return r.doormanPorts.assign(ctx, reader, r.now(), workload.UID, existing, keys)
+}
+
+// apiReader reads from the API server what the cache leaves out, or may
+// not have caught up with.
+func (r *Reconciler) apiReader() client.Reader {
+	if r.PodReader != nil {
+		return r.PodReader
+	}
+	return r.Client
 }
 
 // routeReader lists the ManagedWorkloads the operator can see: in each
@@ -529,11 +568,11 @@ type portAllocator struct {
 	pick func(used func(int32) bool) (int32, error)
 }
 
-// assign gives each key a port, keeping the ports the workload already has
-// where they're still its own, and claims them for it. Ports it no longer
-// needs start draining.
+// assign gives each key a port, keeping the existing ports where they're
+// still the owner's, and claims them for it. Ports it no longer needs start
+// draining.
 func (a *portAllocator) assign(ctx context.Context, reader routeReader, now time.Time,
-	workload *v1alpha1.ManagedWorkload, keys []routeKey) ([]v1alpha1.DoormanRoute, error) {
+	owner types.UID, existing map[routeKey]int32, keys []routeKey) ([]v1alpha1.DoormanRoute, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.load(ctx, reader, now); err != nil {
@@ -545,12 +584,8 @@ func (a *portAllocator) assign(ctx context.Context, reader routeReader, now time
 		}
 	}
 
-	existing := map[routeKey]int32{}
-	for _, route := range workload.Status.Doorman {
-		existing[routeKey{service: route.Service, portName: route.PortName}] = route.DoormanPort
-	}
 	chosen := map[int32]bool{}
-	used := func(port int32) bool { return chosen[port] || !a.free(port, workload.UID) }
+	used := func(port int32) bool { return chosen[port] || !a.free(port, owner) }
 	pick := a.pick
 	if pick == nil {
 		pick = doorman.AllocatePort
@@ -568,9 +603,9 @@ func (a *portAllocator) assign(ctx context.Context, reader routeReader, now time
 		routes = append(routes, v1alpha1.DoormanRoute{Service: key.service, PortName: key.portName, DoormanPort: port})
 	}
 
-	a.releaseLocked(workload.UID, now, chosen)
+	a.releaseLocked(owner, now, chosen)
 	for port := range chosen {
-		a.claims[port] = portClaim{owner: workload.UID, at: now}
+		a.claims[port] = portClaim{owner: owner, at: now}
 		delete(a.draining, port)
 	}
 	return routes, nil
@@ -712,18 +747,23 @@ func (r *Reconciler) applyDoormanSlice(ctx context.Context, workload *v1alpha1.M
 	return nil
 }
 
-// deleteDoormanSlices removes the workload's doorman slices except those in
-// keep, so a workload that's awake again routes only to its own pods.
-func (r *Reconciler) deleteDoormanSlices(ctx context.Context, workload *v1alpha1.ManagedWorkload, keep map[string]bool) error {
+// listDoormanSlices lists the doorman slices the workload has written.
+func (r *Reconciler) listDoormanSlices(ctx context.Context, workload *v1alpha1.ManagedWorkload) ([]discoveryv1.EndpointSlice, error) {
 	var list discoveryv1.EndpointSliceList
 	if err := r.List(ctx, &list, client.InNamespace(workload.Namespace), client.MatchingLabels{
 		discoveryv1.LabelManagedBy:   doorman.ManagedBy,
 		doorman.LabelManagedWorkload: doorman.WorkloadLabel(workload.Name),
 	}); err != nil {
-		return fmt.Errorf("listing doorman slices: %w", err)
+		return nil, fmt.Errorf("listing doorman slices: %w", err)
 	}
-	for i := range list.Items {
-		slice := &list.Items[i]
+	return list.Items, nil
+}
+
+// deleteDoormanSlices removes the slices except those in keep, so a
+// workload that's awake again routes only to its own pods.
+func (r *Reconciler) deleteDoormanSlices(ctx context.Context, slices []discoveryv1.EndpointSlice, keep map[string]bool) error {
+	for i := range slices {
+		slice := &slices[i]
 		if keep[slice.Name] {
 			continue
 		}
@@ -734,47 +774,40 @@ func (r *Reconciler) deleteDoormanSlices(ctx context.Context, workload *v1alpha1
 	return nil
 }
 
+// EndpointSliceCache is the operator's cache of EndpointSlices: the doorman
+// slices it writes into workloads' namespaces, the watched ones or all, and
+// every slice in doormanNamespace, where the doorman Service's own are.
+// Empty doormanNamespace means the doorman is disabled. Every other slice,
+// which on a large cluster is most of them, is left out: a Service's own
+// slices are read from the API server when a paused workload is routed.
+func EndpointSliceCache(watched []string, doormanNamespace string) cache.ByObject {
+	doormanSlices := cache.Config{
+		LabelSelector: labels.SelectorFromSet(labels.Set{discoveryv1.LabelManagedBy: doorman.ManagedBy}),
+	}
+	namespaces := map[string]cache.Config{}
+	if len(watched) == 0 {
+		namespaces[cache.AllNamespaces] = doormanSlices
+	}
+	for _, ns := range watched {
+		namespaces[ns] = doormanSlices
+	}
+	if doormanNamespace != "" {
+		namespaces[doormanNamespace] = cache.Config{LabelSelector: labels.Everything()}
+	}
+	return cache.ByObject{Namespaces: namespaces}
+}
+
+// isDoormanEndpoints reports whether obj is one of the doorman Service's own
+// EndpointSlices. Of the slices the operator caches, only those say anything
+// about where a paused workload's Services should send traffic.
 func (r *Reconciler) isDoormanEndpoints(obj client.Object) bool {
 	return obj.GetNamespace() == r.DoormanNamespace && obj.GetLabels()[discoveryv1.LabelServiceName] == r.DoormanService
 }
 
-// endpointsChanged passes the EndpointSlice events that can change where a
-// paused workload's Services should send traffic: any change to the
-// doorman's own endpoints, and a Service's endpoints gaining or losing their
-// last Ready pod.
-func (r *Reconciler) endpointsChanged() predicate.Predicate {
-	return predicate.Funcs{
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			if r.isDoormanEndpoints(e.ObjectNew) {
-				return true
-			}
-			before, ok := e.ObjectOld.(*discoveryv1.EndpointSlice)
-			after, ok2 := e.ObjectNew.(*discoveryv1.EndpointSlice)
-			if !ok || !ok2 {
-				return true
-			}
-			return doorman.ServesTraffic([]discoveryv1.EndpointSlice{*before}) !=
-				doorman.ServesTraffic([]discoveryv1.EndpointSlice{*after})
-		},
-	}
-}
-
-// findWorkloadsForEndpoints re-queues the workloads an EndpointSlice change
-// concerns: every paused or resuming workload when the doorman's own
-// endpoints change, so their slices follow the doorman pods as they come and
-// go, and the paused workloads in a namespace whose Service gained or lost
-// its other Ready pods.
-func (r *Reconciler) findWorkloadsForEndpoints(ctx context.Context, obj client.Object) []reconcile.Request {
-	if r.isDoormanEndpoints(obj) {
-		return r.findWorkloadsForDoorman(ctx)
-	}
-	if obj.GetLabels()[discoveryv1.LabelManagedBy] == doorman.ManagedBy {
-		return nil
-	}
-	return r.findPausedWorkloadsInNamespace(ctx, obj)
-}
-
-func (r *Reconciler) findWorkloadsForDoorman(ctx context.Context) []reconcile.Request {
+// findWorkloadsForDoorman re-queues every paused or resuming workload when
+// the doorman's own endpoints change, so their slices follow the doorman
+// pods as they come and go.
+func (r *Reconciler) findWorkloadsForDoorman(ctx context.Context, _ client.Object) []reconcile.Request {
 	var list v1alpha1.ManagedWorkloadList
 	if err := r.List(ctx, &list); err != nil {
 		log.FromContext(ctx).Error(err, "listing managed workloads for doorman change")
@@ -790,8 +823,7 @@ func (r *Reconciler) findWorkloadsForDoorman(ctx context.Context) []reconcile.Re
 }
 
 // findPausedWorkloadsInNamespace re-queues paused workloads when a Service
-// in their namespace, or its endpoints, change, since it may now select
-// their pods, or have other pods to send traffic to.
+// in their namespace changes, since it may now select their pods.
 func (r *Reconciler) findPausedWorkloadsInNamespace(ctx context.Context, obj client.Object) []reconcile.Request {
 	var list v1alpha1.ManagedWorkloadList
 	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {

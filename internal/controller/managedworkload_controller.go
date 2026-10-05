@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -86,7 +87,9 @@ type Reconciler struct {
 	DoormanService   string
 	DoormanNamespace string
 
-	// PodReader reads pods without caching them. Defaults to Client.
+	// PodReader reads from the API server what the cache leaves out: pods,
+	// Services' own EndpointSlices, and every workload's doorman routes.
+	// Defaults to Client.
 	PodReader client.Reader
 
 	// ProtectedNamespaces are name patterns, such as prod-*, of namespaces
@@ -906,8 +909,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findRelatedWorkloads)).
 		Watches(&appsv1.Deployment{}, targetHandler).
 		Watches(&appsv1.StatefulSet{}, targetHandler).
-		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForEndpoints),
-			builder.WithPredicates(r.endpointsChanged())).
+		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForDoorman),
+			builder.WithPredicates(predicate.NewPredicateFuncs(r.isDoormanEndpoints))).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.findPausedWorkloadsInNamespace)).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsInNamespace)).
 		Named("managedworkload").

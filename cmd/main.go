@@ -39,7 +39,6 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -311,27 +310,12 @@ func cacheOptions(watched []string) cache.Options {
 }
 
 // operatorCacheOptions adds to cacheOptions the operator's view of
-// EndpointSlices: only the doorman slices it writes into workloads'
-// namespaces, and the doorman Service's own slices in doormanNamespace,
-// which may be outside the watched namespaces. Empty doormanNamespace means
-// the doorman is disabled. Every other slice in the cluster is left out.
+// EndpointSlices (see controller.EndpointSliceCache). Empty
+// doormanNamespace means the doorman is disabled.
 func operatorCacheOptions(watched []string, doormanNamespace string) cache.Options {
 	opts := cacheOptions(watched)
-	doormanSlices := cache.Config{
-		LabelSelector: labels.SelectorFromSet(labels.Set{discoveryv1.LabelManagedBy: doorman.ManagedBy}),
-	}
-	slices := map[string]cache.Config{}
-	if len(watched) == 0 {
-		slices[cache.AllNamespaces] = doormanSlices
-	}
-	for _, ns := range watched {
-		slices[ns] = doormanSlices
-	}
-	if doormanNamespace != "" {
-		slices[doormanNamespace] = cache.Config{LabelSelector: labels.Everything()}
-	}
 	opts.ByObject = map[client.Object]cache.ByObject{
-		&discoveryv1.EndpointSlice{}: {Namespaces: slices},
+		&discoveryv1.EndpointSlice{}: controller.EndpointSliceCache(watched, doormanNamespace),
 	}
 	return opts
 }

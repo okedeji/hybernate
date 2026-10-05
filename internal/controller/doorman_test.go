@@ -37,7 +37,6 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/doorman"
@@ -126,6 +125,13 @@ func doormanSlices(t *testing.T, r *Reconciler) []discoveryv1.EndpointSlice {
 	return list.Items
 }
 
+// doormanErr routes the workload, for tests that don't look at when it's
+// rechecked.
+func doormanErr(ctx context.Context, r *Reconciler, workload *v1alpha1.ManagedWorkload, target client.Object) error {
+	_, err := r.reconcileDoorman(ctx, workload, target)
+	return err
+}
+
 func wakeCondition(t *testing.T, workload *v1alpha1.ManagedWorkload) *metav1.Condition {
 	t.Helper()
 	cond := meta.FindStatusCondition(workload.Status.Conditions, conditionWakeOnRequest)
@@ -161,7 +167,7 @@ func TestReconcileDoorman_RoutesPausedWorkload(t *testing.T) {
 		headless, external,
 	)
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	slices := doormanSlices(t, r)
 	require.Len(t, slices, 1, "only the selector-based, cluster-IP Service that selects the workload is routed")
@@ -194,16 +200,16 @@ func TestReconcileDoorman_KeptWhileResumingRemovedWhenRunning(t *testing.T) {
 	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 	port := workload.Status.Doorman[0].DoormanPort
 
 	workload.Status.Phase = v1alpha1.PhaseResuming
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 	assert.Len(t, doormanSlices(t, r), 1, "connections arriving mid-wake are still held")
 	assert.Equal(t, port, workload.Status.Doorman[0].DoormanPort, "the port stays the same across the wake")
 
 	workload.Status.Phase = v1alpha1.PhaseRunning
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 	assert.Empty(t, doormanSlices(t, r), "once Running, traffic goes straight to the pods")
 	assert.Empty(t, workload.Status.Doorman)
 }
@@ -257,7 +263,7 @@ func TestReconcileDoorman_NotRouted(t *testing.T) {
 			}
 			r := doormanReconciler(t, objs...)
 
-			require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+			require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 			assert.Empty(t, doormanSlices(t, r))
 			assert.Empty(t, workload.Status.Doorman)
@@ -280,7 +286,7 @@ func TestReconcileDoorman_PortsAreUniqueAcrossWorkloads(t *testing.T) {
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
 	r.doormanPorts.pick = lowestFreePort
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	require.Len(t, workload.Status.Doorman, 1)
 	assert.Equal(t, int32(20001), workload.Status.Doorman[0].DoormanPort)
@@ -301,7 +307,7 @@ func TestReconcileDoorman_MovesOffAPortTakenByAnotherWorkload(t *testing.T) {
 	require.NoError(t, r.doormanPorts.load(context.Background(), routeReader{reader: r.Client}, r.now()))
 	r.doormanPorts.claims[taken] = portClaim{owner: other.UID, at: r.now()}
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	require.Len(t, workload.Status.Doorman, 1)
 	assert.NotEqual(t, taken, workload.Status.Doorman[0].DoormanPort)
@@ -330,7 +336,7 @@ func TestReconcileDoorman_ConcurrentPausesGetDistinctPorts(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Go(func() {
-			assert.NoError(t, r.reconcileDoorman(context.Background(), workloads[i], targets[i]))
+			assert.NoError(t, doormanErr(context.Background(), r, workloads[i], targets[i]))
 		})
 	}
 	wg.Wait()
@@ -362,19 +368,19 @@ func TestReconcileDoorman_DrainingPortsAreNotReused(t *testing.T) {
 	now := fixedTime
 	r.clock = func() time.Time { return now }
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), first, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, first, appTarget()))
 	released := first.Status.Doorman[0].DoormanPort
 	first.Status.Phase = v1alpha1.PhaseRunning
-	require.NoError(t, r.reconcileDoorman(context.Background(), first, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, first, appTarget()))
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), second, billing))
+	require.NoError(t, doormanErr(context.Background(), r, second, billing))
 	assert.NotEqual(t, released, second.Status.Doorman[0].DoormanPort)
 
 	now = now.Add(portDrain)
 	second.Status.Phase = v1alpha1.PhaseRunning
-	require.NoError(t, r.reconcileDoorman(context.Background(), second, billing))
+	require.NoError(t, doormanErr(context.Background(), r, second, billing))
 	second.Status.Phase = v1alpha1.PhasePaused
-	require.NoError(t, r.reconcileDoorman(context.Background(), second, billing))
+	require.NoError(t, doormanErr(context.Background(), r, second, billing))
 	assert.Equal(t, released, second.Status.Doorman[0].DoormanPort, "free again once drained")
 }
 
@@ -384,11 +390,11 @@ func TestReconcileDoorman_DisablingRemovesSlices(t *testing.T) {
 	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 	require.Len(t, doormanSlices(t, r), 1)
 
 	r.DoormanService = ""
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	assert.Empty(t, doormanSlices(t, r))
 	assert.Empty(t, workload.Status.Doorman)
@@ -408,7 +414,7 @@ func TestReconcileDoorman_LeavesASliceItDoesNotOwn(t *testing.T) {
 	r := doormanReconciler(t, workload, theirs, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
 
-	require.Error(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.Error(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	var got discoveryv1.EndpointSlice
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(theirs), &got))
@@ -421,7 +427,7 @@ func TestReconcileDoorman_CopiesTheServiceProxyName(t *testing.T) {
 	svc.Labels = map[string]string{labelServiceProxyName: "custom-proxy"}
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"), svc)
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	slices := doormanSlices(t, r)
 	require.Len(t, slices, 1)
@@ -440,7 +446,7 @@ func TestReconcileDoorman_IgnoresAnnotatedPorts(t *testing.T) {
 	svc.Annotations = map[string]string{doorman.AnnotationIgnorePorts: "metrics, 8081"}
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"), svc)
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	require.Len(t, workload.Status.Doorman, 1)
 	assert.Equal(t, "http", workload.Status.Doorman[0].PortName)
@@ -480,7 +486,7 @@ func TestReconcileDoorman_IPFamilies(t *testing.T) {
 			workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
 			r := doormanReconciler(t, append([]client.Object{workload, tt.svc}, tt.doorman...)...)
 
-			require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+			require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 			routed := doormanSlices(t, r)
 			families := make([]discoveryv1.AddressType, 0, len(routed))
@@ -519,17 +525,17 @@ func TestReconcileDoorman_SharedService(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	require.NoError(t, r.reconcileDoorman(ctx, stable, target("stable")))
-	require.NoError(t, r.reconcileDoorman(ctx, canary, target("canary")))
+	require.NoError(t, doormanErr(ctx, r, stable, target("stable")))
+	require.NoError(t, doormanErr(ctx, r, canary, target("canary")))
 	slices := doormanSlices(t, r)
 	require.Len(t, slices, 2, "both paused: each routes the Service, so a request wakes one of them")
 	assert.NotEqual(t, slices[0].Name, slices[1].Name)
 	assert.NotEqual(t, stable.Status.Doorman[0].DoormanPort, canary.Status.Doorman[0].DoormanPort)
 
 	stable.Status.Phase = v1alpha1.PhaseRunning
-	require.NoError(t, r.reconcileDoorman(ctx, stable, target("stable")))
+	require.NoError(t, doormanErr(ctx, r, stable, target("stable")))
 	require.NoError(t, r.Create(ctx, servingSlice()))
-	require.NoError(t, r.reconcileDoorman(ctx, canary, target("canary")))
+	require.NoError(t, doormanErr(ctx, r, canary, target("canary")))
 
 	assert.Empty(t, doormanSlices(t, r), "stable is running, so the Service's traffic goes to it")
 	assert.Empty(t, canary.Status.Doorman)
@@ -593,7 +599,7 @@ func TestReconcileDoorman_SkipsGKENEGServices(t *testing.T) {
 			workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
 			r := doormanReconciler(t, append([]client.Object{workload, doormanEndpoints("10.0.0.7")}, tt.services...)...)
 
-			require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+			require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 			slices := doormanSlices(t, r)
 			routed := make([]string, 0, len(slices))
@@ -616,8 +622,8 @@ func TestReconcileDoorman_WarnsOnceAboutASkippedService(t *testing.T) {
 	svc.Annotations = map[string]string{annotationGKENEG: `{"ingress":true}`}
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"), svc)
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	recorder, ok := r.Recorder.(*events.FakeRecorder)
 	require.True(t, ok)
@@ -826,21 +832,32 @@ func TestRouteDoorman_ReportsFailuresAndBacksOff(t *testing.T) {
 	assert.Equal(t, 1, warnings, "one warning while it keeps failing")
 }
 
-// Only an EndpointSlice change that can move a paused workload's traffic
-// reconciles it: the doorman's own endpoints, or a Service gaining or losing
-// its last Ready pod, not every pod churn in the namespace.
-func TestEndpointsChanged(t *testing.T) {
+// The operator's cache holds the doorman's own endpoints and the slices it
+// writes; only a change to the doorman's endpoints can move a paused
+// workload's traffic.
+func TestIsDoormanEndpoints(t *testing.T) {
 	r := doormanReconciler(t)
-	p := r.endpointsChanged()
-	notReady := servingSlice()
-	notReady.Endpoints[0].Conditions.Ready = ptr.To(false)
-	moved := servingSlice()
-	moved.Endpoints[0].Addresses = []string{"10.244.1.10"}
-	doormanMoved := doormanEndpoints("10.0.0.8")
 
-	assert.True(t, p.Update(event.UpdateEvent{ObjectOld: servingSlice(), ObjectNew: notReady}), "lost its last Ready pod")
-	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: servingSlice(), ObjectNew: moved}), "still served")
-	assert.True(t, p.Update(event.UpdateEvent{ObjectOld: doormanEndpoints("10.0.0.7"), ObjectNew: doormanMoved}))
+	assert.True(t, r.isDoormanEndpoints(doormanEndpoints("10.0.0.7")))
+	assert.False(t, r.isDoormanEndpoints(servingSlice()))
+}
+
+// Nothing reports another workload's pods going, since their endpoints
+// aren't cached, so a workload left to them is looked at again soon: once
+// they're gone, requests through the Service must wake it.
+func TestRouteDoorman_RechecksAServiceLeftToOtherPods(t *testing.T) {
+	workload := lifecycleWorkload("canary", nil, v1alpha1.PhasePaused)
+	target := appTarget()
+	target.Spec.Template.Labels = map[string]string{"app": "shop", "track": "canary"}
+	shop := service("shop", map[string]string{"app": "shop"}, corev1.ServicePort{Name: "http", Port: 80})
+	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"), shop, servingSlice())
+
+	assert.Equal(t, servedRecheck, r.routeDoorman(context.Background(), workload, target))
+	assert.Empty(t, doormanSlices(t, r))
+
+	require.NoError(t, r.Delete(context.Background(), servingSlice()))
+	assert.Zero(t, r.routeDoorman(context.Background(), workload, target), "routed: nothing to wait for")
+	assert.Len(t, doormanSlices(t, r), 1)
 }
 
 // With watchNamespaces, the operator has a Role in each watched namespace
@@ -860,7 +877,7 @@ func TestReconcileDoorman_AllocatesWithOnlyNamespacedAccess(t *testing.T) {
 			return c.List(ctx, list, opts...)
 		}})
 
-	require.NoError(t, r.reconcileDoorman(context.Background(), workload, appTarget()))
+	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	assert.Len(t, workload.Status.Doorman, 1)
 }

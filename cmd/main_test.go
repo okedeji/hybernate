@@ -199,6 +199,9 @@ func sliceNames(t *testing.T, ctx context.Context, c client.Reader, opts ...clie
 	return names
 }
 
+// Every other Service's slices are left out of the cache, so the operator
+// reads them from the API server; the controller package's envtest routes a
+// paused workload through this same configuration.
 func TestOperatorCacheSeesOnlyDoormanSlices(t *testing.T) {
 	cfg := startEnvtest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
