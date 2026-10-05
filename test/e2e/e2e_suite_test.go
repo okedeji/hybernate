@@ -80,8 +80,15 @@ func TestE2E(t *testing.T) {
 // an API it serves, out from under another.
 var _ = SynchronizedBeforeSuite(func() {
 	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	_, err := utils.Run(cmd)
+	// The build downloads the base image and Go modules, and a CI runner's
+	// network drops a stream now and then; a retry gets past that, while a
+	// real build failure fails every attempt.
+	var err error
+	for range 3 {
+		if _, err = utils.Run(exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))); err == nil {
+			break
+		}
+	}
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
 	By("building the kubectl plugin")
@@ -104,7 +111,7 @@ var _ = SynchronizedBeforeSuite(func() {
 
 	By("installing KEDA")
 	// KEDA's CRDs are too large for a client-side apply's annotation.
-	cmd = exec.Command("kubectl", "apply", "--server-side", "-f", "-")
+	cmd := exec.Command("kubectl", "apply", "--server-side", "-f", "-")
 	cmd.Stdin = strings.NewReader(preloaded(kedaManifest))
 	_, err = utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred())
