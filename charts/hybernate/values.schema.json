@@ -73,7 +73,8 @@
       "properties": {
         "idleAfter": {
           "type": "string",
-          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "not": {"pattern": "^([0.]+(ns|us|µs|ms|s|m|h))+$"}
         },
         "cpuThreshold": {"type": "integer", "minimum": 1, "maximum": 100},
         "dryRun": {"type": "boolean"}

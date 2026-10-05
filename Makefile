@@ -139,6 +139,13 @@ check-chart: ## Lint the Helm chart, render it for each provider's Kubernetes ve
 		echo "rendering for Kubernetes $$v"; \
 		helm template hybernate charts/hybernate --kube-version $$v >/dev/null || exit 1; \
 	done
+	@for d in 0s 0.0m 0h0m0s; do \
+		! helm template hybernate charts/hybernate --set defaults.idleAfter=$$d >/dev/null 2>&1 || { \
+			echo "the chart accepts defaults.idleAfter=$$d, which the operator refuses to start with"; exit 1; }; \
+	done
+	@for d in 1h30m 0.5s 0h5m; do \
+		helm template hybernate charts/hybernate --set defaults.idleAfter=$$d >/dev/null || exit 1; \
+	done
 	helm template hybernate charts/hybernate | go run ./hack/rbaccheck config/rbac/role.yaml
 	helm template hybernate charts/hybernate --set 'watchNamespaces={shop,blog}' | go run ./hack/rbaccheck config/rbac/role.yaml
 
