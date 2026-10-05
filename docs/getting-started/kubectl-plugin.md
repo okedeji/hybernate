@@ -1,6 +1,6 @@
 # kubectl Plugin
 
-The `kubectl hybernate` plugin scans a cluster for idle workloads, ends dry-run for workloads you've opted in, and wakes paused ones. Its commands use the namespace of your current kubeconfig context unless you pass `-n`, as kubectl does.
+The `kubectl hybernate` plugin scans a cluster for idle workloads, shows what Hybernate is doing in it, ends dry-run for workloads you've opted in, and wakes paused ones. Its commands use the namespace of your current kubeconfig context unless you pass `-n`, as kubectl does.
 
 ## Installation
 
@@ -182,6 +182,54 @@ Or pass --prometheus-url if Prometheus is reachable from your machine.
 ```
 
 `--prometheus-url` needs no cluster permission at all.
+
+## See What Hybernate Is Doing
+
+```bash
+kubectl hybernate status
+```
+
+```
+staging (EKS us-east-1): Hybernate manages 4 workloads.
+  1 paused, 2 running, 1 resuming; 1 in dry-run, measured but never paused
+  Saved $42.45 this month.
+
+Needs attention:
+  preview-7/worker   GitOpsConflict   Argo CD set the replicas from Git, undoing the pause; ...
+  preview-7/worker   Stuck            resuming for 25m: waiting for preview-42/postgres
+
+  NAMESPACE    WORKLOAD               STATE               FOR   LAST ACTIVITY      NEXT                             SAVED THIS MONTH
+  preview-42   deployment/api         paused              3h    request, 4h ago    wakes on a request or activity   $12.40
+  preview-42   statefulset/postgres   running             5h    cpu, 2h ago        held awake by its dependents     $30.05
+  preview-7    deployment/web         running (dry-run)   2h    rollout, 15m ago   would pause in 45m               -
+  preview-7    deployment/worker      resuming            25m   -                  -                                -
+
+Recent pauses and wakes:
+  30m ago   preview-7/worker   scaled up to 2 replicas by argocd-controller outside Hybernate; counted as activity
+  3h ago    preview-42/api     paused
+  5h ago    preview-42/api     request on Service api, waking
+```
+
+`status` is one screen of every workload Hybernate manages, read from their ManagedWorkloads and events:
+
+- **The summary:** how many workloads are in each phase, how many are in dry-run, and what Hybernate has saved this month pausing live ones.
+- **Needs attention:** what keeps Hybernate from doing its job, from each workload's conditions: a GitOps tool undoing pauses (`GitOpsConflict`), a dependency that's missing or in a cycle, two ManagedWorkloads for one target, a protected namespace, a target that's gone, metrics or Prometheus that can't be read, a paused workload whose requests can't wake it (`WakeOnRequest`), and a pause or wake taking over 10 minutes (`Stuck`), with what it waits for. `kubectl describe managedworkload` has the rest.
+- **The table:** each workload's state and for how long, its last activity and where it came from, and **NEXT**: when it pauses, what holds it awake (its dependents, `hybernate.io/active-until`, or `desiredState`), or, for a paused one, what wakes it.
+- **Recent pauses and wakes,** newest first, as far back as the cluster keeps events, or `--since`: each pause, and each wake with its cause, a request on a Service, an activity annotation (including `kubectl hybernate wake` and a dependent waking), the forecast, or a scale-up from outside Hybernate. Requests the doorman closed without reaching the workload are listed too. The table shows the latest 10; `-o json` has every one. The API server keeps events for an hour unless its `--event-ttl` says otherwise, so on most clusters that's what `status` can show.
+
+```bash
+kubectl hybernate status --context staging -n preview-42
+kubectl hybernate status --since 1h -o json
+```
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--context` | | current context | Kubeconfig context of the cluster |
+| `--namespace` | `-n` | all you can read | Namespace to show; repeat for several |
+| `--output` | `-o` | `table` | `table`, `json`, or `yaml` |
+| `--since` | | `24h` | How far back to list pauses and wakes |
+
+Your user needs `list` on `managedworkloads` and `events`, in every namespace or the ones passed with `-n`. Without access to events, it shows the rest and says so. For a dashboard, see [Hybernate Hub](https://okedeji.io/hybernate/hub).
 
 ## Wake a Workload
 

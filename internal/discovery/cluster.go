@@ -427,7 +427,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetri
 			w.HourlyCost = hourlyCost(w, w.rates)
 			w.MonthlyCost = w.HourlyCost * hoursPerMonth
 			w.Measured = measured(mw, w.HourlyCost, now)
-			w.SavedThisMonth = savedThisMonth(mw)
+			w.SavedThisMonth = SavedThisMonth(mw)
 			if history != nil && ownCPU > 0 {
 				w.History = replayWorkload(w, spec, history, historySince, rollouts[obj.GetUID()],
 					thresholdFor(mw, opts), idleAfterFor(mw, opts), opts)
@@ -479,9 +479,9 @@ func measured(mw *v1alpha1.ManagedWorkload, hourlyCost float64, now time.Time) *
 	return m
 }
 
-// savedThisMonth reads what Hybernate records it has saved this month
+// SavedThisMonth reads what Hybernate records it has saved this month
 // pausing a live workload.
-func savedThisMonth(mw *v1alpha1.ManagedWorkload) float64 {
+func SavedThisMonth(mw *v1alpha1.ManagedWorkload) float64 {
 	if mw == nil || mw.Spec.DryRun || mw.Status.Cost == nil {
 		return 0
 	}
