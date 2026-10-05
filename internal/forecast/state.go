@@ -60,13 +60,15 @@ type engineState struct {
 	Daily    [DailySeason]float32  `json:"d"`
 	Weekly   [WeeklySeason]float32 `json:"w"`
 	Scale    float64               `json:"s"`
-	Coverage [3]uint64             `json:"c"`
+	Coverage weekSlots             `json:"c"`
 	AbsErr   []float32             `json:"ae"`
 	Actual   []float32             `json:"ay"`
 	AnMean   float64               `json:"am"`
 	AnVar    float64               `json:"av"`
 	AnCount  int                   `json:"ac"`
 	AnRecent uint32                `json:"ar"`
+	AnAbove  weekSlots             `json:"aa"`
+	AnBelow  weekSlots             `json:"ab"`
 }
 
 // Export encodes what the engine has learned as compact text: gzipped JSON
@@ -85,6 +87,8 @@ func (e *Engine) Export() (string, error) {
 		AnVar:    e.Anomaly.vari,
 		AnCount:  e.Anomaly.count,
 		AnRecent: e.Anomaly.recent,
+		AnAbove:  e.Anomaly.above,
+		AnBelow:  e.Anomaly.below,
 	}
 	for i, v := range e.Model.daily {
 		st.Daily[i] = float32(v)
@@ -162,6 +166,8 @@ func decodeEngine(data []byte, settings Settings) (*Engine, error) {
 	e.Anomaly.vari = st.AnVar
 	e.Anomaly.count = st.AnCount
 	e.Anomaly.recent = st.AnRecent
+	e.Anomaly.above = st.AnAbove
+	e.Anomaly.below = st.AnBelow
 	return e, nil
 }
 
@@ -177,8 +183,8 @@ func (st *engineState) validate() error {
 		return errors.New("data points and last observed hour disagree")
 	case st.LastHour < 0 || st.LastHour > maxLastHour:
 		return fmt.Errorf("last observed hour %d out of range", st.LastHour)
-	case st.Coverage[2]>>(WeeklySeason-128) != 0:
-		return errors.New("coverage beyond the hours of a week")
+	case !st.Coverage.valid() || !st.AnAbove.valid() || !st.AnBelow.valid():
+		return errors.New("hours beyond the hours of a week")
 	case len(st.AbsErr) != len(st.Actual) || len(st.AbsErr) > weeklyWindow:
 		return fmt.Errorf("error window of %d and %d hours", len(st.AbsErr), len(st.Actual))
 	case st.AnCount < 0 || st.AnCount > anomalyMemory:

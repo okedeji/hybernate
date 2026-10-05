@@ -247,6 +247,30 @@ func TestEngine_RegimeChangeDemotesOnce(t *testing.T) {
 		"FullyActive again only after a full week of evidence")
 }
 
+// A large spike that recurs every week is a pattern, not an outlier. It is
+// learned within weeks rather than a few percent at a time, and stops
+// knocking the engine's confidence once it is.
+func TestEngine_RecurringWeeklySpikeIsLearned(t *testing.T) {
+	tuesdayBatch := func(_ int, at time.Time) float64 {
+		if at.Weekday() == time.Tuesday && at.Hour() >= 2 && at.Hour() < 4 {
+			return 5000
+		}
+		return officeHours(at)
+	}
+	e := newTestEngine()
+	log := run(t, e, 0, 10*WeeklySeason, tuesdayBatch)
+
+	require.GreaterOrEqual(t, log.firstFully, 0, "never became FullyActive")
+	assert.Less(t, log.firstFully, 6*WeeklySeason, "became FullyActive at hour %d", log.firstFully)
+	for hour, phase := range log.changes {
+		assert.Less(t, hour, 6*WeeklySeason, "phase changed to %s at hour %d after the spike was learned", phase, hour)
+	}
+	assert.Empty(t, log.regimeChanges, "a weekly batch job is not a regime change")
+	monday := hourAt(10 * WeeklySeason)
+	assert.InDelta(t, 5000, e.Predict(24+2, monday), 250, "Tuesday 2am")
+	assert.Less(t, e.Predict(24+5, monday), 50.0, "Tuesday 5am")
+}
+
 func TestEngine_PatternShiftIsRelearned(t *testing.T) {
 	e := newTestEngine()
 	run(t, e, 0, 6*WeeklySeason, office)

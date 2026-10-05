@@ -44,6 +44,11 @@ const (
 // to 3 standard deviations before it updates them, so one spike doesn't
 // widen what counts as normal for a week.
 //
+// An error beyond 3 standard deviations in the same direction as the last
+// one in the same hour of the week is not an outlier but a weekly pattern
+// the model hasn't learned yet, such as a Tuesday night batch job. It isn't
+// flagged, and the model learns it in full.
+//
 // For the first day after it starts or resets nothing is flagged or
 // clipped, so the errors of a new regime are learned in full.
 type AnomalyDetector struct {
@@ -51,27 +56,35 @@ type AnomalyDetector struct {
 	vari   float64
 	count  int
 	recent uint32
+
+	// above and below are the hours of the week whose last error was beyond
+	// 3 standard deviations above or below the mean.
+	above, below weekSlots
 }
 
-// Record scores one forecast error. It reports whether the error is
-// anomalous, and returns the error clipped to 3 standard deviations: what
-// the model should learn from, so one outlier doesn't distort it for weeks.
-// floor is the smallest standard deviation errors are judged against, so a
-// workload whose forecast has been exact (zero demand, forecast zero) isn't
-// alarmed by a single millicore.
-func (a *AnomalyDetector) Record(forecast, actual, floor float64) (anomaly bool, clipped float64) {
+// Record scores the forecast error of one observation in the hour of the
+// week slot. It reports whether the error is anomalous, and returns the
+// error the model should learn from: an anomaly clipped to 3 standard
+// deviations, so one outlier doesn't distort the model for weeks, and any
+// other error as it is. floor is the smallest standard deviation errors are
+// judged against, so a workload whose forecast has been exact (zero demand,
+// forecast zero) isn't alarmed by a single millicore.
+func (a *AnomalyDetector) Record(forecast, actual, floor float64, slot int) (anomaly bool, learn float64) {
 	err := actual - forecast
 	stddev := math.Max(math.Sqrt(a.vari), floor)
 
-	if a.count >= anomalyWindow && stddev > 0 {
-		anomaly = math.Abs(err-a.mean)/stddev > zScoreThreshold
-	}
-
-	clipped = err
+	clipped := err
+	var high, low bool
 	if a.count >= anomalyWindow {
 		limit := zScoreThreshold * stddev
 		clipped = math.Max(a.mean-limit, math.Min(a.mean+limit, err))
+		high, low = stddev > 0 && err > a.mean+limit, stddev > 0 && err < a.mean-limit
 	}
+	recurring := high && a.above.has(slot) || low && a.below.has(slot)
+	anomaly = (high || low) && !recurring
+	a.above.set(slot, high)
+	a.below.set(slot, low)
+
 	a.count = min(a.count+1, anomalyMemory)
 	weight := 1 / float64(a.count)
 	delta := clipped - a.mean
@@ -81,8 +94,9 @@ func (a *AnomalyDetector) Record(forecast, actual, floor float64) (anomaly bool,
 	a.recent = (a.recent << 1) & anomalyWindowMask
 	if anomaly {
 		a.recent |= 1
+		return true, clipped
 	}
-	return anomaly, clipped
+	return false, err
 }
 
 // RegimeChange reports whether anomalies have clustered, meaning the
@@ -96,4 +110,24 @@ func (a *AnomalyDetector) RegimeChange() bool {
 // of anomalies.
 func (a *AnomalyDetector) Reset() {
 	*a = AnomalyDetector{}
+}
+
+// weekSlots is a set of hours of the week.
+type weekSlots [3]uint64
+
+func (w *weekSlots) has(slot int) bool {
+	return w[slot/64]&(1<<(slot%64)) != 0
+}
+
+func (w *weekSlots) set(slot int, on bool) {
+	if on {
+		w[slot/64] |= 1 << (slot % 64)
+	} else {
+		w[slot/64] &^= 1 << (slot % 64)
+	}
+}
+
+// valid reports whether every slot is an hour of the week.
+func (w weekSlots) valid() bool {
+	return w[2]>>(WeeklySeason-128) == 0
 }

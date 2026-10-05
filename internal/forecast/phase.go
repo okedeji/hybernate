@@ -112,9 +112,9 @@ type Engine struct {
 	// scale is the workload's mean demand over about a week.
 	scale float64
 
-	// coverage has a bit set for each hour of the week observed since the
-	// engine started or last saw its patterns break.
-	coverage [3]uint64
+	// coverage is the hours of the week observed since the engine started
+	// or last saw its patterns break.
+	coverage weekSlots
 
 	lastRegimeChange bool
 	lastAnomaly      bool
@@ -183,15 +183,14 @@ func (e *Engine) Observe(actual float64, now time.Time) (float64, error) {
 	if e.Model.n > 0 {
 		forecast = e.Model.forecast(t, steps)
 		e.Scorer.Record(forecast, actual)
-		var clipped float64
-		e.lastAnomaly, clipped = e.Anomaly.Record(forecast, actual, e.floor())
-		fit = math.Max(0, forecast+clipped)
+		var learn float64
+		e.lastAnomaly, learn = e.Anomaly.Record(forecast, actual, e.floor(), weeklyIndex(t))
+		fit = math.Max(0, forecast+learn)
 	}
 	e.Model.update(fit, t, steps)
 	e.lastHour = hourStart(t)
 	e.updateScale(actual)
-	wi := weeklyIndex(t)
-	e.coverage[wi/64] |= 1 << (wi % 64)
+	e.coverage.set(weeklyIndex(t), true)
 	e.advancePhase()
 
 	if !e.Model.finite() || !isFinite(e.scale) {
@@ -246,7 +245,7 @@ func (e *Engine) coveredDay() bool {
 func (e *Engine) hoursOfDayCovered() int {
 	var seen uint32
 	for wi := range WeeklySeason {
-		if e.coverage[wi/64]&(1<<(wi%64)) != 0 {
+		if e.coverage.has(wi) {
 			seen |= 1 << (wi % DailySeason)
 		}
 	}
@@ -322,7 +321,7 @@ func (e *Engine) handleRegimeChange() {
 	}
 	e.Scorer.Reset()
 	e.Anomaly.Reset()
-	e.coverage = [3]uint64{}
+	e.coverage = weekSlots{}
 }
 
 func (e *Engine) GetPhase() Phase    { return e.Phase }

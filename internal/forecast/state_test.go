@@ -108,6 +108,7 @@ func TestState_ImportRejectsInvalidState(t *testing.T) {
 		{"anomaly count out of range", func(st *engineState) { st.AnCount = anomalyMemory + 1 }},
 		{"anomalies beyond the window", func(st *engineState) { st.AnRecent = 1 << anomalyWindow }},
 		{"coverage beyond the week", func(st *engineState) { st.Coverage[2] |= 1 << 63 }},
+		{"anomalous hours beyond the week", func(st *engineState) { st.AnBelow[2] |= 1 << 63 }},
 		{"error window too long", func(st *engineState) {
 			st.AbsErr = make([]float32, weeklyWindow+1)
 			st.Actual = make([]float32, weeklyWindow+1)
