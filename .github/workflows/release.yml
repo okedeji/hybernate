@@ -13,9 +13,10 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # The chart's version and appVersion, and the kustomize image, are
-  # committed with the release (make release does it), so installing from
-  # the tagged source gets the image the tag publishes.
+  # The chart's version and appVersion, the kustomize image, and the docs'
+  # install and verify commands are committed with the release (make release
+  # does it), so installing from the tagged source gets the image the tag
+  # publishes.
   versions:
     name: Versions match the tag
     runs-on: ubuntu-latest
@@ -23,22 +24,26 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - env:
           TAG: ${{ github.ref_name }}
-        run: |
-          grep -qx "version: ${TAG#v}" charts/hybernate/Chart.yaml
-          grep -qx "appVersion: \"${TAG}\"" charts/hybernate/Chart.yaml
-          grep -qx "  newTag: ${TAG}" config/manager/kustomization.yaml
+        run: make verify-version VERSION="${TAG#v}"
 
+  # make release commits the version bump and tags it without a pull
+  # request, so the tag gets every check a pull request does.
   test:
     name: Test
     needs: [versions]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
-      - run: make test
-      - run: make vulncheck
+    uses: ./.github/workflows/test.yml
+
+  lint:
+    name: Lint
+    needs: [versions]
+    uses: ./.github/workflows/lint.yml
+
+  # Scanned before anything is pushed: once the release job pushes, the
+  # version's tag already points at the image.
+  security:
+    name: Security
+    needs: [versions]
+    uses: ./.github/workflows/security.yml
 
   e2e:
     name: E2E
@@ -50,30 +55,9 @@ jobs:
     needs: [versions]
     uses: ./.github/workflows/helm-smoke.yml
 
-  # Scanned before anything is pushed: once the release job pushes, the
-  # version's tag already points at the image.
-  scan:
-    name: Image vulnerabilities (${{ matrix.platform }})
-    needs: [versions]
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        platform: [linux/amd64, linux/arm64]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - run: docker buildx build --platform ${{ matrix.platform }} --load -t hybernate:scan .
-      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: hybernate:scan
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-
   release:
     name: Build and Release
-    needs: [test, e2e, helm-smoke, scan]
+    needs: [test, lint, security, e2e, helm-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write # the GitHub release

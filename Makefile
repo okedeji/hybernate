@@ -195,6 +195,16 @@ bump: ## Bump the version in the chart, the kustomize image, and docs. Usage: ma
 	@perl -pi -e 's/^  newTag:.*/  newTag: v$(VERSION)/' config/manager/kustomization.yaml
 	@echo "Bumped to $(VERSION)"
 
+.PHONY: verify-version
+verify-version: ## Fail unless the chart, the kustomize image, and the docs name VERSION. Usage: make verify-version VERSION=0.1.2
+	@if [ -z "$(VERSION)" ]; then echo "VERSION is required. Usage: make verify-version VERSION=0.1.2"; exit 1; fi
+	@grep -qx 'version: $(VERSION)' charts/hybernate/Chart.yaml || { echo "Chart.yaml's version isn't $(VERSION)"; exit 1; }
+	@grep -qx 'appVersion: "v$(VERSION)"' charts/hybernate/Chart.yaml || { echo "Chart.yaml's appVersion isn't v$(VERSION)"; exit 1; }
+	@grep -qx '  newTag: v$(VERSION)' config/manager/kustomization.yaml || { echo "config/manager's image isn't v$(VERSION)"; exit 1; }
+	@for f in $(VERSIONED_DOCS); do \
+		grep -qF -- '$(VERSION)' "$$f" || { echo "$$f doesn't name $(VERSION); run make bump VERSION=$(VERSION)"; exit 1; }; \
+	done
+
 .PHONY: release
 release: bump ## Bump version, commit, and tag. Usage: make release VERSION=0.1.2
 	@git add charts/hybernate/Chart.yaml config/manager/kustomization.yaml $(VERSIONED_DOCS)
