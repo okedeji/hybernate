@@ -37,39 +37,92 @@ func hangingCluster(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	t.Cleanup(server.Close)
+	writeKubeconfig(t, server.URL, "")
+}
+
+// writeKubeconfig points KUBECONFIG at a cluster with one context, named
+// "hanging", whose namespace is namespace.
+func writeKubeconfig(t *testing.T, server, namespace string) {
+	t.Helper()
 	kubeconfig := filepath.Join(t.TempDir(), "config")
 	require.NoError(t, os.WriteFile(kubeconfig, fmt.Appendf(nil, `apiVersion: v1
 kind: Config
 clusters: [{name: hanging, cluster: {server: %s}}]
 users: [{name: me, user: {token: t}}]
-contexts: [{name: hanging, context: {cluster: hanging, user: me}}]
+contexts: [{name: hanging, context: {cluster: hanging, user: me, namespace: %q}}]
 current-context: hanging
-`, server.URL), 0o600))
+`, server, namespace), 0o600))
 	t.Setenv("KUBECONFIG", kubeconfig)
+}
+
+// runRoot runs the plugin against the cluster the kubeconfig names.
+func runRoot(args ...string) error {
+	root := newRootCmd(newKubeClient)
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs(args)
+	return root.Execute()
 }
 
 // A cluster that stops answering ends the scan at --timeout, saying so,
 // rather than hanging it.
 func TestScan_GivesUpAtTimeout(t *testing.T) {
 	hangingCluster(t)
-	cmd := scanCmd()
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"-n", "preview-42", "--timeout", "300ms", "--window", "0", "-o", "json"})
 
 	start := time.Now()
-	err := cmd.Execute()
+	err := runRoot("scan", "-n", "preview-42", "--timeout", "300ms", "--window", "0", "-o", "json")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "the scan didn't finish within --timeout 300ms")
 	assert.Less(t, time.Since(start), 5*time.Second)
 }
 
-func TestScan_RejectsNoTimeout(t *testing.T) {
-	cmd := scanCmd()
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--timeout", "0"})
+// Every command that talks to the cluster gives up at --timeout, saying so.
+func TestCommands_GiveUpAtTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "status", args: []string{"status"}},
+		{name: "status in a namespace", args: []string{"status", "-n", "preview-42"}},
+		{name: "wake", args: []string{"wake", "api", "-n", "preview-42"}},
+		{name: "enable", args: []string{"enable", "api", "-n", "preview-42"}},
+		{name: "enable --all", args: []string{"enable", "--all", "-n", "preview-42"}},
+		{name: "deps", args: []string{"deps", "api", "-n", "preview-42"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hangingCluster(t)
 
-	assert.EqualError(t, cmd.Execute(), "--timeout must be more than zero")
+			start := time.Now()
+			err := runRoot(append(tt.args, "--timeout", "300ms")...)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "didn't answer within --timeout 300ms")
+			assert.Less(t, time.Since(start), 5*time.Second)
+		})
+	}
+}
+
+func TestCommands_RejectNonPositiveDurations(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"scan", "--timeout", "0"}, want: "--timeout must be more than zero"},
+		{args: []string{"status", "--timeout", "-1s"}, want: "--timeout must be more than zero"},
+		{args: []string{"status", "--since", "0"}, want: "--since must be more than zero"},
+		{args: []string{"status", "--since", "-1h"}, want: "--since must be more than zero"},
+		{args: []string{"wake", "api", "--timeout", "0"}, want: "--timeout must be more than zero"},
+		{args: []string{"wake", "api", "--for", "-1h"}, want: "--for can't be negative"},
+		{args: []string{"enable", "api", "--timeout", "0"}, want: "--timeout must be more than zero"},
+		{args: []string{"deps", "api", "--timeout", "0"}, want: "--timeout must be more than zero"},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint(tt.args), func(t *testing.T) {
+			err := runRoot(tt.args...)
+
+			assert.EqualError(t, err, tt.want)
+		})
+	}
 }

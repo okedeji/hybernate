@@ -44,8 +44,8 @@ const hubURL = "https://okedeji.io/hybernate/hub"
 const defaultCPUThreshold = 10
 
 type scanOptions struct {
-	context      string
-	namespaces   []string
+	kube         *kubeFlags
+	namespaces   namespaceFlags
 	exclude      []string
 	output       string
 	limit        int
@@ -86,8 +86,9 @@ type settings struct {
 	Window       string `json:"window"`
 }
 
-func scanCmd() *cobra.Command {
+func scanCmd(kube *kubeFlags) *cobra.Command {
 	opts := scanOptions{
+		kube:         kube,
 		cpuThreshold: defaultCPUThreshold,
 		cpuPrice:     cost.DefaultRates.CPUPerHour,
 		memoryPrice:  cost.DefaultRates.MemoryPerHour,
@@ -164,9 +165,7 @@ Examples:
 			return writeReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), result, opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.context, "context", "",
-		"Kubeconfig context of the cluster to scan (defaults to the current one)")
-	cmd.Flags().StringSliceVarP(&opts.namespaces, "namespace", "n", nil,
+	addNamespaceFlags(cmd, &opts.namespaces,
 		"Namespace to scan; repeat for several (defaults to all you can read)")
 	cmd.Flags().StringSliceVar(&opts.exclude, "exclude-namespaces", discovery.SystemNamespaces, "Namespaces to skip")
 	addOutputFlag(cmd, &opts.output)
@@ -210,18 +209,22 @@ func parseWindow(s string) (time.Duration, error) {
 }
 
 func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (scanResult, error) {
-	config, _, current, err := kubeConfigFor(opts.context)
+	config, at, err := opts.kube.restConfig(ctx)
 	if err != nil {
 		return scanResult{}, err
 	}
-	scan := scanResult{Context: current, Cluster: clusterName(current)}
-	config.Timeout = apiRequestTimeout
-	config.Wrap(cancelWith(ctx))
-	c, err := client.New(config, client.Options{Scheme: scheme})
+	scan := scanResult{Context: at.context, Cluster: clusterName(at.context)}
+	c, err := opts.kube.newClient(config)
 	if err != nil {
 		return scanResult{}, fmt.Errorf("creating client: %w", err)
 	}
-	namespaces, err := discovery.Namespaces(ctx, c, opts.namespaces, opts.exclude)
+	namespaces, err := discovery.Namespaces(ctx, c, opts.namespaces.list(), opts.exclude)
+	var namespaceNote string
+	if errors.Is(err, discovery.ErrCantListNamespaces) && !opts.namespaces.all {
+		namespaces, err = []string{at.namespace}, nil
+		namespaceNote = fmt.Sprintf("your access doesn't allow listing namespaces, so only %s, the context's "+
+			"namespace, was scanned; name others with -n", at.namespace)
+	}
 	if errors.Is(err, discovery.ErrCantListNamespaces) {
 		return scanResult{}, fmt.Errorf("can't scan %s: to find its workloads, the scan first lists the cluster's "+
 			"namespaces, and your access there doesn't allow that; name the namespaces to scan with -n, or ask an "+
@@ -262,6 +265,9 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	if historyNote != "" {
 		report.Notes = append([]string{historyNote}, report.Notes...)
 	}
+	if namespaceNote != "" {
+		report.Notes = append([]string{namespaceNote}, report.Notes...)
+	}
 	if len(namespaces) > 0 {
 		report.Notes = append(discovery.AccessNotes(ctx, c, namespaces[0]), report.Notes...)
 	}
@@ -274,27 +280,6 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	scan.ClusterReport = report
 	return scan, nil
 }
-
-// cancelWith ends every request to the API server when ctx ends. The
-// client's API discovery doesn't take a context, so without it a scan past
-// its deadline still waits out each discovery request in turn.
-func cancelWith(ctx context.Context) func(http.RoundTripper) http.RoundTripper {
-	return func(rt http.RoundTripper) http.RoundTripper {
-		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			reqCtx, cancel := context.WithCancelCause(r.Context())
-			context.AfterFunc(ctx, func() { cancel(context.Cause(ctx)) })
-			return rt.RoundTrip(r.WithContext(reqCtx))
-		})
-	}
-}
-
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-// apiRequestTimeout bounds each request to the API server. A scan makes many
-// small ones, so one that takes this long means the server isn't answering.
-const apiRequestTimeout = 30 * time.Second
 
 // historySource finds the Prometheus to replay history from, or says why
 // there's none to use.

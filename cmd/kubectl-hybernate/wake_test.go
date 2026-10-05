@@ -19,13 +19,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -174,4 +178,166 @@ func TestWake_NotFound(t *testing.T) {
 	err := wake(testContext(t), c, apiKey, testOptions(), &bytes.Buffer{})
 
 	assert.True(t, apierrors.IsNotFound(err))
+}
+
+// Wake takes the workload's name as status shows it, as well as its
+// ManagedWorkload's.
+func TestWake_ByWorkloadName(t *testing.T) {
+	handWritten := managedWorkload(v1alpha1.PhaseRunning)
+	handWritten.Name = "api-mw"
+	postgres := managedWorkload(v1alpha1.PhaseRunning)
+	postgres.Name = "db"
+	postgres.Spec.Target = v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres"}
+
+	tests := []struct {
+		name, arg, want string
+	}{
+		{name: "by the workload", arg: "api", want: "api-mw"},
+		{name: "by kind and workload", arg: "statefulset/postgres", want: "db"},
+		{name: "by the ManagedWorkload", arg: "db", want: "db"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newClient(t, interceptor.Funcs{}, handWritten.DeepCopy(), postgres.DeepCopy())
+			opts := testOptions()
+			opts.wait = false
+
+			require.NoError(t, wake(testContext(t), c, client.ObjectKey{Namespace: "preview-42", Name: tt.arg}, opts,
+				&bytes.Buffer{}))
+
+			var w v1alpha1.ManagedWorkload
+			require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: "preview-42", Name: tt.want}, &w))
+			assert.Equal(t, "2026-10-03T09:00:00Z", w.Annotations[v1alpha1.AnnotationLastActivity])
+		})
+	}
+}
+
+func TestWake_AmbiguousName(t *testing.T) {
+	deployment := managedWorkload(v1alpha1.PhasePaused)
+	deployment.Name = "api-deploy"
+	statefulSet := managedWorkload(v1alpha1.PhasePaused)
+	statefulSet.Name = "api-sts"
+	statefulSet.Spec.Target.Kind = v1alpha1.TargetKindStatefulSet
+	c := newClient(t, interceptor.Funcs{}, deployment, statefulSet)
+
+	err := wake(testContext(t), c, client.ObjectKey{Namespace: "preview-42", Name: "api"}, testOptions(), &bytes.Buffer{})
+
+	require.ErrorIs(t, err, errAmbiguous)
+	assert.EqualError(t, err, "api in preview-42 matches more than one ManagedWorkload: "+
+		"api-deploy (deployment/api), api-sts (statefulset/api); name one by its kind, such as deployment/api")
+}
+
+// When a Deployment and a StatefulSet share a name, the operator names one
+// ManagedWorkload after the workload and the other after its kind too. The
+// bare name then means either, and the kind picks one.
+func TestWake_SharedWorkloadName(t *testing.T) {
+	deployment := managedWorkload(v1alpha1.PhasePaused)
+	statefulSet := managedWorkload(v1alpha1.PhasePaused)
+	statefulSet.Name = "api-statefulset"
+	statefulSet.Spec.Target.Kind = v1alpha1.TargetKindStatefulSet
+	opts := testOptions()
+	opts.wait = false
+
+	err := wake(testContext(t), newClient(t, interceptor.Funcs{}, deployment.DeepCopy(), statefulSet.DeepCopy()),
+		apiKey, opts, &bytes.Buffer{})
+
+	require.ErrorIs(t, err, errAmbiguous)
+
+	for arg, want := range map[string]string{"statefulset/api": "api-statefulset", "deployment/api": "api"} {
+		t.Run(arg, func(t *testing.T) {
+			c := newClient(t, interceptor.Funcs{}, deployment.DeepCopy(), statefulSet.DeepCopy())
+
+			require.NoError(t, wake(testContext(t), c, client.ObjectKey{Namespace: "preview-42", Name: arg}, opts,
+				&bytes.Buffer{}))
+
+			var w v1alpha1.ManagedWorkload
+			require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: "preview-42", Name: want}, &w))
+			assert.NotEmpty(t, w.Annotations[v1alpha1.AnnotationLastActivity])
+		})
+	}
+}
+
+// Whatever phase the workload is in, wake says what happens and waits
+// until it's Running.
+func TestWake_FromEachPhase(t *testing.T) {
+	tests := []struct {
+		phase   v1alpha1.WorkloadPhase
+		dryRun  bool
+		wantOut string
+		waits   bool
+	}{
+		{phase: v1alpha1.PhasePausing, wantOut: "preview-42/api is pausing; it wakes once the pause finishes...\n",
+			waits: true},
+		{phase: v1alpha1.PhaseResuming, wantOut: "preview-42/api is already waking...\n", waits: true},
+		{phase: v1alpha1.PhaseIdle, wantOut: "preview-42/api was idle; marked active, it stays up...\n", waits: true},
+		{phase: v1alpha1.PhaseIdle, dryRun: true,
+			wantOut: "preview-42/api is in dry-run, so Hybernate never paused it; its idle clock restarts now\n"},
+		{phase: v1alpha1.PhasePaused, dryRun: true, wantOut: "waking preview-42/api...\n", waits: true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s dry-run=%t", tt.phase, tt.dryRun), func(t *testing.T) {
+			var gets int
+			funcs := interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+				obj client.Object, opts ...client.GetOption) error {
+				if err := c.Get(ctx, key, obj, opts...); err != nil {
+					return err
+				}
+				gets++
+				if w, ok := obj.(*v1alpha1.ManagedWorkload); ok && gets >= 3 {
+					w.Status.Phase = v1alpha1.PhaseRunning
+				}
+				return nil
+			}}
+			w := managedWorkload(tt.phase)
+			w.Spec.DryRun = tt.dryRun
+			c := newClient(t, funcs, w)
+			var out bytes.Buffer
+
+			require.NoError(t, wake(testContext(t), c, apiKey, testOptions(), &out))
+
+			want := tt.wantOut
+			if tt.waits {
+				want += "preview-42/api is Running after 0s\n"
+			}
+			assert.Equal(t, want, out.String())
+			assert.Equal(t, "2026-10-03T09:00:00Z", annotations(t, c)[v1alpha1.AnnotationLastActivity])
+		})
+	}
+}
+
+func TestWake_NotManaged(t *testing.T) {
+	ignored := managedWorkload(v1alpha1.PhaseRunning)
+	ignored.Status.Conditions = []metav1.Condition{{Type: "TargetAvailable", Status: metav1.ConditionFalse,
+		Reason: "TargetIgnored", Message: "Deployment api has hybernate.io/ignore label"}}
+	c := newClient(t, interceptor.Funcs{}, ignored)
+
+	err := wake(testContext(t), c, apiKey, testOptions(), &bytes.Buffer{})
+
+	require.ErrorIs(t, err, errNotWakeable)
+	assert.Contains(t, err.Error(), "Deployment api has hybernate.io/ignore label")
+}
+
+func TestWake_NotInstalled(t *testing.T) {
+	funcs := interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object,
+		...client.GetOption) error {
+		return &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "hybernate.io", Kind: "ManagedWorkload"}}
+	}}
+
+	err := wake(testContext(t), newClient(t, funcs), apiKey, testOptions(), &bytes.Buffer{})
+
+	assert.ErrorIs(t, err, errNotInstalled)
+}
+
+func TestWake_Forbidden(t *testing.T) {
+	funcs := interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object,
+		...client.GetOption) error {
+		return apierrors.NewForbidden(schema.GroupResource{Group: "hybernate.io", Resource: "managedworkloads"}, "api",
+			errors.New("user can't get"))
+	}}
+
+	err := wake(testContext(t), newClient(t, funcs), apiKey, testOptions(), &bytes.Buffer{})
+
+	require.True(t, apierrors.IsForbidden(err))
+	assert.Contains(t, err.Error(),
+		`getting ManagedWorkload preview-42/api: managedworkloads.hybernate.io "api" is forbidden`)
 }

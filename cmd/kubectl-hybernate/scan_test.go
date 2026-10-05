@@ -470,7 +470,7 @@ func TestPricesFor(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := scanCmd()
+			cmd := scanCmd(&kubeFlags{})
 			require.NoError(t, cmd.ParseFlags(tt.args))
 			cpu, err := cmd.Flags().GetFloat64("cpu-price")
 			require.NoError(t, err)

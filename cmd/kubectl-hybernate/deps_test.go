@@ -149,3 +149,31 @@ func TestDeps_LearnedFromAWake(t *testing.T) {
 
 	assert.Contains(t, out.String(), "preview-42/postgres   learned from a wake   not managed")
 }
+
+// Deps takes the workload's name as status shows it, for a ManagedWorkload
+// written by hand under another name.
+func TestDeps_ByWorkloadName(t *testing.T) {
+	db := depsWorkload("preview-42", "db", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused, nil)
+	db.Spec.Target.Name = "postgres"
+	objs := append(depsCluster()[1:], db)
+
+	for _, arg := range []string{"postgres", "statefulset/postgres", "db"} {
+		t.Run(arg, func(t *testing.T) {
+			var out bytes.Buffer
+
+			require.NoError(t, deps(context.Background(), newClient(t, interceptor.Funcs{}, objs...),
+				client.ObjectKey{Namespace: "preview-42", Name: arg}, &out))
+
+			assert.Contains(t, out.String(), "preview-42/postgres (StatefulSet, Paused)\n")
+			assert.Contains(t, out.String(), "preview-42/worker   declared in dependsOn, waitForReady   Paused")
+		})
+	}
+}
+
+func TestDeps_NotFound(t *testing.T) {
+	err := deps(context.Background(), newClient(t, interceptor.Funcs{}, depsCluster()...),
+		client.ObjectKey{Namespace: "preview-42", Name: "nope"}, &bytes.Buffer{})
+
+	require.True(t, apierrors.IsNotFound(err))
+	assert.Contains(t, err.Error(), "no ManagedWorkload in preview-42 is named nope or manages a workload of that name")
+}
