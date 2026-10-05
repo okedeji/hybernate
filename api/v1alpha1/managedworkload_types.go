@@ -172,10 +172,14 @@ type WorkloadRef struct {
 
 // PredictionSpec configures the Holt-Winters forecasting engine.
 type PredictionSpec struct {
-	// Confidence is the minimum accuracy percentage (0-100) required before
-	// the prediction engine transitions from suggesting (shadow mode) to
-	// actively driving decisions.
-	// +kubebuilder:validation:Minimum=0
+	// Confidence is the accuracy percentage (50-100) a season's forecasts
+	// must reach before they drive decisions rather than only being
+	// reported. Accuracy is 1 - WAPE: 85 means the forecast's total error
+	// over the window is 15% of the demand in it. A season that falls 5
+	// points below it stops driving decisions until it earns it again. The
+	// minimum is 50 because below that a forecast that is wrong more than it
+	// is right would wake workloads and hold off pauses.
+	// +kubebuilder:validation:Minimum=50
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=85
 	Confidence int `json:"confidence"`
@@ -520,15 +524,24 @@ type PredictionStatus struct {
 	// (Observing, Suggesting, or Active).
 	DailyPhase string `json:"dailyPhase"`
 
-	// DailyConfidence is the daily season's prediction accuracy percentage.
+	// DailyConfidence is the forecast's accuracy over the last 24 observed
+	// hours, as a percentage.
 	DailyConfidence int `json:"dailyConfidence"`
 
 	// WeeklyPhase is the weekly season's lifecycle phase
 	// (Observing, Suggesting, or Active).
 	WeeklyPhase string `json:"weeklyPhase"`
 
-	// WeeklyConfidence is the weekly season's prediction accuracy percentage.
+	// WeeklyConfidence is the forecast's accuracy over the last 168
+	// observed hours, a whole week of weekdays and weekend, as a percentage.
 	WeeklyConfidence int `json:"weeklyConfidence"`
+
+	// State is what the forecasting engine has learned, compressed and
+	// encoded, so that it survives an operator restart. It is written with
+	// each hourly observation. State that can't be read is discarded, with a
+	// warning event, and the engine starts learning again.
+	// +optional
+	State string `json:"state,omitempty"`
 }
 
 // CostStatus is what the workload has cost, and what pausing it has saved,
