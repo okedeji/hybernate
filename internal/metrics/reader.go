@@ -20,6 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -41,8 +44,14 @@ var ErrNoPodMetrics = errors.New("no pod metrics found")
 // node, so there's nothing to price it at.
 var ErrNoScheduledPods = errors.New("no pods on a node")
 
+// callTimeout bounds each read. The pods and the Metrics API aren't cached,
+// and a blackholed metrics-server would otherwise hold a reconcile worker,
+// and every wake queued behind it, for as long as the connection lasts.
+const callTimeout = 5 * time.Second
+
 // Reader reads workload metrics from the Kubernetes Metrics API and the
-// workload's pods, finding them by the target's spec.selector.matchLabels.
+// workload's pods, finding them by the target's selector and keeping only
+// the ones the target itself runs.
 type Reader struct {
 	client client.Client
 	pods   client.Reader
@@ -59,6 +68,8 @@ func NewReader(c client.Client, pods client.Reader) *Reader {
 // containers across its pods, for deciding whether it's active. See
 // WorkloadContainers.
 func (r *Reader) WorkloadCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	target, pods, err := r.podMetrics(ctx, workload)
 	if err != nil {
 		return 0, err
@@ -70,6 +81,8 @@ func (r *Reader) WorkloadCPUMillis(ctx context.Context, workload *v1alpha1.Manag
 // TotalCPUMillis returns the CPU in millicores used by every container in
 // the workload's pods, sidecars included, for what it costs.
 func (r *Reader) TotalCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	_, pods, err := r.podMetrics(ctx, workload)
 	if err != nil {
 		return 0, err
@@ -86,6 +99,8 @@ func (r *Reader) TotalCPUMillis(ctx context.Context, workload *v1alpha1.ManagedW
 // TotalMemoryBytes returns the memory used by every container in the
 // workload's pods, sidecars included, for what it costs.
 func (r *Reader) TotalMemoryBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	_, pods, err := r.podMetrics(ctx, workload)
 	if err != nil {
 		return 0, err
@@ -99,6 +114,7 @@ func (r *Reader) TotalMemoryBytes(ctx context.Context, workload *v1alpha1.Manage
 	return float64(total), nil
 }
 
+// podMetrics returns the target and the metrics of the pods it runs.
 func (r *Reader) podMetrics(ctx context.Context, workload *v1alpha1.ManagedWorkload) (client.Object, []metricsv1beta1.PodMetrics, error) {
 	target, err := r.getTarget(ctx, workload)
 	if err != nil {
@@ -113,15 +129,23 @@ func (r *Reader) podMetrics(ctx context.Context, workload *v1alpha1.ManagedWorkl
 		client.MatchingLabelsSelector{Selector: selector}); err != nil {
 		return nil, nil, fmt.Errorf("listing pod metrics for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
 	}
-	if len(list.Items) == 0 {
+	pods := make([]metricsv1beta1.PodMetrics, 0, len(list.Items))
+	for _, pod := range list.Items {
+		if runBy(target, &pod) {
+			pods = append(pods, pod)
+		}
+	}
+	if len(pods) == 0 {
 		return nil, nil, fmt.Errorf("%w for %s/%s", ErrNoPodMetrics, workload.Namespace, workload.Spec.Target.Name)
 	}
-	return target, list.Items, nil
+	return target, pods, nil
 }
 
 // CPURequestPerReplica returns the CPU request in millicores of one replica's
 // own containers, the counterpart of WorkloadCPUMillis.
 func (r *Reader) CPURequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	target, err := r.getTarget(ctx, workload)
 	if err != nil {
 		return 0, err
@@ -138,20 +162,13 @@ func (r *Reader) CPURequestPerReplica(ctx context.Context, workload *v1alpha1.Ma
 // pausing a replica frees. It reads a running pod, and falls back to the pod
 // template when none is running.
 func (r *Reader) PodRequestsPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cpuMillis, memBytes float64, err error) {
-	target, err := r.getTarget(ctx, workload)
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	target, pods, err := r.targetPods(ctx, workload)
 	if err != nil {
 		return 0, 0, err
 	}
-	selector, err := selectorFromTarget(target)
-	if err != nil {
-		return 0, 0, err
-	}
-	var pods corev1.PodList
-	if err := r.pods.List(ctx, &pods, client.InNamespace(workload.Namespace),
-		client.MatchingLabelsSelector{Selector: selector}); err != nil {
-		return 0, 0, fmt.Errorf("listing pods for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
-	}
-	cpu, mem := PodRequests(pods.Items, podSpecFromTarget(target))
+	cpu, mem := PodRequests(pods, podSpecFromTarget(target))
 	return float64(cpu), float64(mem), nil
 }
 
@@ -161,22 +178,15 @@ func (r *Reader) PodRequestsPerReplica(ctx context.Context, workload *v1alpha1.M
 // on a node. Nodes are read as metadata only: their labels are all pricing
 // needs.
 func (r *Reader) ListRates(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cost.Rates, bool, error) {
-	target, err := r.getTarget(ctx, workload)
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	_, pods, err := r.targetPods(ctx, workload)
 	if err != nil {
 		return cost.Rates{}, false, err
-	}
-	selector, err := selectorFromTarget(target)
-	if err != nil {
-		return cost.Rates{}, false, err
-	}
-	var pods corev1.PodList
-	if err := r.pods.List(ctx, &pods, client.InNamespace(workload.Namespace),
-		client.MatchingLabelsSelector{Selector: selector}); err != nil {
-		return cost.Rates{}, false, fmt.Errorf("listing pods for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
 	}
 	var rates []cost.Rates
 	scheduled := 0
-	for _, pod := range pods.Items {
+	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil || pod.Spec.NodeName == "" {
 			continue
 		}
@@ -199,32 +209,54 @@ func (r *Reader) ListRates(ctx context.Context, workload *v1alpha1.ManagedWorklo
 	return cost.Mean(rates), true, nil
 }
 
-// TotalPVCBytes returns the total provisioned PVC capacity in bytes for
-// the workload by listing PVCs matching the target's selector labels.
+// targetPods returns the target and the pods it runs.
+func (r *Reader) targetPods(ctx context.Context, workload *v1alpha1.ManagedWorkload) (client.Object, []corev1.Pod, error) {
+	target, err := r.getTarget(ctx, workload)
+	if err != nil {
+		return nil, nil, err
+	}
+	selector, err := selectorFromTarget(target)
+	if err != nil {
+		return nil, nil, err
+	}
+	var list corev1.PodList
+	if err := r.pods.List(ctx, &list, client.InNamespace(workload.Namespace),
+		client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return nil, nil, fmt.Errorf("listing pods for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
+	}
+	pods := make([]corev1.Pod, 0, len(list.Items))
+	for _, pod := range list.Items {
+		if runBy(target, &pod) {
+			pods = append(pods, pod)
+		}
+	}
+	return target, pods, nil
+}
+
+// TotalPVCBytes returns the capacity provisioned for the claims the target's
+// pods mount: the ones its pod template names, and for a StatefulSet the
+// ones its volumeClaimTemplates create for each replica, including replicas
+// scaled away, whose claims stay.
 func (r *Reader) TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	target, err := r.getTarget(ctx, workload)
 	if err != nil {
 		return 0, err
 	}
 
-	selector, err := selectorFromTarget(target)
-	if err != nil {
-		return 0, err
-	}
-
 	var pvcList corev1.PersistentVolumeClaimList
-	err = r.client.List(ctx, &pvcList,
-		client.InNamespace(workload.Namespace),
-		client.MatchingLabelsSelector{Selector: selector},
-	)
-	if err != nil {
+	if err := r.client.List(ctx, &pvcList, client.InNamespace(workload.Namespace)); err != nil {
 		return 0, fmt.Errorf("listing pvcs for %s/%s: %w", workload.Namespace, workload.Spec.Target.Name, err)
 	}
 
 	var total float64
 	for _, pvc := range pvcList.Items {
-		if cap, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
-			total += float64(cap.Value())
+		if !mounts(target, pvc.Name) {
+			continue
+		}
+		if capacity, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
+			total += float64(capacity.Value())
 		}
 	}
 	return total, nil
@@ -232,6 +264,8 @@ func (r *Reader) TotalPVCBytes(ctx context.Context, workload *v1alpha1.ManagedWo
 
 // Replicas returns the current spec.replicas for the target workload.
 func (r *Reader) Replicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	target, err := r.getTarget(ctx, workload)
 	if err != nil {
 		return 0, err
@@ -346,19 +380,75 @@ func Usage(pods []metricsv1beta1.PodMetrics, spec corev1.PodSpec) (cpuMillis, me
 }
 
 func selectorFromTarget(obj client.Object) (labels.Selector, error) {
-	var matchLabels map[string]string
+	var selector *metav1.LabelSelector
 	switch t := obj.(type) {
 	case *appsv1.Deployment:
-		if t.Spec.Selector != nil {
-			matchLabels = t.Spec.Selector.MatchLabels
-		}
+		selector = t.Spec.Selector
 	case *appsv1.StatefulSet:
-		if t.Spec.Selector != nil {
-			matchLabels = t.Spec.Selector.MatchLabels
-		}
+		selector = t.Spec.Selector
 	}
-	if len(matchLabels) == 0 {
+	if selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0) {
 		return nil, fmt.Errorf("no selector found on %s %s", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName())
 	}
-	return labels.SelectorFromSet(matchLabels), nil
+	s, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
+		return nil, fmt.Errorf("parsing the selector of %s: %w", obj.GetName(), err)
+	}
+	return s, nil
+}
+
+// maxGeneratedNamePrefix is how much of a generateName the API server keeps
+// before adding its five random characters.
+const maxGeneratedNamePrefix = 58
+
+// runBy reports whether a pod, or the metrics of one, is run by target
+// rather than by another workload whose selector overlaps it, such as a
+// canary's. It goes by name, since metrics carry the pod's name and labels
+// but not its owners: a Deployment's pods are named after the ReplicaSet
+// that runs them, <deployment>-<pod-template-hash>, cut to the length the
+// API server keeps of a generated name, and a StatefulSet's are
+// <statefulset>-<ordinal>.
+func runBy(target client.Object, pod metav1.Object) bool {
+	switch target.(type) {
+	case *appsv1.Deployment:
+		hash := pod.GetLabels()[appsv1.DefaultDeploymentUniqueLabelKey]
+		if hash == "" {
+			return false
+		}
+		prefix := target.GetName() + "-" + hash + "-"
+		if len(prefix) > maxGeneratedNamePrefix {
+			prefix = prefix[:maxGeneratedNamePrefix]
+		}
+		return strings.HasPrefix(pod.GetName(), prefix)
+	case *appsv1.StatefulSet:
+		return isOrdinal(strings.CutPrefix(pod.GetName(), target.GetName()+"-"))
+	}
+	return false
+}
+
+// mounts reports whether target's pods mount the claim.
+func mounts(target client.Object, claim string) bool {
+	for _, v := range podSpecFromTarget(target).Volumes {
+		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claim {
+			return true
+		}
+	}
+	sts, ok := target.(*appsv1.StatefulSet)
+	if !ok {
+		return false
+	}
+	for _, t := range sts.Spec.VolumeClaimTemplates {
+		if isOrdinal(strings.CutPrefix(claim, t.Name+"-"+sts.Name+"-")) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOrdinal(s string, found bool) bool {
+	if !found {
+		return false
+	}
+	_, err := strconv.ParseUint(s, 10, 32)
+	return err == nil
 }
