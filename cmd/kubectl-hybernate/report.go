@@ -25,7 +25,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -166,14 +165,11 @@ var (
 // unless one is asked for.
 func writeReport(stdout, stderr io.Writer, result scanResult, opts scanOptions) error {
 	open := opts.open && opts.output == outputTable && interactive(stdout)
-	path := opts.html
-	if path == "" {
-		if !open {
-			return nil
-		}
-		path = filepath.Join(os.TempDir(), "hybernate-scan-"+result.ScannedAt.Format("20060102-150405")+".html")
+	if opts.html == "" && !open {
+		return nil
 	}
-	if err := writeHTMLFile(path, result, opts.idleAfter); err != nil {
+	path, err := writeHTMLFile(opts.html, result, opts.idleAfter)
+	if err != nil {
 		return err
 	}
 	if !open {
@@ -225,19 +221,28 @@ func openInBrowser(path string) error {
 	return cmd.Run()
 }
 
-func writeHTMLFile(path string, result scanResult, idleAfter time.Duration) error {
-	f, err := os.Create(path)
+// writeHTMLFile writes the report to path, or, without one, to a new
+// temporary file only the user can read, since the report names the
+// cluster's workloads. It returns where it wrote.
+func writeHTMLFile(path string, result scanResult, idleAfter time.Duration) (string, error) {
+	var f *os.File
+	var err error
+	if path == "" {
+		f, err = os.CreateTemp("", "hybernate-scan-*.html")
+	} else {
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	}
 	if err != nil {
-		return fmt.Errorf("creating %s: %w", path, err)
+		return "", fmt.Errorf("creating the report: %w", err)
 	}
 	if err := writeHTML(f, result, idleAfter); err != nil {
 		_ = f.Close() // the write error is the one to report
-		return err
+		return "", err
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
+		return "", fmt.Errorf("writing %s: %w", f.Name(), err)
 	}
-	return nil
+	return f.Name(), nil
 }
 
 func writeHTML(w io.Writer, result scanResult, idleAfter time.Duration) error {

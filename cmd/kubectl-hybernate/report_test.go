@@ -237,12 +237,38 @@ func TestWriteHTML_Snapshot(t *testing.T) {
 func TestWriteHTMLFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.html")
 
-	require.NoError(t, writeHTMLFile(path, historyResult(), time.Hour))
+	written, err := writeHTMLFile(path, historyResult(), time.Hour)
 
+	require.NoError(t, err)
+	assert.Equal(t, path, written)
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "Workload scan")
-	assert.Error(t, writeHTMLFile(filepath.Join(t.TempDir(), "missing", "report.html"), historyResult(), time.Hour))
+	_, err = writeHTMLFile(filepath.Join(t.TempDir(), "missing", "report.html"), historyResult(), time.Hour)
+	assert.Error(t, err)
+}
+
+// The report names the cluster's workloads, so a temporary one is a new
+// file only the user can read, never one someone else made or linked.
+func TestWriteHTMLFile_Temporary(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	predictable := filepath.Join(dir, "hybernate-scan-20261003-090000.html")
+	target := filepath.Join(dir, "elsewhere")
+	require.NoError(t, os.Symlink(target, predictable))
+
+	first, err := writeHTMLFile("", historyResult(), time.Hour)
+	require.NoError(t, err)
+	second, err := writeHTMLFile("", historyResult(), time.Hour)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, first, second, "each scan its own file")
+	assert.NotEqual(t, predictable, first)
+	assert.NoFileExists(t, target, "a planted link isn't followed")
+	info, err := os.Stat(first)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	assert.Regexp(t, `^hybernate-scan-\d+\.html$`, filepath.Base(first))
 }
 
 func TestWriteReport(t *testing.T) {
@@ -300,7 +326,7 @@ func TestWriteReport(t *testing.T) {
 			assert.Contains(t, stderr.String(), files[0])
 			if tt.wantOpened {
 				assert.Equal(t, files[0], opened)
-				assert.Equal(t, "hybernate-scan-20261003-090000.html", filepath.Base(files[0]))
+				assert.Regexp(t, `^hybernate-scan-\d+\.html$`, filepath.Base(files[0]))
 			} else {
 				assert.Empty(t, opened)
 			}
