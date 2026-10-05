@@ -168,7 +168,7 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	cacheOpts := cacheOptions(watched)
+	cacheOpts := doormanCacheOptions(watched)
 	if !runDoorman {
 		routedNamespace := doormanNamespace
 		if doormanService == "" {
@@ -316,6 +316,16 @@ func operatorCacheOptions(watched []string, doormanNamespace string) cache.Optio
 	opts := cacheOptions(watched)
 	opts.ByObject = map[client.Object]cache.ByObject{
 		&discoveryv1.EndpointSlice{}: controller.EndpointSliceCache(watched, doormanNamespace),
+	}
+	return opts
+}
+
+// doormanCacheOptions adds to cacheOptions the doorman's view of
+// EndpointSlices (see doorman.EndpointSliceCache).
+func doormanCacheOptions(watched []string) cache.Options {
+	opts := cacheOptions(watched)
+	opts.ByObject = map[client.Object]cache.ByObject{
+		&discoveryv1.EndpointSlice{}: doorman.EndpointSliceCache(),
 	}
 	return opts
 }

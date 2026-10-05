@@ -104,8 +104,10 @@ doorman:
   affinity: {}
   # Empty spreads the replicas across nodes, where it can.
   topologySpreadConstraints: []
-  # The doorman caches ManagedWorkloads and the EndpointSlices of the
-  # watched namespaces, which it reads to find a woken workload's pods.
+  # The doorman caches ManagedWorkloads, and the Services' EndpointSlices
+  # in the watched namespaces, cut down to about 300 bytes per pod and
+  # 700 per Service. Held connections take up to 72Mi more under a flood.
+  # 256Mi covers a cluster of some 100,000 pods; raise the limit beyond.
   resources:
     limits:
       cpu: 500m

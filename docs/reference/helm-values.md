@@ -147,7 +147,7 @@ The doorman holds requests to paused workloads and wakes them. See [Wake on Requ
 | `doorman.resources.limits.cpu` | `500m` | CPU limit |
 | `doorman.resources.limits.memory` | `256Mi` | Memory limit |
 
-The doorman uses the operator image, the `metrics.*` settings, `logLevel` and `logEncoder`. It caches ManagedWorkloads and the EndpointSlices of the watched namespaces. On Kubernetes 1.30 and later it sleeps 5 seconds before shutting down, so kube-proxy and load balancers stop sending it new connections first.
+The doorman uses the operator image, the `metrics.*` settings, `logLevel` and `logEncoder`. It caches ManagedWorkloads and the EndpointSlices the EndpointSlice controller writes in the watched namespaces, cut down to what it reads: about 300 bytes per pod and 700 per Service. Held connections take up to 72Mi more under a flood. The default 256Mi limit covers a cluster of some 100,000 pods; raise it beyond that. On Kubernetes 1.30 and later it sleeps 5 seconds before shutting down, so kube-proxy and load balancers stop sending it new connections first.
 
 ## Network Policy
 

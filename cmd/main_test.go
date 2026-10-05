@@ -30,6 +30,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -197,6 +198,62 @@ func sliceNames(t *testing.T, ctx context.Context, c client.Reader, opts ...clie
 		names = append(names, s.Namespace+"/"+s.Name)
 	}
 	return names
+}
+
+// The doorman caches only the slices it trusts, those the EndpointSlice
+// controller writes, and only what it reads of them.
+func TestDoormanCacheHoldsOnlyTrustedSlicesTrimmed(t *testing.T) {
+	cfg := startEnvtest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	direct, err := client.New(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	require.NoError(t, direct.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}))
+	own := endpointSlice("shop", "web-xyz", map[string]string{
+		discoveryv1.LabelServiceName: "web", discoveryv1.LabelManagedBy: "endpointslice-controller.k8s.io",
+	})
+	own.Endpoints = []discoveryv1.Endpoint{{
+		Addresses:  []string{"10.244.1.9"},
+		Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)},
+		NodeName:   ptr.To("node-1"),
+		TargetRef:  &corev1.ObjectReference{Kind: "Pod", Namespace: "shop", Name: "web-0"},
+	}}
+	for _, s := range []*discoveryv1.EndpointSlice{
+		own,
+		endpointSlice("shop", "web-hybernate-doorman",
+			map[string]string{discoveryv1.LabelManagedBy: doorman.ManagedBy, discoveryv1.LabelServiceName: "web"}),
+		endpointSlice("shop", "web-by-hand", map[string]string{discoveryv1.LabelServiceName: "web"}),
+	} {
+		require.NoError(t, direct.Create(ctx, s))
+	}
+
+	opts := doormanCacheOptions(nil)
+	opts.Scheme = scheme
+	c, err := cache.New(cfg, opts)
+	require.NoError(t, err)
+	cacheCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- c.Start(cacheCtx) }()
+	defer func() {
+		stop()
+		assert.NoError(t, <-done)
+	}()
+
+	require.Eventually(t, func() bool {
+		var list discoveryv1.EndpointSliceList
+		return c.List(ctx, &list, client.InNamespace("shop")) == nil && len(list.Items) > 0
+	}, 30*time.Second, 100*time.Millisecond)
+	var list discoveryv1.EndpointSliceList
+	require.NoError(t, c.List(ctx, &list, client.InNamespace("shop")))
+	require.Len(t, list.Items, 1)
+	got := list.Items[0]
+	assert.Equal(t, "web-xyz", got.Name)
+	require.Len(t, got.Endpoints, 1)
+	assert.Equal(t, []string{"10.244.1.9"}, got.Endpoints[0].Addresses)
+	assert.Equal(t, "Pod", got.Endpoints[0].TargetRef.Kind)
+	assert.Nil(t, got.Endpoints[0].NodeName, "what the doorman doesn't read isn't kept")
+	assert.Empty(t, got.ManagedFields)
 }
 
 // Every other Service's slices are left out of the cache, so the operator

@@ -337,6 +337,42 @@ func TestBackends_TrustOnlyTheServicesPods(t *testing.T) {
 	}
 }
 
+// The doorman's cache keeps only part of each slice; that part gives the
+// same backends as the whole.
+func TestTrimEndpointSlice_KeepsWhatBackendsRead(t *testing.T) {
+	full := readySlice(8080)
+	full.Endpoints[0].Addresses = []string{"10.244.1.9", "10.244.1.10"}
+	full.Endpoints[0].NodeName = ptr.To("node-1")
+	full.Endpoints = append(full.Endpoints,
+		discoveryv1.Endpoint{
+			Addresses:  []string{"10.244.2.9"},
+			Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(false)},
+			TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: "api-1"},
+		},
+		discoveryv1.Endpoint{
+			Addresses:  []string{"10.244.3.9"},
+			Conditions: discoveryv1.EndpointConditions{Terminating: ptr.To(true)},
+			TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: "api-2"},
+		},
+		discoveryv1.Endpoint{Addresses: []string{"10.244.4.9"}},
+	)
+	trimmed, err := trimEndpointSlice(full.DeepCopy())
+	require.NoError(t, err)
+	key := backendKey{service: serviceRef{namespace: "dev", name: "api"}, portName: "http"}
+	backendsOf := func(slice *discoveryv1.EndpointSlice) []string {
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(slice).Build()
+		b := newBackends(c)
+		b.allowed = func(netip.Addr) bool { return true }
+		addrs, _, err := b.get(context.Background(), key)
+		require.NoError(t, err)
+		return addrs
+	}
+
+	assert.Equal(t, []string{"10.244.1.9:8080"}, backendsOf(full))
+	assert.Equal(t, backendsOf(full), backendsOf(trimmed.(*discoveryv1.EndpointSlice)))
+	assert.True(t, ServesTraffic([]discoveryv1.EndpointSlice{*trimmed.(*discoveryv1.EndpointSlice)}))
+}
+
 // Pod networks are allocated from private, unique-local and shared address
 // space, so those stay routable around the metadata services refused.
 func TestRoutable(t *testing.T) {
