@@ -42,7 +42,23 @@ v0.2.0 is a relaunch with breaking changes to the ManagedWorkload API, and there
 - The `status.cost` fields are renamed and mean something different: they cover the current calendar month and are priced on requests. Anything that reads `currentMonth*Hours`, `estimatedMonthlyCost`, `estimatedMonthlySavings` or `estimatedCostWithoutManagement` must move to the [new fields](../concepts/cost-tracking.md#status-fields).
 - The forecast's state is kept in `status.prediction.state`. The old `<name>-prediction-state` ConfigMaps are no longer read, and can be deleted.
 - `prediction.confidence` must be at least 50.
+- `desiredState: Destroyed` is gone; `desiredState` is `Running` or `Paused`.
 - `spec.target` can no longer be changed once set.
+
+**Before upgrading**, fix the ManagedWorkloads the new CRD would reject. On Kubernetes older than 1.30, the API server refuses every write to such an object, the operator's status updates included, until it's fixed; 1.30 and later let an unchanged invalid field through. This lists them:
+
+```bash
+kubectl get managedworkloads -A -o json | jq -r '.items[]
+  | select(.spec.desiredState == "Destroyed" or (.spec.prediction.confidence // 100) < 50)
+  | "\(.metadata.namespace)/\(.metadata.name)"'
+```
+
+Set each one's `desiredState` to `Paused` or remove it, and raise its `prediction.confidence` to at least 50:
+
+```bash
+kubectl patch managedworkload <name> -n <namespace> --type=json -p '[{"op":"remove","path":"/spec/desiredState"}]'
+kubectl patch managedworkload <name> -n <namespace> --type=merge -p '{"spec":{"prediction":{"confidence":50}}}'
+```
 
 **With Helm**, the chart now installs and upgrades the CRD itself. A v0.1.7 install left the CRD outside the release, so let Helm adopt it once, before `helm upgrade`:
 
@@ -60,6 +76,12 @@ helm upgrade <release> oci://ghcr.io/okedeji/charts/hybernate --version 0.2.0 -n
 ```
 
 Check the new [Helm values](../reference/helm-values.md) as you do: logs are JSON by default (`logEncoder`), memory defaults are higher, and with secure metrics your Prometheus needs `metrics.readerSubjects` to scrape them; see [Monitoring](monitoring.md#prometheus).
+
+**After upgrading**, with Helm or kubectl, delete the HybernateReport and WorkloadPolicy CRDs v0.1.x installed. v0.2.0 doesn't use them, and neither upgrade removes them. Deleting them deletes every HybernateReport and WorkloadPolicy; ManagedWorkloads a WorkloadPolicy created are left in place.
+
+```bash
+kubectl delete crd hybernatereports.hybernate.io workloadpolicies.hybernate.io
+```
 
 ## CRD Compatibility
 
