@@ -138,6 +138,18 @@ func TestCommands_GiveUpAtTimeout(t *testing.T) {
 	}
 }
 
+// A threshold of 0 would be judged as the default 10% while the report
+// said 0%, and one over 100% can never be reached; both are refused.
+func TestScan_RejectsACPUThresholdOutsideAPercentage(t *testing.T) {
+	for _, threshold := range []string{"0", "-5", "101"} {
+		t.Run(threshold, func(t *testing.T) {
+			err := runRoot("scan", "--cpu-threshold", threshold)
+
+			assert.EqualError(t, err, "--cpu-threshold must be a percentage from 1 to 100")
+		})
+	}
+}
+
 func TestCommands_RejectNonPositiveDurations(t *testing.T) {
 	tests := []struct {
 		args []string
