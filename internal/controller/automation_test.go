@@ -36,8 +36,6 @@ import (
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
 )
 
-// --- Stubs ---
-
 type stubForecaster struct {
 	phase            forecast.Phase
 	dailyConfidence  int
@@ -164,8 +162,6 @@ func automationWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload 
 		Status: v1alpha1.ManagedWorkloadStatus{Phase: phase},
 	}
 }
-
-// --- Tests ---
 
 func TestAutomation_SkipsTransitions(t *testing.T) {
 	for _, phase := range []v1alpha1.WorkloadPhase{v1alpha1.PhasePausing, v1alpha1.PhaseResuming} {

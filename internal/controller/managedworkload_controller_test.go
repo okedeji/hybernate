@@ -178,8 +178,6 @@ func getWorkload(t *testing.T, r *Reconciler, name string) *v1alpha1.ManagedWork
 	return &w
 }
 
-// --- Initial reconcile ---
-
 func TestReconcile_SetsInitialPhaseToRunning(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
@@ -203,8 +201,6 @@ func TestReconcile_NotFoundIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 }
-
-// --- Pause ---
 
 func TestReconcile_PauseTransitions(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
@@ -262,8 +258,6 @@ func TestReconcile_AlreadyPausedIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, pauser.pauseCalls)
 }
-
-// --- Resume ---
 
 func TestReconcile_ResumeTransitions(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
@@ -329,8 +323,6 @@ func TestReconcile_ResumeNotReadyBacksOff(t *testing.T) {
 		})
 	}
 }
-
-// --- Finalizer + Deletion ---
 
 func TestReconcile_FinalizerAddedOnFirstReconcile(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
@@ -423,8 +415,6 @@ func TestReconcileDelete_RestoresAPausedWorkload(t *testing.T) {
 	}
 }
 
-// --- Target check ---
-
 func TestReconcile_TargetNotFoundSetsConditionAndRequeues(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
@@ -451,8 +441,6 @@ func TestReconcile_TargetNotFoundSetsConditionAndRequeues(t *testing.T) {
 	}
 	assert.True(t, found, "TargetAvailable condition should be set")
 }
-
-// --- Scaled up outside Hybernate ---
 
 func pausedWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
 	return &v1alpha1.ManagedWorkload{
@@ -499,8 +487,6 @@ func TestReconcile_PausedAtZeroStaysPaused(t *testing.T) {
 	assert.Nil(t, w.Status.LastScaledUp)
 }
 
-// --- No desiredState ---
-
 func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
 	workload := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
@@ -520,8 +506,6 @@ func TestReconcile_NoDesiredStateIsNoOp(t *testing.T) {
 	assert.Equal(t, 0, pauser.pauseCalls)
 	assert.Equal(t, 0, pauser.resumeCalls)
 }
-
-// --- Duplicate target detection ---
 
 func TestReconcile_DuplicateTargetBlocksNewer(t *testing.T) {
 	older := &v1alpha1.ManagedWorkload{
@@ -942,8 +926,6 @@ func TestReconcileDelete_DropsEveryWorkloadSeries(t *testing.T) {
 	assert.False(t, metrics.IdleDetections.DeleteLabelValues("default", "deleted-gauge-app"))
 	assert.False(t, metrics.PredictionPhase.DeleteLabelValues("default", "deleted-gauge-app"))
 }
-
-// --- Lifecycle with the real Pauser ---
 
 const statusSubresource = "status"
 

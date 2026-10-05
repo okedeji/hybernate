@@ -37,8 +37,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// interfaces (defined at point of consumption) ---
-
 type forecaster interface {
 	Observe(actual float64, now time.Time) (float64, error)
 	Observed(now time.Time) bool
@@ -131,8 +129,6 @@ func (reg *engineRegistry) forget(uid types.UID) {
 	delete(reg.engines, uid)
 	reg.mu.Unlock()
 }
-
-// --- Reconcile automation ---
 
 func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	phase := workload.Status.Phase

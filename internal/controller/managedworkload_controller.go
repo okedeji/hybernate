@@ -185,8 +185,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 		return r.transition(ctx, &workload, v1alpha1.PhaseRunning, "Created")
 	}
 
-	// --- Target check, and a scale-up outside Hybernate ---
-
 	target, err := r.checkTarget(ctx, &workload)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -214,11 +212,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// --- Wake on request ---
-
 	doormanRetry = r.routeDoorman(ctx, &workload, target)
-
-	// --- In-flight transitions ---
 
 	result, err := r.resumeTransition(ctx, &workload, target)
 	if err != nil {
@@ -234,8 +228,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 		return r.reconcileScaledToZero(ctx, &workload, observed)
 	}
 
-	// --- Manual lifecycle ---
-
 	result, err = r.reconcileDesiredState(ctx, &workload, target)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -244,14 +236,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 		return *result, nil
 	}
 
-	// --- Automation ---
-
 	result, err = r.reconcileAutomation(ctx, &workload, target)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-
-	// --- Cost tracking and status ---
 
 	r.trackDryRun(&workload)
 	r.accumulateCost(ctx, &workload)
@@ -496,8 +484,6 @@ func resumeRecheck(waited time.Duration) time.Duration {
 	return min(max(waited, 5*time.Second), time.Minute)
 }
 
-// --- Finalizer ---
-
 func (r *Reconciler) ensureFinalizer(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
 	if controllerutil.ContainsFinalizer(workload, finalizerName) {
 		return nil
@@ -618,8 +604,6 @@ func recordPhase(workload *v1alpha1.ManagedWorkload) {
 	}
 	metrics.WorkloadPhase.WithLabelValues(workload.Namespace, workload.Name, string(workload.Status.Phase)).Set(1)
 }
-
-// --- Target ---
 
 const (
 	conditionTargetAvailable  = "TargetAvailable"
@@ -847,8 +831,6 @@ func dependsOnTarget(workload *v1alpha1.ManagedWorkload, id workloadID) bool {
 	}
 	return false
 }
-
-// --- Helpers ---
 
 func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) (ctrl.Result, error) { //nolint:unparam
 	logger := log.FromContext(ctx)
