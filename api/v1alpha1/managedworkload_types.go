@@ -64,7 +64,10 @@ const (
 
 // ManagedWorkloadSpec defines the desired lifecycle behavior for a workload.
 type ManagedWorkloadSpec struct {
-	// Target identifies the workload to manage (e.g. a Deployment or StatefulSet).
+	// Target identifies the workload to manage (e.g. a Deployment or
+	// StatefulSet). It can't be changed, since a paused target would be left
+	// at zero: create another ManagedWorkload to manage another workload.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="target is immutable; create another ManagedWorkload to manage another workload"
 	Target WorkloadRef `json:"target"`
 
 	// DesiredState overrides automation and forces the workload into the given
@@ -211,7 +214,7 @@ type IdlePolicySpec struct {
 type ActivitySpec struct {
 	// CPUThreshold is the CPU utilization, as a percentage of the workload's
 	// CPU requests, above which the workload counts as active.
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=10
 	// +optional
@@ -284,7 +287,8 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Pause holds state while the workload is paused.
+	// Pause records what pausing changed, from before the workload is scaled
+	// to zero until it's running again.
 	// +optional
 	Pause *PauseStatus `json:"pause,omitempty"`
 
@@ -497,13 +501,17 @@ type ResourceSnapshot struct {
 	StorageBytes int64 `json:"storageBytes"`
 }
 
-// PauseStatus records state while the workload is paused.
+// PauseStatus records what a pause changed, so it can be undone exactly. It's
+// written before the workload is scaled to zero, so a pause interrupted at
+// any point is finished or undone from it.
 type PauseStatus struct {
 	// PreviousReplicas is the replica count before pausing, used to
 	// restore on resume.
 	PreviousReplicas int32 `json:"previousReplicas"`
 
-	// PausedAt is when the workload was paused.
+	// PausedAt is when the workload was scaled to zero. Unset while the
+	// pause is under way.
+	// +optional
 	PausedAt *metav1.Time `json:"pausedAt,omitempty"`
 
 	// ScaledObject is the KEDA ScaledObject held at zero while the workload
@@ -511,10 +519,31 @@ type PauseStatus struct {
 	// +optional
 	ScaledObject string `json:"scaledObject,omitempty"`
 
+	// ScaledObjectPausedReplicas is the ScaledObject's own
+	// autoscaling.keda.sh/paused-replicas annotation from before the pause,
+	// put back when it's released. Unset when it had none.
+	// +optional
+	ScaledObjectPausedReplicas *string `json:"scaledObjectPausedReplicas,omitempty"`
+
 	// Resources captures the workload's resource profile at pause time
 	// for cost savings calculation.
 	// +optional
 	Resources *ResourceSnapshot `json:"resources,omitempty"`
+
+	// WakeAnnotations are the activity annotations as the pause began. One
+	// that has changed since wakes the workload whatever time it states, so
+	// a clock behind the operator's can't lose a wake.
+	// +optional
+	WakeAnnotations *WakeAnnotations `json:"wakeAnnotations,omitempty"`
+}
+
+// WakeAnnotations are the hybernate.io/last-activity, last-request and
+// active-until annotations, by name, on the ManagedWorkload and its target.
+type WakeAnnotations struct {
+	// +optional
+	Workload map[string]string `json:"workload,omitempty"`
+	// +optional
+	Target map[string]string `json:"target,omitempty"`
 }
 
 // PredictionStatus reflects the current state of the Holt-Winters engine's
