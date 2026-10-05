@@ -19,12 +19,18 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/url"
 	"os"
 	"path"
 	"strings"
+	"time"
+
+	// The image is distroless, with no zoneinfo, so --timezone needs the
+	// database compiled in.
+	_ "time/tzdata"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -45,7 +51,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/controller"
@@ -68,7 +73,6 @@ func init() {
 func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
-	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var probeAddr string
 	var prometheusURL string
@@ -76,6 +80,8 @@ func main() {
 	var doormanService, doormanNamespace string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var maxConcurrentReconciles int
+	var timezone string
 	var tlsOpts []func(*tls.Config)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0",
@@ -83,13 +89,10 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true, "Serve metrics via HTTPS. Use --metrics-secure=false for HTTP.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "Directory containing the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "Webhook certificate file name.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "Webhook key file name.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "", "Directory containing the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "Metrics server certificate file name.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "Metrics server key file name.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false, "Enable HTTP/2 for metrics and webhook servers.")
+	flag.BoolVar(&enableHTTP2, "enable-http2", false, "Enable HTTP/2 for the metrics server.")
 	flag.BoolVar(&runDoorman, "doorman", false,
 		"Run as the doorman, which holds connections to paused workloads and wakes them, instead of the operator.")
 	flag.StringVar(&doormanService, "doorman-service", "hybernate-doorman",
@@ -98,6 +101,10 @@ func main() {
 		"Namespace of the doorman's Service.")
 	flag.StringVar(&prometheusURL, "prometheus-url", "",
 		"Base URL of the Prometheus API used for activity queries, e.g. http://prometheus.monitoring.svc:9090.")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 4,
+		"How many ManagedWorkloads are reconciled at once, so one slow metrics or Prometheus query doesn't hold up wakes.")
+	flag.StringVar(&timezone, "timezone", "UTC",
+		"IANA time zone, such as Europe/London, whose hours and weekdays forecasts learn, so they follow daylight saving.")
 	optIn := controller.DefaultOptInDefaults
 	flag.DurationVar(&optIn.IdleAfter, "default-idle-after", optIn.IdleAfter,
 		"idleAfter for workloads opted in with the hybernate.io/managed label, unless annotated otherwise.")
@@ -113,7 +120,7 @@ func main() {
 		"Comma-separated name patterns, such as prod-*, of namespaces Hybernate never manages, as if labelled "+
 			v1alpha1.LabelProtected+", unless labelled "+v1alpha1.LabelAllowProtected+".")
 
-	opts := zap.Options{Development: true}
+	var opts zap.Options
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
@@ -127,18 +134,25 @@ func main() {
 		setupLog.Error(err, "invalid --prometheus-url")
 		os.Exit(1)
 	}
+	if err := validateOptInDefaults(optIn); err != nil {
+		setupLog.Error(err, "invalid --default-* flag")
+		os.Exit(1)
+	}
+	if maxConcurrentReconciles < 1 {
+		setupLog.Error(errors.New("must be at least 1"), "invalid --max-concurrent-reconciles",
+			"value", maxConcurrentReconciles)
+		os.Exit(1)
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		setupLog.Error(err, "invalid --timezone")
+		os.Exit(1)
+	}
 
 	if !enableHTTP2 {
 		tlsOpts = append(tlsOpts, func(c *tls.Config) {
 			c.NextProtos = []string{"http/1.1"}
 		})
-	}
-
-	webhookServerOptions := webhook.Options{TLSOpts: tlsOpts}
-	if len(webhookCertPath) > 0 {
-		webhookServerOptions.CertDir = webhookCertPath
-		webhookServerOptions.CertName = webhookCertName
-		webhookServerOptions.KeyName = webhookCertKey
 	}
 
 	metricsServerOptions := metricsserver.Options{
@@ -167,7 +181,6 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
-		WebhookServer:          webhook.NewServer(webhookServerOptions),
 		HealthProbeBindAddress: probeAddr,
 		// Every doorman replica serves traffic, so only the operator elects a leader.
 		LeaderElection:   enableLeaderElection && !runDoorman,
@@ -199,15 +212,17 @@ func main() {
 		readyz = server.Ready
 	} else {
 		if err := (&controller.Reconciler{
-			Client:              c,
-			Scheme:              mgr.GetScheme(),
-			Recorder:            mgr.GetEventRecorder("hybernate"),
-			PrometheusURL:       prometheusURL,
-			DoormanService:      doormanService,
-			DoormanNamespace:    doormanNamespace,
-			PodReader:           mgr.GetAPIReader(),
-			ProtectedNamespaces: protected,
-			WatchNamespaces:     watched,
+			Client:                  c,
+			Scheme:                  mgr.GetScheme(),
+			Recorder:                mgr.GetEventRecorder("hybernate"),
+			PrometheusURL:           prometheusURL,
+			DoormanService:          doormanService,
+			DoormanNamespace:        doormanNamespace,
+			PodReader:               mgr.GetAPIReader(),
+			ProtectedNamespaces:     protected,
+			WatchNamespaces:         watched,
+			MaxConcurrentReconciles: maxConcurrentReconciles,
+			Timezone:                location,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ManagedWorkload")
 			os.Exit(1)
@@ -267,6 +282,20 @@ func validatePrometheusURL(raw string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("%q has no host", raw)
+	}
+	return nil
+}
+
+// validateOptInDefaults applies the rules a workload's own annotations are
+// held to. A default outside them would be written into every label-created
+// ManagedWorkload and fail its validation, or, for a CPU threshold of 0,
+// silently become the CRD's default of 10.
+func validateOptInDefaults(d controller.OptInDefaults) error {
+	if d.IdleAfter <= 0 {
+		return fmt.Errorf("--default-idle-after %s must be positive", d.IdleAfter)
+	}
+	if d.CPUThreshold < 1 || d.CPUThreshold > 100 {
+		return fmt.Errorf("--default-cpu-threshold %d must be from 1 to 100", d.CPUThreshold)
 	}
 	return nil
 }

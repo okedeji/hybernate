@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/controller"
 	"github.com/okedeji/hybernate/internal/doorman"
 	"github.com/okedeji/hybernate/internal/gitops"
 )
@@ -56,6 +57,39 @@ func TestValidatePrometheusURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validatePrometheusURL(tt.url)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateOptInDefaults(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*controller.OptInDefaults)
+		wantErr bool
+	}{
+		{name: "built-in defaults", mutate: func(*controller.OptInDefaults) {}},
+		{name: "threshold of 100", mutate: func(d *controller.OptInDefaults) { d.CPUThreshold = 100 }},
+		{name: "threshold of 1", mutate: func(d *controller.OptInDefaults) { d.CPUThreshold = 1 }},
+		{name: "threshold above the CRD's maximum", mutate: func(d *controller.OptInDefaults) { d.CPUThreshold = 150 },
+			wantErr: true},
+		{name: "threshold of 0, which the CRD turns into 10",
+			mutate: func(d *controller.OptInDefaults) { d.CPUThreshold = 0 }, wantErr: true},
+		{name: "negative threshold", mutate: func(d *controller.OptInDefaults) { d.CPUThreshold = -5 }, wantErr: true},
+		{name: "zero idleAfter", mutate: func(d *controller.OptInDefaults) { d.IdleAfter = 0 }, wantErr: true},
+		{name: "negative idleAfter", mutate: func(d *controller.OptInDefaults) { d.IdleAfter = -time.Minute },
+			wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := controller.DefaultOptInDefaults
+			tt.mutate(&d)
+			err := validateOptInDefaults(d)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
