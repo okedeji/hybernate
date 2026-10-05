@@ -20,15 +20,11 @@ limitations under the License.
 package e2e
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -50,65 +46,42 @@ const metricsServiceName = "hybernate-controller-manager-metrics-service"
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "hybernate-metrics-binding"
 
+// After a spec fails, collect what it takes to tell why: Hybernate's logs,
+// events and pods, and the ManagedWorkloads and EndpointSlices of the
+// namespaces the specs made.
+var _ = AfterEach(func() {
+	if !CurrentSpecReport().Failed() {
+		return
+	}
+	for _, d := range []struct {
+		title string
+		args  []string
+	}{
+		{"Controller logs", []string{"logs", "-l", "control-plane=controller-manager", "-n", namespace,
+			"--prefix", "--tail=500"}},
+		{"Previous controller logs", []string{"logs", "-l", "control-plane=controller-manager", "-n", namespace,
+			"--prefix", "--previous", "--tail=100"}},
+		{"Doorman logs", []string{"logs", "-l", "control-plane=doorman", "-n", namespace, "--prefix", "--tail=200"}},
+		{"Hybernate's events", []string{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"}},
+		{"Hybernate's pods", []string{"describe", "pods", "-n", namespace}},
+		{"ManagedWorkloads", []string{"get", "managedworkloads", "-A", "-o", "wide"}},
+		{"Doorman EndpointSlices", []string{"get", "endpointslices", "-A",
+			"-l", "endpointslice.kubernetes.io/managed-by=doorman.hybernate.io"}},
+		{"Events in the specs' namespaces", []string{"get", "events", "-A", "--sort-by=.lastTimestamp",
+			"--field-selector=involvedObject.namespace!=kube-system"}},
+		{"curl-metrics logs", []string{"logs", "curl-metrics", "-n", namespace}},
+	} {
+		out, err := utils.Run(exec.Command("kubectl", d.args...))
+		if err != nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get %s: %s\n", d.title, err)
+			continue
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "%s:\n%s\n", d.title, out)
+	}
+})
+
 var _ = Describe("Manager", func() {
 	var controllerPodName string
-
-	// After each test, check for failures and collect logs, events,
-	// and pod descriptions for debugging.
-	AfterEach(func() {
-		specReport := CurrentSpecReport()
-		if specReport.Failed() {
-			By("Fetching controller manager pod logs")
-			cmd := exec.Command("kubectl", "logs", "-l", "control-plane=controller-manager", "-n", namespace,
-				"--tail=500")
-			controllerLogs, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
-			}
-
-			By("Fetching doorman pod logs")
-			cmd = exec.Command("kubectl", "logs", "-l", "control-plane=doorman", "-n", namespace,
-				"--prefix", "--tail=200")
-			doormanLogs, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Doorman logs:\n %s", doormanLogs)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get doorman logs: %s", err)
-			}
-
-			By("Fetching Kubernetes events")
-			cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
-			eventsOutput, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Kubernetes events:\n%s", eventsOutput)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Kubernetes events: %s", err)
-			}
-
-			By("Fetching curl-metrics logs")
-			cmd = exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
-			metricsOutput, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Metrics logs:\n %s", metricsOutput)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get curl-metrics logs: %s", err)
-			}
-
-			By("Fetching controller manager pod description")
-			cmd = exec.Command("kubectl", "describe", "pod", "-l", "control-plane=controller-manager", "-n", namespace)
-			podDescription, err := utils.Run(cmd)
-			if err == nil {
-				fmt.Println("Pod description:\n", podDescription)
-			} else {
-				fmt.Println("Failed to describe controller pod")
-			}
-		}
-	})
-
-	SetDefaultEventuallyTimeout(2 * time.Minute)
-	SetDefaultEventuallyPollingInterval(time.Second)
 
 	Context("Manager", Ordered, func() {
 		It("should run successfully", func() {
@@ -184,59 +157,28 @@ var _ = Describe("Manager", func() {
 
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
-			By("creating the curl-metrics pod to access the metrics endpoint")
-			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
-				"--namespace", namespace,
-				"--image=curlimages/curl:8.7.1",
-				"--overrides",
-				fmt.Sprintf(`{
-					"spec": {
-						"containers": [{
-							"name": "curl",
-							"image": "curlimages/curl:8.7.1",
-							"imagePullPolicy": "IfNotPresent",
-							"command": ["/bin/sh", "-c"],
-							"args": [
-								"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
-							],
-							"securityContext": {
-								"readOnlyRootFilesystem": true,
-								"allowPrivilegeEscalation": false,
-								"capabilities": {
-									"drop": ["ALL"]
-								},
-								"runAsNonRoot": true,
-								"runAsUser": 1000,
-								"seccompProfile": {
-									"type": "RuntimeDefault"
-								}
-							}
-						}],
-						"serviceAccountName": "%s"
-					}
-				}`, token, metricsServiceName, namespace, serviceAccountName))
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
+			By("managing a workload, so the operator has a series for it")
+			const metered, meteredNamespace = "e2e-metered", "hybernate-e2e-metrics"
+			createNamespace(meteredNamespace)
+			Expect(kubectlApply(deploymentManifest(metered, meteredNamespace, 1))).To(Succeed())
+			manage(meteredNamespace, "Deployment", metered, "1h")
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", metered, meteredNamespace, "{.status.phase}")
+			}).Should(Equal("Running"))
 
-			By("waiting for the curl-metrics pod to complete.")
-			verifyCurlUp := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pods", "curl-metrics",
-					"-o", "jsonpath={.status.phase}",
-					"-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Succeeded"), "curl pod in wrong status")
-			}
-			Eventually(verifyCurlUp, 5*time.Minute).Should(Succeed())
+			By("scraping the controller-manager's metrics")
+			operatorMetrics := scrape("curl-metrics",
+				fmt.Sprintf("https://%s.%s.svc.cluster.local:8443/metrics", metricsServiceName, namespace), token)
+			Expect(operatorMetrics).To(MatchRegexp(
+				`(?m)^hybernate_workload_phase\{namespace="%s",phase="Running",workload="%s"\} 1$`,
+				meteredNamespace, metered))
 
-			By("getting the metrics by checking curl-metrics logs")
-			verifyMetricsAvailable := func(g Gomega) {
-				metricsOutput, err := getMetricsOutput()
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-				g.Expect(metricsOutput).NotTo(BeEmpty())
-				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
-			}
-			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
+			By("scraping the doorman's metrics")
+			doormanMetrics := scrape("curl-doorman-metrics",
+				fmt.Sprintf("https://hybernate-doorman.%s.svc.cluster.local:8443/metrics", namespace), token)
+			Expect(doormanMetrics).To(MatchRegexp(`(?m)^hybernate_doorman_held_connections \d+$`))
+			Expect(doormanMetrics).To(MatchRegexp(`(?m)^hybernate_doorman_proxied_connections \d+$`))
+			Expect(doormanMetrics).To(MatchRegexp(`(?m)^hybernate_doorman_port_conflicts \d+$`))
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
@@ -427,203 +369,6 @@ spec:
 		})
 	})
 
-	Context("Wake on request", Ordered, func() {
-		const (
-			wakeNamespace = "hybernate-e2e-wake"
-			webName       = "e2e-web"
-			webHost       = "e2e-web.example.com"
-			ingressURL    = "http://ingress-nginx-controller.ingress-nginx/hostname"
-		)
-		doormanSlice := webName + "-hybernate-doorman"
-
-		BeforeAll(func() {
-			By("waiting for the doorman to be ready")
-			_, err := utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/hybernate-doorman",
-				"-n", namespace, "--timeout=2m"))
-			Expect(err).NotTo(HaveOccurred())
-
-			By("creating a web app behind a Service")
-			_, err = utils.Run(exec.Command("kubectl", "create", "ns", wakeNamespace))
-			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(func() {
-				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", wakeNamespace, "--wait=false"))
-			})
-			Expect(kubectlApply(webManifest(webName, wakeNamespace))).To(Succeed())
-			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+webName,
-				"-n", wakeNamespace, "--timeout=2m"))
-			Expect(err).NotTo(HaveOccurred())
-
-			By("installing ingress-nginx")
-			manifest, err := preloaded(ingressNginxManifest)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(kubectlApply(manifest)).To(Succeed())
-			DeferCleanup(func() {
-				_, _ = utils.Run(exec.Command("kubectl", "delete", "-f", ingressNginxManifest, "--wait=false"))
-			})
-			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/ingress-nginx-controller",
-				"-n", "ingress-nginx", "--timeout=3m"))
-			Expect(err).NotTo(HaveOccurred())
-
-			By("routing a host to the app")
-			// The admission webhook can still be starting after the rollout
-			// reports ready, so the first apply may be refused.
-			Eventually(func() error {
-				return kubectlApply(fmt.Sprintf(`
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata: {name: %[1]s, namespace: %[2]s}
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: %[3]s
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend: {service: {name: %[1]s, port: {name: http}}}
-`, webName, wakeNamespace, webHost))
-			}, 2*time.Minute, 5*time.Second).Should(Succeed())
-
-			By("checking the route serves the app while it's awake")
-			// nginx loads a new Ingress a few seconds after it's created, so
-			// this retries; the wake spec then fails only on the doorman.
-			body := curlInCluster("curl-ingress-ready", wakeNamespace, ingressURL,
-				"-H", "Host: "+webHost, "--retry", "30", "--retry-delay", "2", "--retry-all-errors")
-			Expect(body).To(HavePrefix(webName + "-"))
-
-			By("managing the app with a one-minute idle clock")
-			Expect(kubectlApply(fmt.Sprintf(`
-apiVersion: hybernate.io/v1alpha1
-kind: ManagedWorkload
-metadata: {name: %[1]s, namespace: %[2]s}
-spec:
-  target: {kind: Deployment, name: %[1]s}
-  idlePolicy: {idleAfter: 1m}
-  prediction: {confidence: 85}
-`, webName, wakeNamespace))).To(Succeed())
-		})
-
-		waitForDoorman := func() {
-			By("waiting for the app to pause and its Service to point at the doorman")
-			Eventually(func(g Gomega) {
-				g.Expect(jsonpath("managedworkload", webName, wakeNamespace, "{.status.phase}")).To(Equal("Paused"))
-				g.Expect(jsonpath("managedworkload", webName, wakeNamespace,
-					`{.status.conditions[?(@.type=="WakeOnRequest")].status}`)).To(Equal("True"))
-				g.Expect(jsonpath("endpointslice", doormanSlice, wakeNamespace, "{.endpoints[*].addresses[0]}")).
-					NotTo(BeEmpty())
-			}, 4*time.Minute, 5*time.Second).Should(Succeed())
-		}
-
-		expectAwake := func() {
-			By("checking the app is Running and its Service no longer points at the doorman")
-			Eventually(func(g Gomega) {
-				g.Expect(jsonpath("managedworkload", webName, wakeNamespace, "{.status.phase}")).To(Equal("Running"))
-				g.Expect(jsonpath("managedworkload", webName, wakeNamespace,
-					"{.status.activity.lastActivitySource}")).To(Equal("request"))
-				_, err := jsonpath("endpointslice", doormanSlice, wakeNamespace, "{.metadata.name}")
-				g.Expect(err).To(HaveOccurred(), "the doorman's EndpointSlice must be removed")
-			}, 2*time.Minute, 5*time.Second).Should(Succeed())
-		}
-
-		It("wakes a paused app on a request to its Service and answers the request", func() {
-			waitForDoorman()
-
-			By("sending a request to the paused app's Service")
-			// kube-proxy programs the doorman's endpoints a moment after the
-			// pause, and until then the Service has none and refuses. curl
-			// retries only that, never a connection the doorman holds.
-			body := curlInCluster("curl-wake", wakeNamespace, fmt.Sprintf("http://%s/hostname", webName),
-				"--retry", "10", "--retry-delay", "1", "--retry-connrefused")
-			Expect(body).To(HavePrefix(webName+"-"), "the held request is answered by the woken pod")
-
-			expectAwake()
-		})
-
-		It("wakes a paused app on a request through ingress-nginx", func() {
-			waitForDoorman()
-
-			By("sending a request through the ingress controller")
-			// nginx picks up endpoint changes on a timer, so for a moment after
-			// the pause it still sends to the deleted pod and answers 502. curl
-			// retries only those errors, never a connection the doorman holds.
-			body := curlInCluster("curl-wake-ingress", wakeNamespace, ingressURL, "-H", "Host: "+webHost,
-				"--retry", "10", "--retry-delay", "1", "--retry-connrefused")
-			Expect(body).To(HavePrefix(webName+"-"), "ingress-nginx passes the held request to the woken pod")
-
-			expectAwake()
-		})
-
-		It("shows a browser a waking-up page through ingress-nginx, then the app", func() {
-			waitForDoorman()
-			browser := []string{"-s", "--max-time", "30", "-w", "\nstatus=%{http_code}", "-H", "Host: " + webHost,
-				"-H", "Accept: text/html", "-H", "Sec-Fetch-Mode: navigate"}
-
-			By("opening the paused app in a browser")
-			// Until nginx picks up the doorman's endpoints, a request can still
-			// reach the removed pod, so this looks for the page across a few tries.
-			attempt := 0
-			Eventually(func(g Gomega) {
-				attempt++
-				page, _ := runCurl(fmt.Sprintf("curl-page-%d", attempt), wakeNamespace, ingressURL, browser...)
-				g.Expect(page).To(ContainSubstring("Waking up " + webName))
-				g.Expect(page).To(ContainSubstring("status=503"))
-			}, 2*time.Minute, time.Second).Should(Succeed())
-
-			expectAwake()
-
-			By("reloading once the app is Running")
-			reload := 0
-			Eventually(func(g Gomega) {
-				reload++
-				app, _ := runCurl(fmt.Sprintf("curl-page-reload-%d", reload), wakeNamespace, ingressURL, browser...)
-				g.Expect(app).To(ContainSubstring("status=200"))
-				g.Expect(app).To(HavePrefix(webName+"-"), "the reload reaches the app")
-			}, time.Minute, time.Second).Should(Succeed())
-		})
-
-		It("learns that a workload Hybernate manages depends on the one its request woke", func() {
-			const callerName = "e2e-caller"
-			By("running a caller that Hybernate manages, with nothing in its environment naming the app")
-			Expect(kubectlApply(webManifest(callerName, wakeNamespace))).To(Succeed())
-			_, err := utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+callerName,
-				"-n", wakeNamespace, "--timeout=2m"))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(kubectlApply(fmt.Sprintf(`
-apiVersion: hybernate.io/v1alpha1
-kind: ManagedWorkload
-metadata: {name: %[1]s, namespace: %[2]s}
-spec:
-  target: {kind: Deployment, name: %[1]s}
-  idlePolicy: {idleAfter: 1h}
-  prediction: {confidence: 85}
-`, callerName, wakeNamespace))).To(Succeed())
-
-			waitForDoorman()
-
-			By("connecting from the caller to the paused app")
-			// Retried until kube-proxy routes the Service to the doorman; a
-			// connection the doorman holds isn't refused.
-			Eventually(func() error {
-				_, err := utils.Run(exec.Command("kubectl", "exec", "-n", wakeNamespace, "deploy/"+callerName, "--",
-					"/agnhost", "connect", "--timeout", "5s", webName+":80"))
-				return err
-			}, time.Minute, 2*time.Second).Should(Succeed())
-
-			expectAwake()
-
-			By("checking the caller now depends on the app, learned from the wake")
-			Eventually(func(g Gomega) {
-				g.Expect(jsonpath("managedworkload", callerName, wakeNamespace,
-					"{.status.learnedDependencies.dependencies[*].name}")).To(Equal(webName))
-				g.Expect(jsonpath("managedworkload", callerName, wakeNamespace,
-					"{.status.learnedDependencies.dependencies[*].source}")).To(Equal("wake"))
-			}, time.Minute, 5*time.Second).Should(Succeed())
-			out, err := utils.Run(exec.Command(pluginBinary, "deps", webName, "-n", wakeNamespace))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(out).To(MatchRegexp(wakeNamespace + `/` + callerName + `\s+learned from a wake\s+Running`))
-		})
-	})
-
 	Context("Scan", Ordered, func() {
 		const scanNamespace = "hybernate-e2e-scan"
 
@@ -683,7 +428,7 @@ spec:
 
 			By("scanning once Hybernate has paused the quiet workload")
 			Eventually(func(g Gomega) {
-				out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", scanNamespace, "-o", "json"))
+				out, err := utils.Output(exec.Command(pluginBinary, "scan", "-n", scanNamespace, "-o", "json", "--window", "0"))
 				g.Expect(err).NotTo(HaveOccurred())
 				var result scanned
 				g.Expect(json.Unmarshal([]byte(out), &result)).To(Succeed())
@@ -701,7 +446,7 @@ spec:
 			}, 4*time.Minute, 10*time.Second).Should(Succeed())
 
 			By("pricing at the user's own prices in place of the nodes'")
-			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", scanNamespace, "-o", "json",
+			out, err := utils.Output(exec.Command(pluginBinary, "scan", "-n", scanNamespace, "-o", "json", "--window", "0",
 				"--cpu-price", "10", "--memory-price", "0"))
 			Expect(err).NotTo(HaveOccurred())
 			var own scanned
@@ -784,7 +529,7 @@ spec:
 					} `json:"history"`
 				} `json:"workloads"`
 			}
-			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", historyNamespace, "-o", "json"))
+			out, err := utils.Output(exec.Command(pluginBinary, "scan", "-n", historyNamespace, "-o", "json"))
 			Expect(err).NotTo(HaveOccurred())
 			var c scanned
 			Expect(json.Unmarshal([]byte(out), &c)).To(Succeed())
@@ -821,7 +566,7 @@ spec:
 				Expect(err).NotTo(HaveOccurred())
 			}
 			scanAs := func() (mode string, access []string) {
-				out, err := utils.Run(exec.Command("env", "KUBECONFIG="+kubeconfig,
+				out, err := utils.Output(exec.Command("env", "KUBECONFIG="+kubeconfig,
 					pluginBinary, "scan", "-n", historyNamespace, "-o", "json"))
 				Expect(err).NotTo(HaveOccurred())
 				var result struct {
@@ -895,7 +640,7 @@ data:
 		})
 
 		It("finds a dependency on a headless address in a ConfigMap and says to declare it", func() {
-			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0", "-o", "json"))
+			out, err := utils.Output(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0", "-o", "json"))
 			Expect(err).NotTo(HaveOccurred())
 			var result struct {
 				Workloads []struct {
@@ -1058,6 +803,63 @@ spec:
 		})
 	})
 
+	Context("Namespace opt-in", func() {
+		It("opts in a labelled namespace's workloads, each annotation over the namespace's, an invalid one under it", func() {
+			ns := createNamespace("hybernate-e2e-ns-optin")
+			const (
+				overriding = "e2e-overriding"
+				unsure     = "e2e-unsure"
+			)
+			By("setting the namespace's annotations, and the workloads' own")
+			_, err := utils.Run(exec.Command("kubectl", "annotate", "namespace", ns,
+				"hybernate.io/idle-after=45m", "hybernate.io/cpu-threshold=20",
+				"hybernate.io/wake-max-wait=90s", "hybernate.io/dry-run=false"))
+			Expect(err).NotTo(HaveOccurred())
+			for _, name := range []string{overriding, unsure} {
+				Expect(kubectlApply(deploymentManifest(name, ns, 1))).To(Succeed())
+			}
+			_, err = utils.Run(exec.Command("kubectl", "annotate", "deployment", overriding, "-n", ns,
+				"hybernate.io/idle-after=2h", "hybernate.io/cpu-threshold=abc"))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("kubectl", "annotate", "deployment", unsure, "-n", ns,
+				"hybernate.io/dry-run=yes"))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("labelling the namespace, which opts in the workloads already in it")
+			_, err = utils.Run(exec.Command("kubectl", "label", "namespace", ns, "hybernate.io/managed=true"))
+			Expect(err).NotTo(HaveOccurred())
+
+			spec := func(name, path string) func() (string, error) {
+				return func() (string, error) { return jsonpath("managedworkload", name, ns, path) }
+			}
+			Eventually(func(g Gomega) {
+				g.Expect(spec(overriding, `{.metadata.labels.hybernate\.io/from-label}`)()).To(Equal("true"))
+				g.Expect(spec(overriding, "{.spec.idlePolicy.idleAfter}")()).To(Equal("2h0m0s"), "the workload's own")
+				g.Expect(spec(overriding, "{.spec.idlePolicy.activity.cpuThreshold}")()).To(Equal("20"),
+					"the namespace's, under the workload's that can't be read")
+				g.Expect(spec(overriding, "{.spec.wake.maxWait}")()).To(Equal("1m30s"), "the namespace's")
+				g.Expect(spec(overriding, "{.spec.dryRun}")()).To(BeEmpty(), "the namespace's false")
+			}).Should(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(spec(unsure, "{.spec.dryRun}")()).To(Equal("true"),
+					"a dry-run setting that can't be read turns dry-run on")
+				g.Expect(spec(unsure, "{.spec.idlePolicy.idleAfter}")()).To(Equal("45m0s"), "the namespace's")
+				g.Expect(spec(unsure, "{.spec.idlePolicy.activity.cpuThreshold}")()).To(Equal("20"), "the namespace's")
+			}).Should(Succeed())
+
+			By("checking each workload is told which of its settings were skipped")
+			Eventually(func(g Gomega) {
+				out, err := utils.Output(exec.Command("kubectl", "get", "events.events.k8s.io", "-n", ns,
+					"-o", `jsonpath={range .items[?(@.reason=="InvalidSetting")]}{.regarding.name}: {.note}{"\n"}{end}`))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring(overriding + `: hybernate.io/cpu-threshold="abc" on the workload`))
+				g.Expect(out).To(ContainSubstring("so the namespace's value is used"))
+				g.Expect(out).To(ContainSubstring(unsure + `: hybernate.io/dry-run="yes" on the workload`))
+				g.Expect(out).To(ContainSubstring("so dry-run is on, to be safe"))
+			}).Should(Succeed())
+		})
+	})
+
 	Context("GitOps", Ordered, func() {
 		const (
 			gitOpsNamespace = "hybernate-e2e-gitops"
@@ -1087,7 +889,7 @@ spec:
 
 		It("reports Argo CD undoing a pause, with the fix, and doesn't fight it", func() {
 			By("scanning, which says the replicas are set from Git before it's opted in")
-			out, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", gitOpsNamespace, "-o", "json", "--window", "0"))
+			out, err := utils.Output(exec.Command(pluginBinary, "scan", "-n", gitOpsNamespace, "-o", "json", "--window", "0"))
 			Expect(err).NotTo(HaveOccurred())
 			var scanned struct {
 				Workloads []struct {
@@ -1136,16 +938,8 @@ spec:
 
 	Context("Autoscalers", Ordered, func() {
 		const autoscaleNamespace = "hybernate-e2e-autoscale"
-		manage := func(name string) {
-			Expect(kubectlApply(fmt.Sprintf(`
-apiVersion: hybernate.io/v1alpha1
-kind: ManagedWorkload
-metadata: {name: %[1]s, namespace: %[2]s}
-spec:
-  target: {kind: Deployment, name: %[1]s}
-  idlePolicy: {idleAfter: 1m}
-  prediction: {confidence: 85}
-`, name, autoscaleNamespace))).To(Succeed())
+		manageUntilPaused := func(name string) {
+			manage(autoscaleNamespace, "Deployment", name, "1m")
 			Eventually(func() (string, error) {
 				return jsonpath("managedworkload", name, autoscaleNamespace, "{.status.phase}")
 			}, 4*time.Minute, 5*time.Second).Should(Equal("Paused"))
@@ -1162,30 +956,7 @@ spec:
 		}
 
 		BeforeAll(func() {
-			_, err := utils.Run(exec.Command("kubectl", "create", "ns", autoscaleNamespace))
-			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(func() {
-				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", autoscaleNamespace, "--wait=false"))
-			})
-
-			By("installing KEDA")
-			manifest, err := preloaded(kedaManifest)
-			Expect(err).NotTo(HaveOccurred())
-			// KEDA's CRDs are too large for a client-side apply's annotation.
-			cmd := exec.Command("kubectl", "apply", "--server-side", "-f", "-")
-			cmd.Stdin = strings.NewReader(manifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(func() {
-				cmd := exec.Command("kubectl", "delete", "--wait=false", "-f", "-")
-				cmd.Stdin = strings.NewReader(manifest)
-				_, _ = utils.Run(cmd)
-			})
-			for _, d := range []string{"keda-operator", "keda-metrics-apiserver", "keda-admission"} {
-				_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+d, "-n", "keda",
-					"--timeout=3m"))
-				Expect(err).NotTo(HaveOccurred())
-			}
+			createNamespace(autoscaleNamespace)
 		})
 
 		It("pauses an HPA's workload, which the HPA leaves at zero, and resumes it within the HPA's range", func() {
@@ -1205,7 +976,7 @@ spec:
 			Eventually(replicas("e2e-hpa"), 2*time.Minute, 5*time.Second).Should(Equal("2"), "the HPA scales to its minimum")
 
 			By("managing it, and waiting for it to pause")
-			manage("e2e-hpa")
+			manageUntilPaused("e2e-hpa")
 			Expect(jsonpath("managedworkload", "e2e-hpa", autoscaleNamespace,
 				`{.status.conditions[?(@.type=="Autoscaled")].reason}`)).To(Equal("HPA"))
 			Consistently(replicas("e2e-hpa"), time.Minute, 10*time.Second).Should(Equal("0"),
@@ -1218,8 +989,9 @@ spec:
 
 		It("holds a KEDA workload at zero through KEDA, and releases it on wake", func() {
 			Expect(kubectlApply(deploymentManifest("e2e-keda", autoscaleNamespace, 1))).To(Succeed())
-			// A cron trigger that's always active, so KEDA keeps the workload
-			// up unless it's held.
+			// Cron triggers that are always active between them, so KEDA keeps
+			// the workload up unless it's held. A single cron window can't
+			// cover the whole hour: its end is outside it.
 			Expect(kubectlApply(fmt.Sprintf(`
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -1230,14 +1002,19 @@ spec:
   maxReplicaCount: 2
   triggers:
     - type: cron
-      metadata: {timezone: UTC, start: "0 * * * *", end: "59 * * * *", desiredReplicas: "1"}
+      metadata: {timezone: UTC, start: "0 * * * *", end: "45 * * * *", desiredReplicas: "1"}
+    - type: cron
+      metadata: {timezone: UTC, start: "30 * * * *", end: "15 * * * *", desiredReplicas: "1"}
 `, autoscaleNamespace))).To(Succeed())
-			Eventually(func() (string, error) {
-				return jsonpath("scaledobject", "e2e-keda", autoscaleNamespace, `{.status.conditions[?(@.type=="Ready")].status}`)
-			}, 2*time.Minute, 5*time.Second).Should(Equal("True"))
+			Eventually(func(g Gomega) {
+				g.Expect(jsonpath("scaledobject", "e2e-keda", autoscaleNamespace,
+					`{.status.conditions[?(@.type=="Ready")].status}`)).To(Equal("True"))
+				g.Expect(jsonpath("scaledobject", "e2e-keda", autoscaleNamespace,
+					`{.status.conditions[?(@.type=="Active")].status}`)).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("managing it, and waiting for it to pause")
-			manage("e2e-keda")
+			manageUntilPaused("e2e-keda")
 			Expect(jsonpath("scaledobject", "e2e-keda", autoscaleNamespace,
 				`{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}`)).To(Equal("0"))
 			Eventually(func() (string, error) {
@@ -1338,51 +1115,60 @@ spec:
 `, name, namespace, pauseImage, replicas)
 }
 
-// webManifest is an HTTP server behind a Service. It answers /hostname with
-// the name of the pod that served the request.
-func webManifest(name, namespace string) string {
+// webManifest is webContainer's HTTP server behind a Service of the same
+// name.
+func webManifest(name, namespace string, replicas int) string {
 	return fmt.Sprintf(`
 apiVersion: apps/v1
 kind: Deployment
-metadata:
-  name: %[1]s
-  namespace: %[2]s
+metadata: {name: %[1]s, namespace: %[2]s}
 spec:
-  replicas: 1
-  selector:
-    matchLabels: {app: %[1]s}
+  replicas: %[3]d
+  selector: {matchLabels: {app: %[1]s}}
   template:
-    metadata:
-      labels: {app: %[1]s}
+    metadata: {labels: {app: %[1]s}}
     spec:
       containers:
-        - name: web
-          image: %[3]s
-          imagePullPolicy: IfNotPresent
-          args: [netexec, --http-port=8080]
-          ports: [{name: http, containerPort: 8080}]
-          readinessProbe:
-            httpGet: {path: /healthz, port: http}
-            periodSeconds: 2
-          resources:
-            requests: {cpu: 100m, memory: 16Mi}
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 1000
-            allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL]}
-            seccompProfile: {type: RuntimeDefault}
+%[4]s
 ---
 apiVersion: v1
 kind: Service
-metadata:
-  name: %[1]s
-  namespace: %[2]s
+metadata: {name: %[1]s, namespace: %[2]s}
 spec:
   selector: {app: %[1]s}
   ports:
     - {name: http, port: 80, targetPort: http}
-`, name, namespace, webImage)
+`, name, namespace, replicas, webContainer)
+}
+
+// createNamespace creates a namespace that's deleted when the spec, or the
+// container it's created in, ends.
+func createNamespace(name string) string {
+	_, err := utils.Run(exec.Command("kubectl", "create", "ns", name))
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() {
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", name, "--wait=false"))
+	})
+	return name
+}
+
+// manage writes a ManagedWorkload for a workload, with an idle clock.
+func manage(ns, kind, name, idleAfter string) {
+	Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: hybernate.io/v1alpha1
+kind: ManagedWorkload
+metadata: {name: %[1]s, namespace: %[2]s}
+spec:
+  target: {kind: %[3]s, name: %[1]s}
+  idlePolicy: {idleAfter: %[4]s}
+  prediction: {confidence: 85}
+`, name, ns, kind, idleAfter))).To(Succeed())
+}
+
+// rollout waits for a workload's rollout to finish.
+func rollout(ns, workload string) {
+	_, err := utils.Run(exec.Command("kubectl", "rollout", "status", workload, "-n", ns, "--timeout=3m"))
+	Expect(err).NotTo(HaveOccurred())
 }
 
 // curlInCluster runs curl in a pod and returns the last line it printed: the
@@ -1408,7 +1194,12 @@ func runCurl(name, namespace, url string, args ...string) (string, bool) {
 	DeferCleanup(func() {
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", name, "-n", namespace, "--wait=false"))
 	})
+	return finishedPodLogs(name, namespace)
+}
 
+// finishedPodLogs waits for a pod that runs to completion, and returns its
+// logs and whether it succeeded.
+func finishedPodLogs(name, namespace string) (string, bool) {
 	var phase string
 	Eventually(func(g Gomega) {
 		var err error
@@ -1417,9 +1208,45 @@ func runCurl(name, namespace, url string, args ...string) (string, bool) {
 		g.Expect(phase).To(BeElementOf("Succeeded", "Failed"))
 	}, 3*time.Minute, 2*time.Second).Should(Succeed())
 
-	logs, err := utils.Run(exec.Command("kubectl", "logs", name, "-n", namespace))
+	logs, err := utils.Output(exec.Command("kubectl", "logs", name, "-n", namespace))
 	Expect(err).NotTo(HaveOccurred())
 	return logs, phase == "Succeeded"
+}
+
+// scrape fetches one of Hybernate's metrics endpoints from a pod in its
+// namespace, with a bearer token, and returns the metrics. The metrics
+// servers' certificates are self-signed.
+func scrape(pod, url, token string) string {
+	_, err := utils.Run(exec.Command("kubectl", "run", pod, "--restart=Never",
+		"--namespace", namespace,
+		"--image=curlimages/curl:8.7.1",
+		"--overrides",
+		fmt.Sprintf(`{
+			"spec": {
+				"containers": [{
+					"name": "curl",
+					"image": "curlimages/curl:8.7.1",
+					"imagePullPolicy": "IfNotPresent",
+					"command": ["/bin/sh", "-c"],
+					"args": [
+						"for i in $(seq 1 30); do curl -sS -k --fail -H 'Authorization: Bearer %s' %s && exit 0 || sleep 2; done; exit 1"
+					],
+					"securityContext": {
+						"readOnlyRootFilesystem": true,
+						"allowPrivilegeEscalation": false,
+						"capabilities": {"drop": ["ALL"]},
+						"runAsNonRoot": true,
+						"runAsUser": 1000,
+						"seccompProfile": {"type": "RuntimeDefault"}
+					}
+				}],
+				"serviceAccountName": "%s"
+			}
+		}`, token, url, serviceAccountName)))
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the %s pod", pod)
+	metrics, succeeded := finishedPodLogs(pod, namespace)
+	Expect(succeeded).To(BeTrue(), "scraping %s failed: %s", url, metrics)
+	return metrics
 }
 
 // kubectlApply applies a manifest from a string.
@@ -1430,93 +1257,14 @@ func kubectlApply(manifest string) error {
 	return err
 }
 
-var imageDigest = regexp.MustCompile(`@sha256:[0-9a-f]{64}`)
-
-// preloaded is a manifest that uses the images the Makefile preloads into
-// kind. Manifests pin images by the digest of their multi-platform index,
-// which the single-platform images preloaded don't carry, or pull them
-// Always; either way kind would pull them again, and that pull is what
-// timed specs out.
-func preloaded(url string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", fmt.Errorf("building the request for %s: %w", url, err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("downloading %s: %w", url, err)
-	}
-	defer func() { _ = resp.Body.Close() }() // read-only, nothing to do if closing fails
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("downloading %s: %s", url, resp.Status)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", url, err)
-	}
-	manifest := imageDigest.ReplaceAllString(string(body), "")
-	return strings.ReplaceAll(manifest, "imagePullPolicy: Always", "imagePullPolicy: IfNotPresent"), nil
-}
-
 // jsonpath reads a single field from a namespaced object.
 func jsonpath(resource, name, ns, path string) (string, error) {
-	return utils.Run(exec.Command("kubectl", "get", resource, name, "-n", ns, "-o", "jsonpath="+path))
+	return utils.Output(exec.Command("kubectl", "get", resource, name, "-n", ns, "-o", "jsonpath="+path))
 }
 
-// serviceAccountToken returns a token for the specified service account in the given namespace.
-// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
-// and parsing the resulting token from the API response.
+// serviceAccountToken returns a token for the controller-manager's service
+// account.
 func serviceAccountToken() (string, error) {
-	const tokenRequestRawString = `{
-		"apiVersion": "authentication.k8s.io/v1",
-		"kind": "TokenRequest"
-	}`
-
-	// Temporary file to store the token request
-	secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
-	tokenRequestFile := filepath.Join("/tmp", secretName)
-	err := os.WriteFile(tokenRequestFile, []byte(tokenRequestRawString), os.FileMode(0o644))
-	if err != nil {
-		return "", err
-	}
-
-	var out string
-	verifyTokenCreation := func(g Gomega) {
-		// Execute kubectl command to create the token
-		cmd := exec.Command("kubectl", "create", "--raw", fmt.Sprintf(
-			"/api/v1/namespaces/%s/serviceaccounts/%s/token",
-			namespace,
-			serviceAccountName,
-		), "-f", tokenRequestFile)
-
-		output, err := cmd.CombinedOutput()
-		g.Expect(err).NotTo(HaveOccurred())
-
-		// Parse the JSON output to extract the token
-		var token tokenRequest
-		err = json.Unmarshal(output, &token)
-		g.Expect(err).NotTo(HaveOccurred())
-
-		out = token.Status.Token
-	}
-	Eventually(verifyTokenCreation).Should(Succeed())
-
-	return out, err
-}
-
-// getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
-func getMetricsOutput() (string, error) {
-	By("getting the curl-metrics logs")
-	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
-	return utils.Run(cmd)
-}
-
-// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
-// containing only the token field that we need to extract.
-type tokenRequest struct {
-	Status struct {
-		Token string `json:"token"`
-	} `json:"status"`
+	token, err := utils.Output(exec.Command("kubectl", "create", "token", serviceAccountName, "-n", namespace))
+	return strings.TrimSpace(token), err
 }

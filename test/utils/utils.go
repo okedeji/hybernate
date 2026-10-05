@@ -32,8 +32,33 @@ const (
 	defaultKindCluster = "kind"
 )
 
-// Run executes the provided command within this context
+// Run executes the provided command within this context, and returns what
+// it wrote to stdout and stderr together.
 func Run(cmd *exec.Cmd) (string, error) {
+	command := prepare(cmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(output), fmt.Errorf("%q failed with error %q: %w", command, string(output), err)
+	}
+
+	return string(output), nil
+}
+
+// Output runs cmd like Run, but returns only what it wrote to stdout. A
+// value read with kubectl must not pick up the warnings kubectl prints on
+// stderr, such as one about an aggregated API that's briefly unavailable.
+func Output(cmd *exec.Cmd) (string, error) {
+	command := prepare(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return string(output), fmt.Errorf("%q failed with error %q: %w", command, stderr.String(), err)
+	}
+	return string(output), nil
+}
+
+func prepare(cmd *exec.Cmd) string {
 	dir, _ := GetProjectDir()
 	cmd.Dir = dir
 
@@ -44,12 +69,7 @@ func Run(cmd *exec.Cmd) (string, error) {
 	cmd.Env = append(os.Environ(), "GO111MODULE=on")
 	command := strings.Join(cmd.Args, " ")
 	_, _ = fmt.Fprintf(GinkgoWriter, "running: %q\n", command)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(output), fmt.Errorf("%q failed with error %q: %w", command, string(output), err)
-	}
-
-	return string(output), nil
+	return command
 }
 
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster

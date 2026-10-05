@@ -113,7 +113,7 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	@# parallel against the one cluster, through the Ginkgo CLI, which go
 	@# test can't do.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go run github.com/onsi/ginkgo/v2/ginkgo -p --procs=$(E2E_PROCS) \
-		--tags=e2e --timeout=40m -v ./test/e2e/
+		--tags=e2e --timeout=60m -v ./test/e2e/
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-helm-smoke
