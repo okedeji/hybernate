@@ -79,6 +79,7 @@ Requests to the paused workload then fail, as they would without Hybernate. To t
 | A Service without a selector | Not routed, since its endpoints are managed by hand |
 | UDP or SCTP ports | Not routed; only TCP ports are |
 | A Service behind GKE container-native load balancing (`cloud.google.com/neg`) | Not routed. `WakeOnRequest` names it, reason `UnsupportedLoadBalancer` if no Service is routed, and a warning event is emitted. See [Compatibility](../reference/compatibility.md#cloud-load-balancers) |
+| The Deployment or StatefulSet is deleted | Not routed, since there's nothing to wake. `TargetAvailable=False`, reason `TargetNotFound`; requests fail as they would without Hybernate |
 | No doorman pod is Ready | `WakeOnRequest=False`, reason `DoormanUnavailable`. Requests fail until a doorman pod is back |
 | All doorman ports are in use | `WakeOnRequest=False`, reason `NoFreePort`. The doorman has 10,000 ports, one per paused Service port in the cluster |
 

@@ -693,6 +693,25 @@ func TestReconcile_StoppingManagementRemovesDoormanRouting(t *testing.T) {
 	}
 }
 
+// A paused workload whose target is deleted has no pods to wake, so its
+// Services stop sending requests to the doorman to wait for them.
+func TestReconcile_TargetGoneRemovesDoormanRouting(t *testing.T) {
+	r, _ := pausedRouted(t)
+	require.NoError(t, r.Delete(context.Background(), targetDeploymentWithReplicas("api", "default", 0)))
+
+	for range 2 {
+		result, err := r.Reconcile(context.Background(), reconcileFor("api"))
+		require.NoError(t, err)
+		assert.Equal(t, targetRecheckInterval, result.RequeueAfter)
+	}
+
+	got := fetch(t, r, "api")
+	assert.Empty(t, doormanSlices(t, r), "Services still send traffic to the doorman")
+	assert.Empty(t, got.Status.Doorman, "the doorman still serves routes for it")
+	assert.True(t, conditionIs(got, conditionTargetAvailable, metav1.ConditionFalse, "TargetNotFound"))
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionWakeOnRequest))
+}
+
 // Deleting with --cascade=orphan leaves owned objects behind, so the slices
 // are deleted explicitly rather than left to garbage collection.
 func TestReconcile_OrphaningDeleteRemovesDoormanSlices(t *testing.T) {

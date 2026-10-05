@@ -192,7 +192,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 		return ctrl.Result{}, err
 	}
 	if target == nil {
-		return ctrl.Result{RequeueAfter: targetRecheckInterval}, nil
+		return r.reconcileTargetMissing(ctx, &workload)
 	}
 	if target.GetLabels()[v1alpha1.LabelIgnore] == v1alpha1.True {
 		return r.reconcileIgnored(ctx, &workload)
@@ -549,6 +549,23 @@ func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.Ma
 	if released {
 		r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume,
 			"restored to %d replicas: %s has the %s label", pause.PreviousReplicas, ref.Name, v1alpha1.LabelIgnore)
+	}
+	return ctrl.Result{RequeueAfter: targetRecheckInterval}, nil
+}
+
+// reconcileTargetMissing stops routing the workload's Services to the
+// doorman while its target is gone: a request held there waits for pods
+// that nothing will start, where without the doorman it fails at once.
+func (r *Reconciler) reconcileTargetMissing(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
+	routed := len(workload.Status.Doorman) > 0
+	if err := r.removeDoorman(ctx, workload); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing doorman routes: %w", err)
+	}
+	if routed {
+		r.clearCondition(workload, conditionWakeOnRequest, "TargetNotFound")
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return ctrl.Result{}, fmt.Errorf("recording doorman routes removed: %w", err)
+		}
 	}
 	return ctrl.Result{RequeueAfter: targetRecheckInterval}, nil
 }
