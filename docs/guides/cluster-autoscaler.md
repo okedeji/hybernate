@@ -155,6 +155,8 @@ After configuring your autoscaler, verify the end-to-end flow:
       --type merge -p '{"spec":{"desiredState":"Paused"}}'
     ```
 
+    This works on a ManagedWorkload created from the `hybernate.io/managed` label too, which keeps `desiredState`; `kubectl get managedworkloads -n staging` shows its name.
+
 2. **Watch node count:**
 
     ```bash
@@ -163,12 +165,16 @@ After configuring your autoscaler, verify the end-to-end flow:
 
 3. **Confirm a node is removed** after the autoscaler's configured delay.
 
-4. **Resume the workload:**
+4. **Resume the workload, and hand it back to automation:**
 
     ```bash
     kubectl patch managedworkload my-api -n staging \
       --type merge -p '{"spec":{"desiredState":"Running"}}'
+    kubectl patch managedworkload my-api -n staging \
+      --type json -p '[{"op":"remove","path":"/spec/desiredState"}]'
     ```
+
+    Left at `Running`, `desiredState` keeps the workload running for good; see [Pause and Resume](pause.md).
 
 5. **Confirm a node is provisioned** and the workload pods become ready.
 

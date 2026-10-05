@@ -76,9 +76,9 @@ kubectl hybernate enable checkout-api -n preview-42
 kubectl hybernate enable --all -n preview-42     # every workload in the namespace
 ```
 
-`enable` removes the dry-run annotation, or, when the dry-run comes from the namespace, sets the workload's own to `"false"`. Removing the annotation and setting `"false"` mean the same.
+`enable` sets the workload's own `hybernate.io/dry-run` annotation to `"false"`, which wins over its namespace's annotation and the cluster default, wherever the dry-run came from. `enable --all` sets the namespace's annotation to `"false"` instead, and drops the workloads' own.
 
-If Argo CD or Flux applies the workload, `enable` doesn't change the cluster, since the tool would put the annotation back. It names the tool and prints the change to make in Git instead.
+If Argo CD or Flux applies the workload or namespace, `enable` doesn't change the cluster, since the tool would put the annotation back. It names the tool, prints the change to make in Git, and exits non-zero; `--force` changes the cluster anyway.
 
 ## Protected namespaces
 

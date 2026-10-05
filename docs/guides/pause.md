@@ -1,39 +1,22 @@
-<<<<<<< Updated upstream
-# Pause & Destroy Guide
-
-Hybernate provides two lifecycle actions: **pause** (scale to zero) and **destroy** (delete the workload). Both include safety mechanisms for data preservation.
-
-## Pause
-
-Pausing scales the workload to zero replicas. The Deployment or StatefulSet still exists; only the pods are removed.
-
-=======
 # Pause and Resume
 
 Hybernate's one action is to **pause**: scale a workload to zero replicas. The Deployment or StatefulSet stays, and so do its PVCs and their data; only the pods are removed. Hybernate never deletes a workload or its storage.
 
 ## Pause
 
->>>>>>> Stashed changes
 ### What Happens When a Workload Is Paused
 
-1. The current replica count is saved to `status.pause.previousReplicas`
-2. A resource snapshot is captured (CPU, memory, storage per replica) for cost savings calculation
-<<<<<<< Updated upstream
-3. The workload is scaled to 0
-=======
-3. The workload is scaled to 0, recorded under the field manager `hybernate`
->>>>>>> Stashed changes
-4. The phase transitions to `Paused`
-5. `status.pause.pausedAt` is set
+1. What the pause will change is recorded in `status.pause`, in the same status write that moves the phase to `Pausing`, before anything is scaled: the replica count (`previousReplicas`), the KEDA ScaledObject and its own `autoscaling.keda.sh/paused-replicas` value if it has one, what each replica requests (for [cost tracking](../concepts/cost-tracking.md)), and the activity annotations as they stand
+2. A KEDA ScaledObject, if the workload has one, is held at zero with `autoscaling.keda.sh/paused-replicas: "0"`
+3. The workload is scaled to 0 through its scale subresource, under the field manager `hybernate`
+4. `status.pause.pausedAt` is set and the phase moves to `Paused`, with a `Paused` event
+
+Because the record is written first, a pause interrupted at any point, by an operator restart or a conflicting write, is finished or undone from the record, and a resume always goes back to the replica count the workload had.
 
 ### Triggering a Pause
 
-<<<<<<< Updated upstream
-=======
 **Automatically:** once the workload has had no activity for `idlePolicy.idleAfter`; see [Idle Detection](../concepts/idle-detection.md).
 
->>>>>>> Stashed changes
 **Manually:**
 
 ```bash
@@ -41,44 +24,25 @@ kubectl patch managedworkload my-api -n staging \
   --type merge -p '{"spec":{"desiredState":"Paused"}}'
 ```
 
-<<<<<<< Updated upstream
-**Automatically:** When idle detection confirms idle and `idlePolicy.action` is `pause` or `auto`.
+This works on a ManagedWorkload created from the `hybernate.io/managed` label too: the opt-in controller keeps `desiredState`, which no annotation sets. Find a label-created ManagedWorkload's name with `kubectl get managedworkloads -n staging`; it's the workload's name, or `<name>-<kind>` such as `api-statefulset` when that's taken.
 
-### Pause Expiry
+A workload paused with `desiredState` stays paused while it's set: activity, requests and `autoResume` don't wake it, and something else scaling it up is paused again. Set it to `Running` to wake it. Removing it instead hands the workload back to automation still paused, to wake like any paused workload, on a request or activity. Its `ManualOverride` condition says so. If workloads that depend on it are awake, the pause goes ahead anyway, with a `DependentsAwake` warning event.
 
-Configure what happens if a workload stays paused too long:
-
-```yaml title="managedworkload.yaml" linenums="1"
-spec:
-  pause:
-    expireAfter: "24h"
-    expireAction: Resume
-```
-
-| `expireAction` | What happens |
-|---------------|-------------|
-| `resume` | Workload is scaled back to its previous replica count |
-| `destroy` | Workload is deleted (with optional PVC retention) |
-
-If `expireAfter` is not set, the workload stays paused indefinitely.
-
-### Resume
-
-Resuming restores the saved replica count and waits for pods to become ready.
-=======
-A workload paused this way stays paused until `desiredState` is removed or set to `Running`: it doesn't wake on activity or requests.
+In [dry-run](dry-run.md), `desiredState: Paused` doesn't scale anything: the `WouldPause` condition and one `[dry-run]` event say what would have happened.
 
 ## Resume
 
-Resuming restores the saved replica count and waits for the pods to be Ready.
+Resuming wakes the workload's [dependencies](../concepts/dependencies.md), scales it back to `status.pause.previousReplicas` (kept within its HPA's or ScaledObject's range if that changed, and at least 1), and moves it to `Running` once all those replicas are Ready. A KEDA ScaledObject is held at the restored count until then, and afterwards gets back the `paused-replicas` value it had before the pause, or none.
 
 **Automatically:**
 
 - A request to the workload's Service, through [wake on request](../concepts/wake-on-request.md)
-- A `hybernate.io/last-activity` annotation newer than the pause, or a future `hybernate.io/active-until`, on the ManagedWorkload or its target, such as from [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md)
-- With `autoResume: true`, ahead of demand a confident forecast expects
-- Something else scaling it up, such as `kubectl scale`; see [Argo CD and Flux](gitops.md) for when that's a GitOps tool
->>>>>>> Stashed changes
+- A change to `hybernate.io/last-activity`, `hybernate.io/last-request` or `hybernate.io/active-until` on the ManagedWorkload or its target since the pause began, whatever time the new value states, or an `active-until` still in the future; [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md#wake-a-workload) sets one
+- With `autoResume: true`, 15 minutes ahead of the hour a confident forecast expects demand in
+- Something else scaling it up, such as `kubectl scale`: it's counted as activity and the workload goes straight to `Running`; see [Argo CD and Flux](gitops.md) for when that's a GitOps tool
+- Turning on [dry-run](dry-run.md), which never leaves a workload paused (`DryRunWake` event)
+
+A paused workload is looked at again at least every 5 minutes, 15 minutes before each hour and on the hour, as well as whenever it or its target changes.
 
 **Manually:**
 
@@ -87,85 +51,30 @@ kubectl patch managedworkload my-api -n staging \
   --type merge -p '{"spec":{"desiredState":"Running"}}'
 ```
 
-<<<<<<< Updated upstream
-**Automatically:**
-
-- When `expireAfter` elapses with `expireAction: Resume`
-- When a `hybernate.io/last-activity` annotation newer than the pause, or a future `hybernate.io/active-until`, is set on the ManagedWorkload or its target
-- When `autoResume: true` is set and a confident forecast expects demand
-
-## Destroy
-
-Destroying deletes the target Deployment or StatefulSet. The ManagedWorkload CR remains to track PVC retention and cost savings.
-
-### What Happens When a Workload Is Destroyed
-
-1. A resource snapshot is captured for cost savings calculation
-2. The target Deployment/StatefulSet is deleted
-3. The phase transitions to `Destroyed`
-4. `status.destroy.destroyedAt` is set
-5. If PVC retention is configured, `status.destroy.pvcRetentionExpiresAt` is set
-
-### Triggering a Destroy
-
-**Manually:**
+The workload then stays running: automation doesn't pause it until `desiredState` is removed:
 
 ```bash
 kubectl patch managedworkload my-api -n staging \
-  --type merge -p '{"spec":{"desiredState":"Destroyed"}}'
+  --type json -p '[{"op":"remove","path":"/spec/desiredState"}]'
 ```
 
-**Automatically:**
+To wake a workload once and leave automation in charge, use `kubectl hybernate wake my-api -n staging` instead.
 
-- When `idlePolicy.action` is `destroy` and idle is confirmed
-- When pause expires with `expireAction: Destroy`
+## When Hybernate Lets Go
 
-### PVC Retention
+Hybernate hands a paused workload back, scaled to the replicas it had and released from KEDA without waiting for it to be Ready, and stops routing its Services to the doorman, whenever it stops managing it:
 
-By default, PVCs are not cleaned up when a workload is destroyed. They persist independently. Configure retention to clean them up on a schedule:
+- The ManagedWorkload is deleted, or the `hybernate.io/managed` label that created it is removed
+- The workload is labelled `hybernate.io/ignore: "true"`
+- Its namespace becomes [protected](opt-in.md#protected-namespaces)
 
-```yaml title="managedworkload.yaml" linenums="1"
-spec:
-  destroy:
-    pvcRetention: "168h"       # Keep PVCs for 7 days after destroy
-    pvcRetentionWarning: "24h" # Emit warning event 24h before cleanup
-```
+Each of these emits a `Resumed` event saying why. No longer managing a workload never leaves it switched off.
 
-**Timeline:**
+If the target itself is deleted while paused, its Services stop routing to the doorman, since nothing would start the pods a held request waits for; `TargetAvailable` turns `False` with reason `TargetNotFound`.
 
-```
-Destroyed ────────────────────────► PVC Warning ──► PVC Cleanup
-    t=0                              t=144h          t=168h
-```
-
-The operator matches PVCs using the workload's pod template selector labels.
-
-!!! warning
-    Once PVCs are deleted, the data is gone. Set `pvcRetentionWarning` to give users time to recover data before cleanup.
-
-To cancel a scheduled PVC cleanup, remove `pvcRetention` from the spec. The operator detects the change and clears the expiry timer, preserving PVCs indefinitely.
-
-### PVC Retention Without Destroy
-
-PVC retention only applies when a workload is destroyed. Paused workloads keep their PVCs unconditionally (only pods are removed, the workload object and PVCs remain).
-
-## Cost Savings During Pause and Destroy
-
-Cost tracking is always enabled. During pause and destroy:
-
-- **While paused:** CPU and memory savings accrue every reconcile. Storage savings are zero (PVCs persist).
-- **While destroyed:** CPU and memory savings accrue. Storage savings begin accruing after PVC retention expires and PVCs are cleaned up.
-
-## Finalizer
-
-The `hybernate.io/cleanup` finalizer is automatically added to every ManagedWorkload. It ensures that:
-
-- If a ManagedWorkload CR is deleted while PVC retention is pending, the operator runs PVC cleanup before allowing the deletion to complete
-- Paused workloads are resumed before the ManagedWorkload CR is removed (if applicable)
-=======
 ## Cost Savings While Paused
 
-Cost tracking is always enabled. While a workload is paused, what its CPU and memory would have cost accrues as savings; its PVCs still cost, since they stay.
+Cost tracking is always on. While a workload is paused, what its paused replicas requested in CPU and memory accrues as savings; its PVCs still cost, since they stay. See [Cost Tracking](../concepts/cost-tracking.md).
 
 ## Workloads Nobody Comes Back To
 
@@ -173,5 +82,4 @@ A paused workload costs only its storage. To remove one for good, delete it the 
 
 ## Finalizer
 
-The `hybernate.io/cleanup` finalizer is added to every ManagedWorkload, so that deleting one while its workload is paused scales the workload back to the replicas it had first. No longer managing a workload never leaves it switched off.
->>>>>>> Stashed changes
+The `hybernate.io/cleanup` finalizer is added to every ManagedWorkload, so that deleting one while its workload is paused scales the workload back to the replicas it had first.
