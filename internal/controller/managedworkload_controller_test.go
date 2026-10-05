@@ -79,9 +79,9 @@ func (s *stubPauser) Resume(_ context.Context, _ *v1alpha1.ManagedWorkload) (boo
 	return s.resumeDone, s.resumeErr
 }
 
-func (s *stubPauser) Restore(_ context.Context, _ *v1alpha1.ManagedWorkload) error {
+func (s *stubPauser) Restore(_ context.Context, w *v1alpha1.ManagedWorkload) (int32, error) {
 	s.restoreCalls++
-	return nil
+	return w.Status.Pause.PreviousReplicas, nil
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -1104,6 +1104,8 @@ func TestLifecycle_InterruptedTransitionsComplete(t *testing.T) {
 			dryRun: true, desired: desiredState(v1alpha1.DesiredStatePaused), wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
 		{name: "paused, desired running", phase: v1alpha1.PhasePaused, pause: recorded(),
 			desired: desiredState(v1alpha1.DesiredStateRunning), wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
+		{name: "paused, record from an earlier version missing, desired running", phase: v1alpha1.PhasePaused,
+			desired: desiredState(v1alpha1.DesiredStateRunning), wantPhase: v1alpha1.PhaseRunning, wantReplicas: 1},
 		{name: "resuming", phase: v1alpha1.PhaseResuming, pause: recorded(), wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
 		{name: "resumed, but Running wasn't recorded", phase: v1alpha1.PhaseResuming, replicas: 3,
 			wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},

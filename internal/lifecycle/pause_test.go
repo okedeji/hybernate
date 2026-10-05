@@ -238,27 +238,32 @@ func TestPause_RetryKeepsTheRecordedReplicas(t *testing.T) {
 	assert.Equal(t, int32(3), workload.Status.Pause.PreviousReplicas)
 }
 
-// Restore hands the workload back without waiting for it, and never scales
-// down what someone else has already scaled up.
+// Restore hands the workload back without waiting for it, never scales
+// down what someone else has already scaled up, and never starts one that
+// was at zero before its pause.
 func TestRestore(t *testing.T) {
 	tests := []struct {
-		name    string
-		current int32
-		want    int32
+		name     string
+		previous int32
+		current  int32
+		want     int32
 	}{
-		{name: "still at zero", current: 0, want: 3},
-		{name: "already scaled up by someone", current: 5, want: 5},
+		{name: "still at zero", previous: 3, current: 0, want: 3},
+		{name: "already scaled up by someone", previous: 3, current: 5, want: 5},
+		{name: "at zero before the pause", previous: 0, current: 0, want: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := kedaClient(t, readyDeployment(tt.current), scaledObjectFor(1))
 			scaler := &fakeScaler{replicas: tt.current}
 			workload := apiWorkload()
-			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3, ScaledObject: "api-scaler"}
+			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: tt.previous, ScaledObject: "api-scaler"}
 			require.NoError(t, autoscaler.HoldKEDA(context.Background(), c, "default", "api-scaler", 0))
 
-			require.NoError(t, newTestPauser(c, scaler).Restore(context.Background(), workload))
+			replicas, err := newTestPauser(c, scaler).Restore(context.Background(), workload)
 
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, replicas, "says what it left the target at")
 			assert.Equal(t, tt.want, scaler.replicas)
 			_, held := pausedAnnotation(t, c)
 			assert.False(t, held, "KEDA scales it again")
@@ -272,7 +277,9 @@ func TestRestore_TargetGoneStillReleasesKEDA(t *testing.T) {
 	workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3, ScaledObject: "api-scaler"}
 	require.NoError(t, autoscaler.HoldKEDA(context.Background(), c, "default", "api-scaler", 0))
 
-	require.NoError(t, newTestPauser(c, &fakeScaler{}).Restore(context.Background(), workload))
+	replicas, err := newTestPauser(c, &fakeScaler{}).Restore(context.Background(), workload)
+	require.NoError(t, err)
+	assert.Zero(t, replicas)
 
 	_, held := pausedAnnotation(t, c)
 	assert.False(t, held)

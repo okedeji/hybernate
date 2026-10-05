@@ -145,9 +145,9 @@ func TestPauseAndResume_KEDA(t *testing.T) {
 	}
 }
 
-// What a workload resumes to stays within its autoscaler's range, and is
-// at least one: a ScaledObject that may go to zero would otherwise leave a
-// woken workload at zero until a trigger fired.
+// What a workload resumes to stays within its autoscaler's range. One that
+// was at zero before its pause, such as one KEDA had scaled to zero, goes
+// back to zero, and KEDA's triggers start it as they would have.
 func TestResume_WithinTheAutoscalersRange(t *testing.T) {
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
@@ -162,7 +162,9 @@ func TestResume_WithinTheAutoscalersRange(t *testing.T) {
 	}{
 		{name: "below an HPA's minimum", objs: []client.Object{hpa}, previous: 2, want: 4},
 		{name: "above its maximum", objs: []client.Object{hpa}, previous: 12, want: 8},
-		{name: "KEDA down to zero", objs: []client.Object{scaledObjectFor(0)}, previous: 0, want: 1},
+		{name: "KEDA that may go to zero", objs: []client.Object{scaledObjectFor(0)}, previous: 1, want: 1},
+		{name: "at zero before the pause", objs: []client.Object{scaledObjectFor(0)}, previous: 0, want: 0},
+		{name: "at zero before the pause, below an HPA's minimum", objs: []client.Object{hpa}, previous: 0, want: 0},
 		{name: "no autoscaler", previous: 5, want: 5},
 	}
 	for _, tt := range tests {
@@ -172,9 +174,10 @@ func TestResume_WithinTheAutoscalersRange(t *testing.T) {
 			workload := apiWorkload()
 			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: tt.previous}
 
-			_, err := newTestPauser(c, scaler).Resume(context.Background(), workload)
+			done, err := newTestPauser(c, scaler).Resume(context.Background(), workload)
 
 			require.NoError(t, err)
+			assert.True(t, done)
 			assert.Equal(t, tt.want, scaler.replicas)
 		})
 	}

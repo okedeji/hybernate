@@ -118,7 +118,7 @@ type lifecyclePauser interface {
 	Prepare(ctx context.Context, workload *v1alpha1.ManagedWorkload) error
 	Pause(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error)
 	Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error)
-	Restore(ctx context.Context, workload *v1alpha1.ManagedWorkload) error
+	Restore(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error)
 }
 
 // +kubebuilder:rbac:groups=hybernate.io,resources=managedworkloads,verbs=get;list;watch;create;update;patch;delete
@@ -226,6 +226,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	}
 	if result != nil {
 		return *result, nil
+	}
+
+	if atZero, err := r.scaledToZero(ctx, &workload, target); err != nil {
+		return ctrl.Result{}, err
+	} else if atZero {
+		return r.reconcileScaledToZero(ctx, &workload, observed)
 	}
 
 	// --- Manual lifecycle ---
@@ -350,6 +356,12 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 		if err := r.preparePause(ctx, workload, target); err != nil {
 			return nil, err
 		}
+		// The cache showed replicas the target no longer has: it was scaled
+		// to zero outside Hybernate, which the next reconcile sees.
+		if workload.Status.Pause.PreviousReplicas == 0 {
+			workload.Status.Pause = nil
+			return &ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		if _, err := r.transition(ctx, workload, v1alpha1.PhasePausing, "PauseRequested"); err != nil {
 			return nil, err
 		}
@@ -420,6 +432,10 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 			if err := r.pauser.Prepare(ctx, workload); err != nil {
 				return nil, fmt.Errorf("recording what to restore: %w", err)
 			}
+			// A pause without its record was written by hand or by an older
+			// version. Hybernate scaled it to zero, so zero isn't what it
+			// had, and one is the least that runs it.
+			workload.Status.Pause.PreviousReplicas = max(workload.Status.Pause.PreviousReplicas, 1)
 		}
 		// Learning never holds up a wake.
 		if err := r.learnFromWake(ctx, workload); err != nil {
@@ -486,8 +502,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 		return nil
 	}
 
-	pause := workload.Status.Pause
-	released, err := r.releaseTarget(ctx, workload)
+	released, replicas, err := r.releaseTarget(ctx, workload)
 	if err != nil {
 		return err
 	}
@@ -497,8 +512,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 		return fmt.Errorf("removing finalizer: %w", err)
 	}
 	if released {
-		r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume,
-			"restored to %d replicas: no longer managed", pause.PreviousReplicas)
+		r.announceHandBack(workload, replicas, "no longer managed")
 	}
 	r.activityMemo.forget(workload.UID)
 	r.doormanFailures.reset(workload.UID)
@@ -512,22 +526,35 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 // one being paused or resumed, is handed back as it was, scaled back up and
 // released from KEDA without waiting for it to be Ready, and the dependencies
 // it needs are woken. Its Services stop routing to the doorman. It reports
-// whether there was a pause to undo. The record is cleared by the caller's
-// transition to Running, which settles the paused time's cost from it first.
-func (r *Reconciler) releaseTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error) {
+// whether there was a pause to undo, and the replicas the target is left
+// with. The record is cleared by the caller's transition to Running, which
+// settles the paused time's cost from it first.
+func (r *Reconciler) releaseTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, int32, error) {
 	paused := workload.Status.Pause != nil
+	var replicas int32
 	if paused {
-		if err := r.pauser.Restore(ctx, workload); err != nil {
-			return false, fmt.Errorf("restoring the paused target: %w", err)
+		var err error
+		if replicas, err = r.pauser.Restore(ctx, workload); err != nil {
+			return false, 0, fmt.Errorf("restoring the paused target: %w", err)
 		}
 		if err := r.wakeDependencies(ctx, workload); err != nil {
-			return false, err
+			return false, 0, err
 		}
 	}
 	if err := r.removeDoorman(ctx, workload); err != nil {
-		return false, fmt.Errorf("removing doorman routes: %w", err)
+		return false, 0, fmt.Errorf("removing doorman routes: %w", err)
 	}
-	return paused, nil
+	return paused, replicas, nil
+}
+
+// announceHandBack says what handing a paused target back did, and why. A
+// target that was at zero before its pause, or is gone, isn't scaled up.
+func (r *Reconciler) announceHandBack(workload *v1alpha1.ManagedWorkload, replicas int32, why string) {
+	if replicas == 0 {
+		r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume, "released at zero replicas: %s", why)
+		return
+	}
+	r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume, "restored to %d replicas: %s", replicas, why)
 }
 
 // reconcileIgnored stops managing a target labelled hybernate.io/ignore,
@@ -538,9 +565,8 @@ func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.Ma
 	r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetIgnored",
 		fmt.Sprintf("%s %s has %s label", ref.Kind, ref.Name, v1alpha1.LabelIgnore))
 
-	pause := workload.Status.Pause
 	routed := len(workload.Status.Doorman) > 0
-	released, err := r.releaseTarget(ctx, workload)
+	released, replicas, err := r.releaseTarget(ctx, workload)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -555,8 +581,7 @@ func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.Ma
 		}
 	}
 	if released {
-		r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume,
-			"restored to %d replicas: %s has the %s label", pause.PreviousReplicas, ref.Name, v1alpha1.LabelIgnore)
+		r.announceHandBack(workload, replicas, fmt.Sprintf("%s has the %s label", ref.Name, v1alpha1.LabelIgnore))
 	}
 	return ctrl.Result{RequeueAfter: targetRecheckInterval}, nil
 }

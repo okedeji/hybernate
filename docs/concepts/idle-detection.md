@@ -53,7 +53,7 @@ From a terminal, [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md
 
 ## The decision
 
-Each check runs in this order:
+A workload at zero replicas that Hybernate didn't pause isn't checked at all: it's already off, and [left that way](../guides/pause.md#workloads-already-at-zero). For any other, each check runs in this order:
 
 1. `desiredState` is set: the workload is under manual control, and automation does nothing. Without an `idlePolicy`, automation doesn't pause it either.
 2. CPU, or a configured Prometheus query, can't be read: stay awake (see [below](#when-a-source-cant-be-read)).

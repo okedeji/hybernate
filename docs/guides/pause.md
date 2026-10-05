@@ -32,7 +32,7 @@ In [dry-run](dry-run.md), `desiredState: Paused` doesn't scale anything: the `Wo
 
 ## Resume
 
-Resuming wakes the workload's [dependencies](../concepts/dependencies.md), scales it back to `status.pause.previousReplicas` (kept within its HPA's or ScaledObject's range if that changed, and at least 1), and moves it to `Running` once all those replicas are Ready. A KEDA ScaledObject is held at the restored count until then, and afterwards gets back the `paused-replicas` value it had before the pause, or none.
+Resuming wakes the workload's [dependencies](../concepts/dependencies.md), scales it back to `status.pause.previousReplicas` (kept within its HPA's or ScaledObject's range if that changed), and moves it to `Running` once all those replicas are Ready. A KEDA ScaledObject is held at the restored count until then, and afterwards gets back the `paused-replicas` value it had before the pause, or none.
 
 **Automatically:**
 
@@ -68,9 +68,21 @@ Hybernate hands a paused workload back, scaled to the replicas it had and releas
 - The workload is labelled `hybernate.io/ignore: "true"`
 - Its namespace becomes [protected](opt-in.md#protected-namespaces)
 
-Each of these emits a `Resumed` event saying why. No longer managing a workload never leaves it switched off.
+Each of these emits a `Resumed` event saying why and how many replicas it has. No longer managing a workload never leaves it switched off.
 
 If the target itself is deleted while paused, its Services stop routing to the doorman, since nothing would start the pods a held request waits for; `TargetAvailable` turns `False` with reason `TargetNotFound`.
+
+## Workloads Already at Zero
+
+A workload scaled to zero outside Hybernate, by `kubectl scale`, a pipeline, or KEDA with no active trigger, is off on purpose, and Hybernate leaves it that way:
+
+- It isn't paused, whatever its idle clock or `desiredState: Paused` says: there's nothing running to pause, and a pause would record zero replicas to restore
+- It isn't woken: Hybernate only wakes what it paused, so neither a request, an activity annotation, `autoResume` nor `desiredState: Running` scales it up
+- Its Services aren't routed to the doorman, so a request to it fails as it would without Hybernate, rather than being held for pods that nothing will start
+
+The ManagedWorkload stays `Running`, with the `ScaledToZero` condition and one `ScaledToZero` event saying so. Once its replicas are set above zero, by whoever scaled it down, Hybernate manages it again, and counts that as activity, so its idle clock starts afresh.
+
+Hybernate never scales up a workload it didn't scale down. Handing back a pause recorded at zero replicas, Hybernate releases it at zero, with a `Resumed` event that says so.
 
 ## Cost Savings While Paused
 

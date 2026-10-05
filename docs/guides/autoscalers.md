@@ -26,7 +26,7 @@ The annotation isn't in your manifests, so Argo CD and Flux leave it alone.
 
 ### KEDA or Hybernate?
 
-KEDA already scales a workload to zero when its triggers say there's no work, such as an empty queue. Hybernate adds what KEDA doesn't do: waking on the first HTTP request, holding dependencies awake, the forecast, and pausing by activity it can see without a trigger. A workload KEDA already takes to zero gains little; a KEDA workload with a `minReplicaCount` above zero, such as one that should stay warm during working hours, is where pausing it saves.
+KEDA already scales a workload to zero when its triggers say there's no work, such as an empty queue. Hybernate leaves a workload KEDA has taken to zero to KEDA: it doesn't pause it, which would stop KEDA's triggers from starting it, and doesn't route its Services to the doorman; see [Workloads Already at Zero](pause.md#workloads-already-at-zero). Hybernate adds what KEDA doesn't do: waking on the first HTTP request, holding dependencies awake, the forecast, and pausing by activity it can see without a trigger. A workload KEDA already takes to zero gains little; a KEDA workload with a `minReplicaCount` above zero, such as one that should stay warm during working hours, is where pausing it saves.
 
 ## Permissions
 

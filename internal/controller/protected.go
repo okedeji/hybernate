@@ -61,9 +61,8 @@ func (r *Reconciler) reconcileProtected(ctx context.Context, workload *v1alpha1.
 		fmt.Sprintf("namespace %s is protected, so Hybernate doesn't pause workloads in it; label it %s=%s to allow it",
 			workload.Namespace, v1alpha1.LabelAllowProtected, v1alpha1.True))
 
-	pause := workload.Status.Pause
 	routed := len(workload.Status.Doorman) > 0
-	released, err := r.releaseTarget(ctx, workload)
+	released, replicas, err := r.releaseTarget(ctx, workload)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -82,8 +81,7 @@ func (r *Reconciler) reconcileProtected(ctx context.Context, workload *v1alpha1.
 			"namespace %s is protected, so Hybernate doesn't pause workloads in it", workload.Namespace)
 	}
 	if released {
-		r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume,
-			"restored to %d replicas: namespace %s is protected", pause.PreviousReplicas, workload.Namespace)
+		r.announceHandBack(workload, replicas, fmt.Sprintf("namespace %s is protected", workload.Namespace))
 	}
 	return ctrl.Result{RequeueAfter: protectedRecheckInterval}, nil
 }

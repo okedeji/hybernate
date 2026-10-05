@@ -25,6 +25,7 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -65,7 +66,7 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 	}
 
 	// Someone else woke it, so it's only released, never scaled.
-	if err := r.pauser.Restore(ctx, workload); err != nil {
+	if _, err := r.pauser.Restore(ctx, workload); err != nil {
 		return fmt.Errorf("releasing a workload scaled up outside Hybernate: %w", err)
 	}
 
@@ -100,6 +101,73 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 		r.emitEvent(workload, false, "Warning", ReasonGitOpsConflict, actionCheckReplicas, "%s", conflict)
 	}
 	return nil
+}
+
+const (
+	conditionScaledToZero = "ScaledToZero"
+
+	ReasonScaledToZero = "ScaledToZero"
+)
+
+// scaledToZero reports whether a target Hybernate hasn't paused is at zero
+// replicas: scaled there by a person, a pipeline, or KEDA scaling it to
+// zero itself. Hybernate leaves such a target off. Pausing it would record
+// zero replicas to restore, and waking it, on a request through the doorman
+// or as Hybernate let go of it, would start a workload someone meant to be
+// off. So it isn't paused, woken, or routed to the doorman, and a request
+// to its Services fails as it would without Hybernate, until its replicas
+// are set above zero again. One that leaves zero is counted as active, so
+// it isn't paused the moment it's back.
+func (r *Reconciler) scaledToZero(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (bool, error) {
+	switch workload.Status.Phase {
+	case v1alpha1.PhaseRunning, v1alpha1.PhaseIdle:
+	default:
+		return false, nil
+	}
+	atZero := replicasFromTarget(target) == 0
+	if atZero {
+		// Just after Hybernate hands a target back, the cache can still hold
+		// it at zero.
+		replicas, err := r.liveReplicas(ctx, target)
+		if err != nil {
+			return false, err
+		}
+		atZero = replicas == 0
+	}
+	if !atZero && meta.IsStatusConditionTrue(workload.Status.Conditions, conditionScaledToZero) {
+		r.setCondition(workload, conditionScaledToZero, metav1.ConditionFalse, "HasReplicas", "")
+		r.resetActivity(workload, v1alpha1.ActivitySourceScaledUp)
+	}
+	return atZero, nil
+}
+
+// reconcileScaledToZero leaves a target scaled to zero outside Hybernate
+// where it is, and says so. Its cost goes on being counted: its claims
+// still cost while it has no replicas.
+func (r *Reconciler) reconcileScaledToZero(ctx context.Context, workload *v1alpha1.ManagedWorkload,
+	observed *v1alpha1.ManagedWorkloadStatus) (ctrl.Result, error) {
+	began := !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionScaledToZero)
+	r.setCondition(workload, conditionScaledToZero, metav1.ConditionTrue, "ScaledToZero",
+		"scaled to zero outside Hybernate, so Hybernate leaves it off: it doesn't pause it, wake it, or route "+
+			"requests for it until its replicas are set above zero")
+	r.clearIdleVeto(workload)
+	r.trackDryRun(workload)
+	if workload.Status.Phase == v1alpha1.PhaseIdle {
+		r.endWouldBePause(workload)
+		if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ScaledToZero"); err != nil {
+			return ctrl.Result{}, err
+		}
+	} else {
+		r.accumulateCost(ctx, workload)
+		if err := r.persistStatus(ctx, workload, observed); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if began {
+		r.emitEvent(workload, false, "Normal", ReasonScaledToZero, actionCheckReplicas,
+			"scaled to zero outside Hybernate; left off, and not paused or woken until it has replicas again")
+	}
+	return ctrl.Result{RequeueAfter: targetRecheckInterval}, nil
 }
 
 // liveReplicas reads the target's replicas from the API server: the scale

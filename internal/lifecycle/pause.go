@@ -121,7 +121,7 @@ func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload)
 		return false, fmt.Errorf("getting target workload: %w", err)
 	}
 
-	replicas, err := p.resumeReplicas(ctx, workload)
+	replicas, _, err := p.resumeReplicas(ctx, workload)
 	if err != nil {
 		return false, err
 	}
@@ -156,43 +156,45 @@ func (p *Pauser) Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload)
 // Restore hands a paused workload back without waiting for it: scaled back
 // to its recorded replicas if it's still at zero, and its ScaledObject
 // released. It's for when Hybernate stops managing the workload, or someone
-// else has already woken it, so it never scales down what's running. A
-// target that's gone has nothing to scale. The pause record is left for the
-// caller to clear once it has persisted the outcome.
-func (p *Pauser) Restore(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
+// else has already woken it, so it never scales down what's running. It
+// returns the replicas the target is left with: zero when it's gone, or was
+// at zero before the pause. The pause record is left for the caller to
+// clear once it has persisted the outcome.
+func (p *Pauser) Restore(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error) {
 	if workload.Status.Pause == nil {
-		return nil
+		return 0, nil
 	}
+	var replicas int32
 	target, err := getTarget(ctx, p.client, workload)
 	switch {
 	case apierrors.IsNotFound(err):
 	case err != nil:
-		return fmt.Errorf("getting target workload: %w", err)
+		return 0, fmt.Errorf("getting target workload: %w", err)
 	default:
-		if err := p.scaleUpFromZero(ctx, workload, target); err != nil {
-			return err
+		if replicas, err = p.scaleUpFromZero(ctx, workload, target); err != nil {
+			return 0, err
 		}
 	}
-	return p.releaseKEDA(ctx, workload)
+	return replicas, p.releaseKEDA(ctx, workload)
 }
 
-func (p *Pauser) scaleUpFromZero(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) error {
+func (p *Pauser) scaleUpFromZero(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (int32, error) {
 	scale, err := p.scaler.GetScale(ctx, target)
 	if err != nil {
-		return fmt.Errorf("getting current replicas: %w", err)
+		return 0, fmt.Errorf("getting current replicas: %w", err)
 	}
 	if scale.Spec.Replicas > 0 {
-		return nil
+		return scale.Spec.Replicas, nil
 	}
-	replicas, err := p.resumeReplicas(ctx, workload)
-	if err != nil {
-		return err
+	replicas, _, err := p.resumeReplicas(ctx, workload)
+	if err != nil || replicas == 0 {
+		return 0, err
 	}
 	scale.Spec.Replicas = replicas
 	if err := p.scaler.UpdateScale(ctx, target, scale); err != nil {
-		return fmt.Errorf("updating scale to %d: %w", replicas, err)
+		return 0, fmt.Errorf("updating scale to %d: %w", replicas, err)
 	}
-	return nil
+	return replicas, nil
 }
 
 func (p *Pauser) releaseKEDA(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
@@ -203,18 +205,25 @@ func (p *Pauser) releaseKEDA(ctx context.Context, workload *v1alpha1.ManagedWork
 	return autoscaler.ReleaseKEDA(ctx, p.client, workload.Namespace, pause.ScaledObject, pause.ScaledObjectPausedReplicas)
 }
 
-// resumeReplicas is what a paused workload is scaled back to: what it ran
-// before, kept within its autoscaler's range should that have changed, and
-// at least one, so it's running.
-func (p *Pauser) resumeReplicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error) {
-	replicas := workload.Status.Pause.PreviousReplicas
+// resumeReplicas is what a paused workload is scaled back to, with the
+// autoscaler found for it, if any: what it ran before, kept within that
+// autoscaler's range should it have changed, and at least one. A workload
+// that was at zero before its pause goes back to zero: whoever scaled it
+// there meant it to stay off, and Hybernate never starts what it didn't
+// stop.
+func (p *Pauser) resumeReplicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (
+	int32, autoscaler.Autoscaler, error) {
 	a, found, err := p.autoscalers.FindNow(ctx, workload.Namespace, workload.Spec.Target.Kind,
 		workload.Spec.Target.Name)
 	if err != nil {
-		return 0, fmt.Errorf("finding the workload's autoscaler: %w", err)
+		return 0, autoscaler.Autoscaler{}, fmt.Errorf("finding the workload's autoscaler: %w", err)
+	}
+	replicas := workload.Status.Pause.PreviousReplicas
+	if replicas == 0 {
+		return 0, a, nil
 	}
 	if found {
 		replicas = a.Clamp(replicas)
 	}
-	return max(replicas, 1), nil
+	return max(replicas, 1), a, nil
 }
