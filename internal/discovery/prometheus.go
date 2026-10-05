@@ -145,12 +145,18 @@ func NewHTTPClient(o HTTPOptions) (*http.Client, error) {
 
 // NewPrometheusURL reads from a Prometheus API at baseURL, such as Thanos,
 // Mimir, or a managed Prometheus, sending header with every request. A path
-// prefix in the URL is kept.
+// prefix in the URL is kept, and credentials in it
+// are sent as basic auth, unless header has an Authorization.
+//
+// Credentials and query parameters, which can hold a token, are left out
+// of Source and of errors, since both end up in reports that are shared.
 func NewPrometheusURL(baseURL string, httpClient *http.Client, header http.Header) (*Prometheus, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil || base.Scheme == "" || base.Host == "" {
-		return nil, fmt.Errorf("prometheus URL %q isn't an absolute URL", baseURL)
+		return nil, errors.New("the Prometheus URL isn't an absolute URL, such as https://prometheus.example.com")
 	}
+	user := base.User
+	base.User = nil
 	get := func(ctx context.Context, path string, params url.Values) ([]byte, error) {
 		u := base.JoinPath(path)
 		u.RawQuery = params.Encode()
@@ -159,7 +165,14 @@ func NewPrometheusURL(baseURL string, httpClient *http.Client, header http.Heade
 			return nil, fmt.Errorf("building request: %w", err)
 		}
 		maps.Copy(req.Header, header)
+		if user != nil && req.Header.Get("Authorization") == "" {
+			password, _ := user.Password()
+			req.SetBasicAuth(user.Username(), password)
+		}
 		resp, err := httpClient.Do(req)
+		if urlErr, ok := errors.AsType[*url.Error](err); ok {
+			err = urlErr.Err
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -175,7 +188,7 @@ func NewPrometheusURL(baseURL string, httpClient *http.Client, header http.Heade
 	}
 	source := *base
 	source.RawQuery, source.Fragment = "", ""
-	return &Prometheus{Source: source.Redacted(), get: get}, nil
+	return &Prometheus{Source: source.String(), get: get}, nil
 }
 
 // NewPrometheusProxy reads from a Prometheus Service in the cluster through

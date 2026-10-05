@@ -393,6 +393,40 @@ func TestPrometheusURL_SendsHeaders(t *testing.T) {
 	assert.NotContains(t, p.Source, "hidden", "a query string can hold a token")
 }
 
+// A token in the URL's user info is sent as basic auth, as before, but
+// never shown: Source and errors end up in reports that are passed around.
+func TestPrometheusURL_HidesCredentials(t *testing.T) {
+	var user, password string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, password, _ = r.BasicAuth()
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+	withToken := strings.Replace(server.URL, "://", "://glc_s3cret@", 1)
+	p, err := NewPrometheusURL(withToken+"?token=hidden", server.Client(), nil)
+	require.NoError(t, err)
+
+	err = p.Check(context.Background())
+
+	require.Error(t, err)
+	assert.Equal(t, "glc_s3cret", user)
+	assert.Empty(t, password)
+	assert.NotContains(t, p.Source, "s3cret")
+	assert.NotContains(t, err.Error(), "s3cret")
+
+	server.Close()
+	err = p.Check(context.Background())
+
+	require.Error(t, err, "a server that's gone fails the request itself")
+	assert.NotContains(t, err.Error(), "s3cret")
+	assert.NotContains(t, err.Error(), "hidden")
+
+	_, err = NewPrometheusURL("glc_s3cret@prometheus:9090", http.DefaultClient, nil)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "s3cret")
+}
+
 // An error page says why, cut short; a response too large to hold is
 // refused rather than read.
 func TestPrometheusURL_ErrorBodiesAndLimits(t *testing.T) {
