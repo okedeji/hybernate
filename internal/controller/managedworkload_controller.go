@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -781,6 +782,41 @@ func (r *Reconciler) findRelatedWorkloads(ctx context.Context, obj client.Object
 	return requests
 }
 
+// findRoutedNeighbours enqueues the paused workloads in a namespace whose
+// Services the doorman routes, when another workload there changes phase.
+// One that wakes may share a Service with them, which its pods now serve,
+// so they stop routing it at once rather than at their next recheck.
+func (r *Reconciler) findRoutedNeighbours(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list v1alpha1.ManagedWorkloadList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "listing workloads sharing a namespace",
+			"workload", obj.GetName(), "namespace", obj.GetNamespace())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range list.Items {
+		w := &list.Items[i]
+		if w.UID != obj.GetUID() && w.Status.Phase == v1alpha1.PhasePaused && len(w.Status.Doorman) > 0 {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(w)})
+		}
+	}
+	return requests
+}
+
+// phaseChanged passes a ManagedWorkload's updates that change its phase.
+func phaseChanged() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			old, okOld := e.ObjectOld.(*v1alpha1.ManagedWorkload)
+			cur, okNew := e.ObjectNew.(*v1alpha1.ManagedWorkload)
+			return okOld && okNew && old.Status.Phase != cur.Status.Phase
+		},
+	}
+}
+
 // targetRefFor identifies a watched object as a ManagedWorkload target.
 // Typed objects from the cache carry no GVK, so the kind comes from the Go
 // type rather than obj.GetObjectKind().
@@ -907,6 +943,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ManagedWorkload{}).
 		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findRelatedWorkloads)).
+		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findRoutedNeighbours),
+			builder.WithPredicates(phaseChanged())).
 		Watches(&appsv1.Deployment{}, targetHandler).
 		Watches(&appsv1.StatefulSet{}, targetHandler).
 		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForDoorman),
