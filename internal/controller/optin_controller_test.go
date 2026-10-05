@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -222,13 +223,31 @@ func TestOptIn_NameTakenByAnotherWorkloadsManagedWorkload(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev"},
 		Spec:       v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "legacy"}},
 	}
-	r, recorder := optInReconciler(t, optInNamespace(nil, nil), optInDeployment("api", managedLabel, nil), other)
+	r, _ := optInReconciler(t, optInNamespace(nil, nil), optInDeployment("api", managedLabel, nil), other)
 
 	reconcileOptIn(t, r, "api")
 
 	mw, _ := managedWorkload(t, r, "api")
 	assert.Equal(t, "legacy", mw.Spec.Target.Name, "someone else's ManagedWorkload is never overwritten")
-	assert.Len(t, recorded(recorder, "already exists for another workload"), 1)
+	ours, ok := managedWorkload(t, r, "api-deployment")
+	require.True(t, ok, "the workload's own is named after its kind too")
+	assert.Equal(t, "api", ours.Spec.Target.Name)
+}
+
+func TestOptIn_BothNamesTaken(t *testing.T) {
+	taken := func(name, target string) *v1alpha1.ManagedWorkload {
+		return &v1alpha1.ManagedWorkload{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "dev"},
+			Spec: v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: target}}}
+	}
+	r, recorder := optInReconciler(t, optInNamespace(nil, nil), optInDeployment("api", managedLabel, nil),
+		taken("api", "legacy"), taken("api-deployment", "older"))
+
+	reconcileOptIn(t, r, "api")
+
+	var list v1alpha1.ManagedWorkloadList
+	require.NoError(t, r.List(context.Background(), &list))
+	assert.Len(t, list.Items, 2)
+	assert.Len(t, recorded(recorder, "already exist for other workloads"), 1)
 }
 
 // A protected namespace's workloads aren't opted in, whatever their
@@ -245,4 +264,136 @@ func TestOptIn_ProtectedNamespace(t *testing.T) {
 	_, ok := managedWorkload(t, r, "api")
 	assert.False(t, ok)
 	assert.Len(t, recorded(recorder, ReasonProtected), 1)
+}
+
+func statefulSetReconciler(deployments *OptInReconciler) *OptInReconciler {
+	return &OptInReconciler{Client: deployments.Client, Scheme: deployments.Scheme,
+		Recorder: events.NewFakeRecorder(20), Kind: v1alpha1.TargetKindStatefulSet, Defaults: DefaultOptInDefaults}
+}
+
+// A Deployment and a StatefulSet can share a name. Each gets its own
+// ManagedWorkload, whichever is opted in first, and neither is ever
+// retargeted at the other.
+func TestOptIn_DeploymentAndStatefulSetWithTheSameName(t *testing.T) {
+	deploymentRef := v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}
+	statefulSetRef := v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindStatefulSet, Name: "api"}
+	tests := []struct {
+		name       string
+		first      v1alpha1.TargetKind
+		pauseFirst bool
+		wantByName map[string]v1alpha1.WorkloadRef
+	}{
+		{name: "deployment first", first: v1alpha1.TargetKindDeployment,
+			wantByName: map[string]v1alpha1.WorkloadRef{"api": deploymentRef, "api-statefulset": statefulSetRef}},
+		{name: "statefulset first", first: v1alpha1.TargetKindStatefulSet,
+			wantByName: map[string]v1alpha1.WorkloadRef{"api": statefulSetRef, "api-deployment": deploymentRef}},
+		{name: "deployment first and paused", first: v1alpha1.TargetKindDeployment, pauseFirst: true,
+			wantByName: map[string]v1alpha1.WorkloadRef{"api": deploymentRef, "api-statefulset": statefulSetRef}},
+		{name: "statefulset first and paused", first: v1alpha1.TargetKindStatefulSet, pauseFirst: true,
+			wantByName: map[string]v1alpha1.WorkloadRef{"api": statefulSetRef, "api-deployment": deploymentRef}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev", UID: "uid-sts-api"}}
+			deployments, _ := optInReconciler(t, optInNamespace(managedLabel, nil), optInDeployment("api", nil, nil), sts)
+			statefulSets := statefulSetReconciler(deployments)
+			first, second := deployments, statefulSets
+			if tt.first == v1alpha1.TargetKindStatefulSet {
+				first, second = statefulSets, deployments
+			}
+
+			reconcileOptIn(t, first, "api")
+			if tt.pauseFirst {
+				mw, _ := managedWorkload(t, first, "api")
+				mw.Status.Phase = v1alpha1.PhasePaused
+				mw.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3}
+				require.NoError(t, first.Update(context.Background(), mw))
+			}
+			for range 3 {
+				reconcileOptIn(t, second, "api")
+				reconcileOptIn(t, first, "api")
+			}
+
+			var list v1alpha1.ManagedWorkloadList
+			require.NoError(t, deployments.List(context.Background(), &list, client.InNamespace("dev")))
+			got := map[string]v1alpha1.WorkloadRef{}
+			for _, mw := range list.Items {
+				got[mw.Name] = mw.Spec.Target
+				assert.Len(t, mw.OwnerReferences, 1, "%s is owned by its own workload only", mw.Name)
+			}
+			assert.Equal(t, tt.wantByName, got)
+			if tt.pauseFirst {
+				mw, _ := managedWorkload(t, first, "api")
+				assert.Equal(t, v1alpha1.PhasePaused, mw.Status.Phase)
+				require.NotNil(t, mw.Status.Pause)
+				assert.Equal(t, int32(3), mw.Status.Pause.PreviousReplicas, "the paused workload keeps its replicas")
+			}
+		})
+	}
+}
+
+// Rerunning either reconciler once both exist writes nothing.
+func TestOptIn_SameNameIsStable(t *testing.T) {
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev", UID: "uid-sts-api"}}
+	deployments, _ := optInReconciler(t, optInNamespace(managedLabel, nil), optInDeployment("api", nil, nil), sts)
+	statefulSets := statefulSetReconciler(deployments)
+	reconcileOptIn(t, deployments, "api")
+	reconcileOptIn(t, statefulSets, "api")
+	before, _ := managedWorkload(t, deployments, "api")
+	beforeSTS, _ := managedWorkload(t, deployments, "api-statefulset")
+
+	reconcileOptIn(t, deployments, "api")
+	reconcileOptIn(t, statefulSets, "api")
+
+	after, _ := managedWorkload(t, deployments, "api")
+	afterSTS, _ := managedWorkload(t, deployments, "api-statefulset")
+	assert.Equal(t, before.ResourceVersion, after.ResourceVersion)
+	assert.Equal(t, beforeSTS.ResourceVersion, afterSTS.ResourceVersion)
+}
+
+func TestKindQualifiedName(t *testing.T) {
+	assert.Equal(t, "api-statefulset", kindQualifiedName("api", v1alpha1.TargetKindStatefulSet))
+
+	long := strings.Repeat("a", 240) + ".b"
+	other := strings.Repeat("a", 240) + ".c"
+	got := kindQualifiedName(long, v1alpha1.TargetKindDeployment)
+	assert.Len(t, got, 253)
+	assert.True(t, strings.HasSuffix(got, "-deployment"))
+	assert.NotEqual(t, got, kindQualifiedName(other, v1alpha1.TargetKindDeployment), "long names sharing a prefix differ")
+	assert.Empty(t, validation.IsDNS1123Subdomain(got))
+
+	dotted := strings.Repeat("a", 231) + "." + strings.Repeat("b", 20)
+	assert.Empty(t, validation.IsDNS1123Subdomain(kindQualifiedName(dotted, v1alpha1.TargetKindStatefulSet)),
+		"a cut that ends on a dot is still a valid name")
+}
+
+// Opting in again while the old ManagedWorkload is still restoring the
+// workload waits for it to go, rather than making a second one.
+func TestOptIn_WaitsForTheOldManagedWorkloadToGo(t *testing.T) {
+	leaving := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "dev", Finalizers: []string{finalizerName},
+			Labels: map[string]string{v1alpha1.LabelFromLabel: "true"}},
+		Spec: v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}},
+	}
+	r, _ := optInReconciler(t, optInNamespace(nil, nil), optInDeployment("api", managedLabel, nil), leaving)
+	require.NoError(t, r.Delete(context.Background(), leaving))
+
+	reconcileOptIn(t, r, "api")
+
+	var list v1alpha1.ManagedWorkloadList
+	require.NoError(t, r.List(context.Background(), &list))
+	assert.Len(t, list.Items, 1)
+}
+
+// A bad value on the namespace is pointed out on the workload it applies
+// to, saying where it is.
+func TestOptIn_InvalidNamespaceSettingIsReported(t *testing.T) {
+	r, recorder := optInReconciler(t, optInNamespace(managedLabel, map[string]string{v1alpha1.AnnotationIdleAfter: "soon"}),
+		optInDeployment("api", nil, nil))
+
+	reconcileOptIn(t, r, "api")
+
+	warnings := recorded(recorder, ReasonInvalidSetting)
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], `hybernate.io/idle-after="soon" on the namespace`)
 }
