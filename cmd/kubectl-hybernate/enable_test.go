@@ -258,6 +258,27 @@ Not changed, because their manifests come from Git; change them there:
 `, out.String())
 }
 
+// When every workload in dry-run is there by its own annotation, the
+// namespace isn't touched: each workload's annotation is set to "false".
+func TestEnable_NamespaceOnlyOwnAnnotations(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		enableNamespaceObj(optedIn, nil),
+		enableDeployment("web", nil, measuring(nil)),
+		enableDeployment("api", nil, measuring(nil)),
+	).Build()
+	var out bytes.Buffer
+
+	require.NoError(t, enableNamespace(context.Background(), c, "dev", enableOptions{all: true}, &out))
+
+	_, set := namespaceDryRun(t, c)
+	assert.False(t, set)
+	for _, name := range []string{"web", "api"} {
+		value, _ := dryRunOf(t, c, name)
+		assert.Equal(t, "false", value, name)
+	}
+	assert.Equal(t, "2 workloads in dev: dry-run ended, Hybernate will pause them while idle\n", out.String())
+}
+
 // With the cluster's default dry-run on, the namespace has no annotation
 // to remove; enable sets it to "false".
 func TestEnable_NamespaceWithClusterDefault(t *testing.T) {

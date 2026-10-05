@@ -354,7 +354,7 @@ deployment/checkout-api: dry-run ended, Hybernate will pause it while idle
 
 For a workload opted in with the `hybernate.io/managed` label, it sets the workload's own `hybernate.io/dry-run` annotation to `"false"`, which wins over its namespace's annotation and the cluster's default. It reads the workload's ManagedWorkload to tell whether it's in dry-run, so a dry-run from the cluster default counts too. For a ManagedWorkload you wrote, it sets `spec.dryRun: false`. It doesn't wait: Hybernate pauses the workload once its clock runs out.
 
-`--all` sets the namespace's annotation to `"false"` instead, drops the workloads' own annotations, and sets `spec.dryRun: false` on ManagedWorkloads written by hand in the namespace.
+`--all` ends dry-run for every workload in the namespace. When the namespace's own `hybernate.io/dry-run` annotation, or the cluster default, keeps any of them in dry-run, it sets the namespace's annotation to `"false"` and drops the workloads' own annotations, so the namespace decides for all of them. When each is in dry-run by its own annotation, it leaves the namespace alone and sets each workload's annotation to `"false"`. Either way, it sets `spec.dryRun: false` on ManagedWorkloads written by hand in the namespace. When Git owns the namespace, its annotation is left for you to change there, which also ends dry-run for the workloads that take it, and workloads with their own annotation get `"false"`.
 
 When Argo CD or Flux applies the workload, its namespace, or the ManagedWorkload, `enable` changes nothing there, because the tool would put the old value straight back. It names the tool, prints the change to make in Git, and exits non-zero:
 

@@ -59,8 +59,11 @@ workload's hybernate.io/dry-run annotation to "false", which wins over its
 namespace's annotation and the cluster's default. For a ManagedWorkload
 written by hand, it sets spec.dryRun to false.
 
-With --all, it sets the namespace's annotation to "false" instead, and drops
-the workloads' own.
+With --all, it ends dry-run for every workload in the namespace. When the
+namespace's annotation or the cluster's default keeps any of them in
+dry-run, it sets the namespace's annotation to "false" and drops the
+workloads' own; otherwise it sets each workload's annotation to "false".
+ManagedWorkloads written by hand get spec.dryRun false.
 
 Anything whose manifest comes from Argo CD or Flux isn't changed: its
 annotations live in Git, where the tool would put the old value back. Enable
