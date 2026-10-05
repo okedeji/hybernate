@@ -548,6 +548,31 @@ func TestStatus_JSON(t *testing.T) {
 	assert.InDelta(t, 42.45, got.SavedThisMonth, 0.001)
 }
 
+// inZone runs the rest of a test with the machine's time zone set to an
+// hour east of UTC, as the API client reads times into the local zone.
+func inZone(t *testing.T) {
+	t.Helper()
+	local := time.Local
+	time.Local = time.FixedZone("CET", 3600)
+	t.Cleanup(func() { time.Local = local })
+}
+
+// JSON and YAML give times in UTC, as scan does, whatever the machine's
+// zone, so output from different machines compares.
+func TestStatus_TimesInUTC(t *testing.T) {
+	inZone(t)
+	result, err := clusterStatus(context.Background(), newStatusClient(t, interceptor.Funcs{}, statusCluster()...),
+		"preview-42", statusOpts())
+	require.NoError(t, err)
+	var out bytes.Buffer
+
+	require.NoError(t, writeStatus(&out, result, "json", statusNow))
+
+	require.NotEmpty(t, result.Recent)
+	assert.Contains(t, out.String(), `Z"`)
+	assert.NotContains(t, out.String(), "+01:00")
+}
+
 // A workload opted in with its label may have a ManagedWorkload named
 // otherwise; status names it by the workload itself everywhere.
 func TestStatus_NamedByTarget(t *testing.T) {

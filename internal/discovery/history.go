@@ -41,7 +41,7 @@ const maxPointsPerSeries = 10000
 type HistorySource struct {
 	// Prometheus is the Prometheus the CPU history was read from.
 	Prometheus string    `json:"prometheus"`
-	Since      time.Time `json:"since"`
+	Since      time.Time `json:"since,omitzero"`
 	// Hours is how much history the replay covered, which is less than the
 	// window asked for when Prometheus keeps less.
 	Hours float64 `json:"hours"`

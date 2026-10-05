@@ -118,7 +118,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, pricing n
 		scan.problem(readingHistory, err)
 	}
 	if first, ok := earliestSample(history); ok {
-		scan.historySince = time.Unix(first, 0)
+		scan.historySince = time.Unix(first, 0).UTC()
 	}
 
 	now := opts.Now()
@@ -144,7 +144,7 @@ func (s *Scanner) scanNamespace(ctx context.Context, namespace string, pricing n
 		w.ReplicasFromGit = string(writer.Tool)
 		rollouts := owners.rollouts[obj.GetUID()]
 		if len(rollouts) > 0 {
-			last := slices.MaxFunc(rollouts, func(a, b time.Time) int { return a.Compare(b) })
+			last := slices.MaxFunc(rollouts, func(a, b time.Time) int { return a.Compare(b) }).UTC()
 			w.LastDeployed = &last
 		}
 		spec := wl.template.Spec

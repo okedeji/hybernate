@@ -164,7 +164,7 @@ type Workload struct {
 
 // Measured is what Hybernate would have done to a workload in dry-run.
 type Measured struct {
-	Since  time.Time `json:"since"`
+	Since  time.Time `json:"since,omitzero"`
 	Pauses int       `json:"pauses"`
 	// Wakes is how many of those pauses activity would have ended, which
 	// is all of them but one still under way.
@@ -396,7 +396,7 @@ func measured(mw *v1alpha1.ManagedWorkload, hourlyCost float64, now time.Time) *
 	// more than what it cost meanwhile.
 	slept = min(slept, measuring)
 	m := &Measured{
-		Since:      d.Since.Time,
+		Since:      d.Since.UTC(),
 		Pauses:     int(d.Pauses),
 		Wakes:      max(wakes, 0),
 		SleptHours: slept.Hours(),

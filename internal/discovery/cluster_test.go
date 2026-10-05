@@ -18,6 +18,7 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -462,6 +463,38 @@ func TestScanCluster_SavingsBySource(t *testing.T) {
 	assert.InDelta(t, 12.40, report.Totals.SavedThisMonth, 0.001)
 	assert.Equal(t, 1, report.Totals.DryRun)
 	assert.InDelta(t, got["dry"].Measured.MonthlyFreed, report.Totals.Measured.MonthlyFreed, 0.001)
+}
+
+// A report's times are in UTC whatever the machine's zone, which the API
+// client reads times into, so reports from different machines compare.
+func TestScanCluster_TimesInUTC(t *testing.T) {
+	local := time.Local
+	time.Local = time.FixedZone("CET", 3600)
+	t.Cleanup(func() { time.Local = local })
+	dry := managedFor("dry", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
+		DryRun: &v1alpha1.DryRunStatus{Since: metav1.NewTime(scanTime.Add(-73 * time.Hour))}})
+	dry.Spec.DryRun = true
+	objs := deploymentWithRollout("dry", testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, dry, makePodMetrics("dry", testNamespace, "1m", "10Mi"))
+
+	got := byName(scanWorkloads(t, objs...))["dry"]
+
+	require.NotNil(t, got.LastDeployed)
+	assert.Equal(t, time.UTC, got.LastDeployed.Location())
+	require.NotNil(t, got.Measured)
+	assert.Equal(t, time.UTC, got.Measured.Since.Location())
+}
+
+// A time a report doesn't have, such as when dry-run measuring began in
+// totals, which sum many, is left out rather than given as year 1.
+func TestClusterReport_LeavesOutTimesItDoesntHave(t *testing.T) {
+	report := ClusterReport{Workloads: []Workload{}, History: &HistorySource{Prometheus: "monitoring/prometheus"}}
+
+	out, err := json.Marshal(report)
+
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "0001-01-01")
+	assert.NotContains(t, string(out), `"since"`)
 }
 
 func TestCPUReason(t *testing.T) {

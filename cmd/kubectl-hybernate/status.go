@@ -388,10 +388,12 @@ func workloadStatus(w *v1alpha1.ManagedWorkload, targetActiveUntil, now time.Tim
 		namedApart:     w.Name != w.Spec.Target.Name && w.Labels[v1alpha1.LabelFromLabel] != v1alpha1.True,
 	}
 	if t := w.Status.LastTransitionTime; t != nil {
-		row.Since = &t.Time
+		since := t.UTC()
+		row.Since = &since
 	}
 	if a := w.Status.Activity; a != nil && !a.LastActivityTime.IsZero() {
-		row.LastActivity = &a.LastActivityTime.Time
+		last := a.LastActivityTime.UTC()
+		row.LastActivity = &last
 		row.ActivitySource = string(a.LastActivitySource)
 	}
 	return row
@@ -531,7 +533,7 @@ func recentHappenings(events []corev1.Event, targets map[client.ObjectKey]string
 		case wakeCauses[ev.Reason]:
 			caused[key] = true
 		}
-		at := eventTime(ev)
+		at := eventTime(ev).UTC()
 		if at.Before(since) {
 			continue
 		}
