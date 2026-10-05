@@ -122,6 +122,10 @@ func (g *dependencyGraph) dependents(workload *v1alpha1.ManagedWorkload) []*v1al
 	return out
 }
 
+func declaredRefs(w *v1alpha1.ManagedWorkload) []v1alpha1.DependencyRef {
+	return w.Spec.DependsOn
+}
+
 // reaches reports whether following the edges from w leads to the workload
 // to.
 func (g *dependencyGraph) reaches(w *v1alpha1.ManagedWorkload, to workloadID,
@@ -148,10 +152,27 @@ func (g *dependencyGraph) reaches(w *v1alpha1.ManagedWorkload, to workloadID,
 	return false
 }
 
-// inCycle reports whether following dependsOn from workload leads back to it.
-// In a cycle, each workload holds the other awake, so neither could pause.
+// inCycle reports whether following dependsOn from workload leads back to
+// it. In a cycle, each workload holds the other awake, so neither could
+// pause. Learned dependencies don't count: see holds.
 func (g *dependencyGraph) inCycle(workload *v1alpha1.ManagedWorkload) bool {
-	return g.reaches(workload, targetID(workload), dependencyRefs)
+	return g.reaches(workload, targetID(workload), declaredRefs)
+}
+
+// holds reports whether dependent, while awake, keeps workload from
+// pausing. Declaring it in dependsOn always does. Having only learned it
+// doesn't when workload in turn depends on dependent, directly or through
+// others: two services that call each other would otherwise learn a cycle
+// and keep each other awake forever. Each pauses when idle instead, and
+// waking either wakes the other.
+func (g *dependencyGraph) holds(dependent, workload *v1alpha1.ManagedWorkload) bool {
+	id := targetID(workload)
+	if slices.ContainsFunc(dependent.Spec.DependsOn, func(ref v1alpha1.DependencyRef) bool {
+		return dependencyID(dependent, ref) == id
+	}) {
+		return true
+	}
+	return !g.reaches(workload, targetID(dependent), dependencyRefs)
 }
 
 // isAwake reports whether a workload is, or is about to be, running. Pausing
@@ -188,7 +209,7 @@ func (r *Reconciler) dependencyHold(ctx context.Context, workload *v1alpha1.Mana
 
 	var holders []string
 	for _, d := range g.dependents(workload) {
-		if isAwake(d.Status.Phase) {
+		if isAwake(d.Status.Phase) && g.holds(d, workload) {
 			holders = append(holders, d.Namespace+"/"+d.Name)
 		}
 	}

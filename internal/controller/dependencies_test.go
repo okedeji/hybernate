@@ -199,6 +199,53 @@ func TestDependencies_CycleBlocksBothWithCondition(t *testing.T) {
 	assert.True(t, meta.IsStatusConditionTrue(a.Status.Conditions, conditionDependencyCycle))
 }
 
+func learned(w *v1alpha1.ManagedWorkload, kind v1alpha1.TargetKind, name string) {
+	w.Status.LearnedDependencies = &v1alpha1.LearnedDependencies{Dependencies: []v1alpha1.LearnedDependency{
+		{Namespace: w.Namespace, Kind: kind, Name: name, Source: v1alpha1.LearnedFromWake}}}
+}
+
+// Two services that call each other learn that each depends on the other.
+// That mustn't keep both awake forever, as a declared cycle would.
+func TestDependencies_LearnedCycleDoesNotHold(t *testing.T) {
+	tests := []struct {
+		name        string
+		bDeclaresA  bool
+		wantAPauses bool
+		wantBPauses bool
+	}{
+		{name: "learned both ways", wantAPauses: true, wantBPauses: true},
+		{name: "declared one way, learned the other", bDeclaresA: true, wantAPauses: false, wantBPauses: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := depWorkload("default", "a", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
+			learned(a, v1alpha1.TargetKindDeployment, "b")
+			b := depWorkload("default", "b", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
+			if tt.bDeclaresA {
+				b.Spec.DependsOn = []v1alpha1.DependencyRef{{Kind: v1alpha1.TargetKindDeployment, Name: "a"}}
+			} else {
+				learned(b, v1alpha1.TargetKindDeployment, "a")
+			}
+
+			for _, c := range []struct {
+				w     *v1alpha1.ManagedWorkload
+				pause bool
+			}{{a, tt.wantAPauses}, {b, tt.wantBPauses}} {
+				pauser := &stubPauser{pauseDone: true}
+				r := depReconciler(t, pauser, a.DeepCopy(), b.DeepCopy())
+				w := fetch(t, r, c.w.Name)
+
+				_, err := r.reconcileAutomation(context.Background(), w, clockTarget("app:v1", nil))
+				require.NoError(t, err)
+
+				assert.Equal(t, c.pause, pauser.pauseCalls == 1, "%s pauses", w.Name)
+				assert.False(t, meta.IsStatusConditionTrue(w.Status.Conditions, conditionDependencyCycle),
+					"a learned link never makes a cycle")
+			}
+		})
+	}
+}
+
 func TestDependencies_WakingWakesDependencies(t *testing.T) {
 	pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
 	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhasePaused, postgresRef())
