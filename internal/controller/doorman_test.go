@@ -708,7 +708,7 @@ func TestReconcile_TargetGoneRemovesDoormanRouting(t *testing.T) {
 	got := fetch(t, r, "api")
 	assert.Empty(t, doormanSlices(t, r), "Services still send traffic to the doorman")
 	assert.Empty(t, got.Status.Doorman, "the doorman still serves routes for it")
-	assert.True(t, conditionIs(got, conditionTargetAvailable, metav1.ConditionFalse, "TargetNotFound"))
+	assert.True(t, conditionFalseWith(got, conditionTargetAvailable, "TargetNotFound"))
 	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionWakeOnRequest))
 }
 
@@ -795,7 +795,7 @@ func TestReconcile_RoutingFailureWhileWakingIsAnnouncedOnce(t *testing.T) {
 	assert.Equal(t, 1, warnings)
 	got := fetch(t, r, "api")
 	assert.Equal(t, v1alpha1.PhaseResuming, got.Status.Phase)
-	assert.True(t, conditionIs(got, conditionWakeOnRequest, metav1.ConditionFalse, reasonRoutingFailed), "and recorded")
+	assert.True(t, conditionFalseWith(got, conditionWakeOnRequest, reasonRoutingFailed), "and recorded")
 }
 
 func TestRouteDoorman_ReportsFailuresAndBacksOff(t *testing.T) {

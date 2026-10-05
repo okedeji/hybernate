@@ -107,7 +107,7 @@ func doormanEligible(workload *v1alpha1.ManagedWorkload) bool {
 // on the WakeOnRequest condition and retried, and never stops the reconcile.
 // It returns how soon to retry, or zero.
 func (r *Reconciler) routeDoorman(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) time.Duration {
-	failing := conditionIs(workload, conditionWakeOnRequest, metav1.ConditionFalse, reasonRoutingFailed)
+	failing := conditionFalseWith(workload, conditionWakeOnRequest, reasonRoutingFailed)
 	err := r.reconcileDoorman(ctx, workload, target)
 	if err == nil {
 		r.doormanFailures.reset(workload.UID)

@@ -387,7 +387,7 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 	r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionTrue, "MetricsReported", "")
 
 	if obs.prometheusErr != nil {
-		return r.reportPrometheusUnavailable(ctx, workload, obs.prometheusErr)
+		return r.reportPrometheusUnavailable(ctx, workload, obs.prometheusErr), nil
 	}
 	if hasPrometheusActivity(workload) {
 		r.setCondition(workload, conditionPrometheusAvailable, metav1.ConditionTrue, "QueriesEvaluated", "")
@@ -550,7 +550,7 @@ func (r *Reconciler) wokenByActivity(ctx context.Context, workload *v1alpha1.Man
 
 // reportPrometheusUnavailable surfaces a Prometheus activity source that can't
 // be evaluated. The clock can't see that activity, so it doesn't act.
-func (r *Reconciler) reportPrometheusUnavailable(ctx context.Context, workload *v1alpha1.ManagedWorkload, err error) (*ctrl.Result, error) {
+func (r *Reconciler) reportPrometheusUnavailable(ctx context.Context, workload *v1alpha1.ManagedWorkload, err error) *ctrl.Result {
 	reason := "QueryFailed"
 	msg := fmt.Sprintf("a Prometheus activity query failed, so idle detection is paused: %v", err)
 	if errors.Is(err, signal.ErrEndpointNotConfigured) {
@@ -565,5 +565,5 @@ func (r *Reconciler) reportPrometheusUnavailable(ctx context.Context, workload *
 	}
 	log.FromContext(ctx).V(1).Info("Prometheus activity unavailable",
 		"workload", workload.Name, "namespace", workload.Namespace, "reason", reason, "error", err.Error())
-	return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+	return &ctrl.Result{RequeueAfter: activityCheckInterval}
 }

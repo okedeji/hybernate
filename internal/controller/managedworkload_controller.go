@@ -534,7 +534,7 @@ func (r *Reconciler) releaseTarget(ctx context.Context, workload *v1alpha1.Manag
 // restoring it first if it's paused, so the label never leaves it off.
 func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
 	ref := workload.Spec.Target
-	reported := conditionIs(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetIgnored")
+	reported := conditionFalseWith(workload, conditionTargetAvailable, "TargetIgnored")
 	r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetIgnored",
 		fmt.Sprintf("%s %s has %s label", ref.Kind, ref.Name, v1alpha1.LabelIgnore))
 
@@ -613,7 +613,7 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 
 	err := r.Get(ctx, nn, obj)
 	if apierrors.IsNotFound(err) {
-		if conditionIs(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetNotFound") {
+		if conditionFalseWith(workload, conditionTargetAvailable, "TargetNotFound") {
 			return nil, nil
 		}
 		r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetNotFound",
@@ -632,9 +632,11 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 	return obj, nil
 }
 
-func conditionIs(workload *v1alpha1.ManagedWorkload, condType string, status metav1.ConditionStatus, reason string) bool {
+// conditionFalseWith reports whether a problem has already been reported,
+// as the condition False for that reason.
+func conditionFalseWith(workload *v1alpha1.ManagedWorkload, condType, reason string) bool {
 	c := meta.FindStatusCondition(workload.Status.Conditions, condType)
-	return c != nil && c.Status == status && c.Reason == reason
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reason
 }
 
 func replicasFromTarget(obj client.Object) int32 {
