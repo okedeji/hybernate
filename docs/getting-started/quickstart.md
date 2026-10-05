@@ -56,7 +56,7 @@ kubectl get managedworkload my-api -n dev -o jsonpath='{.status.activity}'
 kubectl describe managedworkload my-api -n dev
 ```
 
-Each would-be pause is added up in `status.dryRun`: how many times it would have paused, how long it would have slept, and what that would have freed. Send it a request, or mark it active, to end one:
+Each would-be pause is added up in `status.dryRun`: how many times it would have paused, how long it would have slept, and what that would have freed. Mark it active to end one, as a developer portal or your own tooling would:
 
 ```bash
 kubectl annotate deployment my-api -n dev --overwrite hybernate.io/last-activity=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -64,6 +64,8 @@ kubectl get managedworkload my-api -n dev -o jsonpath='{.status.dryRun}'
 ```
 
 `kubectl hybernate scan -n dev` shows the same summary.
+
+Requests to a running workload don't count as activity by themselves: Hybernate sees its CPU, deploys and activity annotations, and requests only through a [Prometheus query](../guides/prometheus-signals.md) you give it, or once it's paused, through the doorman. An nginx serving the odd request uses almost no CPU, so it would pause.
 
 ## 5. Let it pause
 
@@ -73,7 +75,7 @@ When you're happy with what you see:
 kubectl hybernate enable my-api -n dev
 ```
 
-This removes the dry-run annotation. Once the workload has had no activity for `idle-after`, Hybernate scales it to zero, remembering it had 2 replicas:
+This sets the workload's `hybernate.io/dry-run` annotation to `"false"`. Once the workload has had no activity for `idle-after`, Hybernate scales it to zero, remembering it had 2 replicas:
 
 ```bash
 kubectl get deployment my-api -n dev
