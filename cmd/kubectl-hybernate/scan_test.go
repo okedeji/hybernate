@@ -135,7 +135,8 @@ func TestCents(t *testing.T) {
 }
 
 func TestDollars(t *testing.T) {
-	tests := map[float64]string{0: "$0", 12.4: "$12", 999.5: "$1,000", 1240.4: "$1,240", 1234567.8: "$1,234,568"}
+	tests := map[float64]string{0: "$0", 12.4: "$12", 999.5: "$1,000", 1240.4: "$1,240", 1234567.8: "$1,234,568",
+		-123: "-$123", -1234.4: "-$1,234", -999999.6: "-$1,000,000", -0.2: "$0"}
 	for in, want := range tests {
 		assert.Equal(t, want, dollars(in))
 	}

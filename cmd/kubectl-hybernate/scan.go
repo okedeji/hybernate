@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -901,12 +902,19 @@ func cents(amount float64) string {
 	return fmt.Sprintf("$%.2f", amount)
 }
 
-// dollars formats whole dollars with thousands separators.
+// dollars formats whole dollars with thousands separators, a negative
+// amount with its sign before the dollar sign.
 func dollars(amount float64) string {
-	n := int64(amount + 0.5)
-	s := fmt.Sprintf("%d", n)
+	sign := ""
+	if amount < 0 {
+		sign, amount = "-", -amount
+	}
+	s := strconv.FormatInt(int64(math.Round(amount)), 10)
 	for i := len(s) - 3; i > 0; i -= 3 {
 		s = s[:i] + "," + s[i:]
 	}
-	return "$" + s
+	if s == "0" {
+		sign = ""
+	}
+	return sign + "$" + s
 }

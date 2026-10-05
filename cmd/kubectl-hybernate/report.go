@@ -491,11 +491,27 @@ func shellHTML(command string) template.HTML {
 	return template.HTML(b.String()) //nolint:gosec // every part is escaped above
 }
 
-// roundedDuration is d without Duration's zero units: "1h", "90m", "2h30m".
+// roundedDuration writes d to the second without zero units: "1h", "90m"
+// as "1h30m", "10s", "2h0m5s" as "2h5s".
 func roundedDuration(d time.Duration) string {
-	s := strings.TrimSuffix(d.String(), "0s")
-	if strings.HasSuffix(s, "h0m") {
-		s = strings.TrimSuffix(s, "0m")
+	d = d.Round(time.Second)
+	if d == 0 {
+		return "0s"
 	}
-	return s
+	sign := ""
+	if d < 0 {
+		sign, d = "-", -d
+	}
+	var b strings.Builder
+	b.WriteString(sign)
+	for _, unit := range []struct {
+		size time.Duration
+		name string
+	}{{time.Hour, "h"}, {time.Minute, "m"}, {time.Second, "s"}} {
+		if n := d / unit.size; n > 0 {
+			fmt.Fprintf(&b, "%d%s", n, unit.name)
+			d -= n * unit.size
+		}
+	}
+	return b.String()
 }

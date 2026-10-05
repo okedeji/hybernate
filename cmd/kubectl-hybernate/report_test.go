@@ -323,3 +323,23 @@ func TestWriteHTML_SleptThisMonth(t *testing.T) {
 	assert.Contains(t, got, `61h<span class="sub">3 wakes<br>since Oct 1</span>`)
 	assert.Contains(t, got, "<dt>Slept</dt>")
 }
+
+func TestRoundedDuration(t *testing.T) {
+	tests := map[time.Duration]string{
+		0:                                     "0s",
+		10 * time.Second:                      "10s",
+		30 * time.Second:                      "30s",
+		time.Minute + 10*time.Second:          "1m10s",
+		time.Hour:                             "1h",
+		90 * time.Minute:                      "1h30m",
+		2*time.Hour + 5*time.Second:           "2h5s",
+		20 * time.Minute:                      "20m",
+		48 * time.Hour:                        "48h",
+		1500 * time.Millisecond:               "2s",
+		-time.Hour:                            "-1h",
+		time.Hour + time.Minute + time.Second: "1h1m1s",
+	}
+	for in, want := range tests {
+		assert.Equal(t, want, roundedDuration(in), in.String())
+	}
+}
