@@ -197,7 +197,12 @@ func (st *engineState) validate() error {
 	case st.AnRecent > anomalyWindowMask:
 		return errors.New("anomalies beyond the anomaly window")
 	}
+	return st.validateMagnitudes()
+}
 
+// validateMagnitudes checks that every value learned is within what a
+// model fitted to valid observations can reach.
+func (st *engineState) validateMagnitudes() error {
 	bounded := func(v float64) bool { return isFinite(v) && math.Abs(v) <= maxMagnitude }
 	nonNegative := func(v float64) bool { return bounded(v) && v >= 0 }
 	if !nonNegative(st.Level) || !bounded(st.Trend) || !nonNegative(st.Scale) || !bounded(st.AnMean) ||
