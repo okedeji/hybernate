@@ -54,19 +54,29 @@
 
 === "Source"
 
-    Clone the repo, install the CRD, then build and deploy the operator:
+    Clone the repo and build the image:
 
     ```bash
     git clone https://github.com/okedeji/hybernate.git
     cd hybernate
-
-    # Install the CRD
-    make install
-
-    # Build and deploy the operator
-    make docker-build IMG=ghcr.io/okedeji/hybernate:dev
-    make deploy IMG=ghcr.io/okedeji/hybernate:dev
+    make docker-build IMG=hybernate:dev
     ```
+
+    The image is only in your local Docker, so make it available to the cluster's nodes before deploying. For a [Kind](https://kind.sigs.k8s.io/) cluster, load it into the nodes:
+
+    ```bash
+    kind load docker-image hybernate:dev --name <cluster>
+    make deploy IMG=hybernate:dev
+    ```
+
+    For any other cluster, push it to a registry the nodes can pull from:
+
+    ```bash
+    make docker-build docker-push IMG=<registry>/hybernate:dev
+    make deploy IMG=<registry>/hybernate:dev
+    ```
+
+    `make deploy` installs the CRD, RBAC, the operator and the doorman, all running `IMG`. It writes `IMG` into `config/manager/kustomization.yaml`; `git checkout config/manager` puts it back.
 
 ## Verify Installation
 
