@@ -483,7 +483,12 @@ func (r *Reconciler) forecastVeto(ctx context.Context, workload *v1alpha1.Manage
 		return false, 0, time.Time{}
 	}
 	requested, err := r.requestedCPU(ctx, workload)
-	if err != nil || requested <= 0 {
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("not consulting the forecast before pausing: the CPU requested can't be read",
+			"workload", workload.Name, "namespace", workload.Namespace, "error", err.Error())
+		return false, 0, time.Time{}
+	}
+	if requested <= 0 {
 		return false, 0, time.Time{}
 	}
 	now := r.now()

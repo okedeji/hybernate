@@ -22,10 +22,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -396,6 +399,45 @@ func TestActivityClock_ForecastDoesNotVetoAPauseUnderWay(t *testing.T) {
 	assert.Equal(t, v1alpha1.PhaseIdle, workload.Status.Phase)
 	assert.False(t, meta.IsStatusConditionTrue(workload.Status.Conditions, conditionIdleVetoed))
 	assert.Zero(t, vetoEvents(r.Recorder.(*events.FakeRecorder)))
+}
+
+// The veto can't judge the forecast when the CPU the workload requests
+// can't be read, and the pause goes ahead. Why is logged, rather than the
+// forecast being silently ignored.
+func TestActivityClock_ForecastVetoSaysWhyItCantJudge(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	engine := &stubForecaster{phase: forecast.DailyActive, predictValue: 300}
+	metrics := &failingRequestsMetrics{stubMetrics: idleCPU}
+	pauser := &stubPauser{pauseDone: true}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{pauser: pauser})
+	r.metrics = metrics
+	var logged []string
+	logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{Verbosity: 1})
+
+	_, err := r.reconcileAutomation(logr.NewContext(context.Background(), logger), workload, target)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, pauser.pauseCalls, "a forecast it can't judge doesn't hold back the pause")
+	assert.True(t, slices.ContainsFunc(logged, func(l string) bool {
+		return strings.Contains(l, "CPU requested can't be read") && strings.Contains(l, `"workload"="api"`)
+	}), "logged: %v", logged)
+}
+
+// failingRequestsMetrics reports usage, but not the requests it's judged
+// against, once the activity clock has read them: as when a pod template's
+// requests are removed between two reads.
+type failingRequestsMetrics struct {
+	stubMetrics
+	reads int
+}
+
+func (m *failingRequestsMetrics) CPURequestPerReplica(ctx context.Context, w *v1alpha1.ManagedWorkload) (float64, error) {
+	m.reads++
+	if m.reads > 1 {
+		return 0, errors.New("no pods")
+	}
+	return m.stubMetrics.CPURequestPerReplica(ctx, w)
 }
 
 func TestHourStart(t *testing.T) {
