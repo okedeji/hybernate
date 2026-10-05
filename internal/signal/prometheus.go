@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -29,22 +31,33 @@ import (
 
 const prometheusTimeout = 5 * time.Second
 
+// maxResponseBytes bounds a query's response. An activity query answers
+// with a handful of series; a response this large is a query returning a
+// series per pod across the cluster, and isn't read into memory.
+const maxResponseBytes = 4 << 20
+
 // ErrEndpointNotConfigured is returned when a Prometheus signal is evaluated
 // but the operator was started without a Prometheus URL.
 var ErrEndpointNotConfigured = errors.New("prometheus endpoint not configured, set --prometheus-url on the operator")
 
 type prometheusResponse struct {
-	Status string `json:"status"`
-	Data   struct {
-		ResultType string `json:"resultType"`
-		Result     []struct {
-			Value []json.RawMessage `json:"value"`
-		} `json:"result"`
+	Status    string `json:"status"`
+	ErrorType string `json:"errorType"`
+	Error     string `json:"error"`
+	Data      struct {
+		ResultType string          `json:"resultType"`
+		Result     json.RawMessage `json:"result"`
 	} `json:"data"`
 }
 
-// Prometheus evaluates a PromQL instant query. A result above zero confirms;
-// an empty result, zero, or a negative value doesn't.
+// Prometheus evaluates a PromQL instant query. The workload is active when
+// any sample in the result is above zero: with a series per pod, one busy
+// pod is enough.
+//
+// NaN and infinite samples are ignored, as no evidence either way: NaN is
+// what a ratio of two idle counters gives (0/0). A result with no usable
+// sample, whether empty or all NaN, is no data, and no data doesn't confirm
+// activity, so the workload's other activity sources decide.
 type Prometheus struct {
 	Endpoint string
 	Query    string
@@ -74,6 +87,8 @@ func (p *Prometheus) Check(ctx context.Context, _, _ string) (Result, error) {
 	u = u.JoinPath("api", "v1", "query")
 	u.RawQuery = url.Values{"query": {p.Query}}.Encode()
 
+	ctx, cancel := context.WithTimeout(ctx, prometheusTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return Result{}, fmt.Errorf("building prometheus request: %w", err)
@@ -85,36 +100,96 @@ func (p *Prometheus) Check(ctx context.Context, _, _ string) (Result, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		return Result{}, fmt.Errorf("prometheus returned status %d", resp.StatusCode)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return Result{}, fmt.Errorf("reading prometheus response: %w", err)
+	}
+	if len(data) > maxResponseBytes {
+		return Result{}, fmt.Errorf("prometheus response for %q is larger than %d bytes", p.Query, maxResponseBytes)
 	}
 
 	var body prometheusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return Result{}, fmt.Errorf("decoding prometheus response: %w", err)
+	decodeErr := json.Unmarshal(data, &body)
+	if resp.StatusCode != http.StatusOK {
+		if decodeErr == nil && body.Error != "" {
+			return Result{}, fmt.Errorf("prometheus returned status %d: %s: %s", resp.StatusCode, body.ErrorType, body.Error)
+		}
+		return Result{}, fmt.Errorf("prometheus returned status %d", resp.StatusCode)
 	}
-
+	if decodeErr != nil {
+		return Result{}, fmt.Errorf("decoding prometheus response: %w", decodeErr)
+	}
 	if body.Status != "success" {
-		return Result{}, fmt.Errorf("prometheus query failed: status %q", body.Status)
+		return Result{}, fmt.Errorf("prometheus query failed: status %q: %s", body.Status, body.Error)
 	}
 
-	if len(body.Data.Result) == 0 {
-		return Result{Confirm: false, Reason: fmt.Sprintf("promql returned empty result for %q", p.Query)}, nil
-	}
-
-	val, err := extractScalarValue(body.Data.Result[0].Value)
+	samples, err := samplesOf(body.Data.ResultType, body.Data.Result)
 	if err != nil {
-		return Result{}, fmt.Errorf("extracting prometheus value: %w", err)
+		return Result{}, fmt.Errorf("reading prometheus result for %q: %w", p.Query, err)
 	}
-
-	if val <= 0 {
-		return Result{Confirm: false, Reason: fmt.Sprintf("promql value is %g for %q", val, p.Query)}, nil
-	}
-	return Result{Confirm: true, Reason: fmt.Sprintf("promql value is %g for %q", val, p.Query)}, nil
+	return p.evaluate(samples), nil
 }
 
-// extractScalarValue pulls the float64 from a Prometheus [timestamp, "value"] pair.
-func extractScalarValue(pair []json.RawMessage) (float64, error) {
+func (p *Prometheus) evaluate(samples []float64) Result {
+	highest, usable := math.Inf(-1), 0
+	for _, v := range samples {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		usable++
+		highest = math.Max(highest, v)
+	}
+	switch {
+	case len(samples) == 0:
+		return Result{Reason: fmt.Sprintf("promql returned empty result for %q", p.Query)}
+	case usable == 0:
+		return Result{Reason: fmt.Sprintf("promql returned no usable value (NaN or Inf) for %q", p.Query)}
+	case highest <= 0:
+		return Result{Reason: fmt.Sprintf("promql value is %g for %q", highest, p.Query)}
+	default:
+		return Result{Confirm: true, Reason: fmt.Sprintf("promql value is %g for %q", highest, p.Query)}
+	}
+}
+
+// samplesOf reads the values of an instant query's result: one per series
+// of a vector, or the single value of a scalar.
+func samplesOf(resultType string, result json.RawMessage) ([]float64, error) {
+	switch resultType {
+	case "vector":
+		var series []struct {
+			Value []json.RawMessage `json:"value"`
+		}
+		if err := json.Unmarshal(result, &series); err != nil {
+			return nil, fmt.Errorf("decoding vector: %w", err)
+		}
+		samples := make([]float64, 0, len(series))
+		for _, s := range series {
+			v, err := sampleValue(s.Value)
+			if err != nil {
+				return nil, err
+			}
+			samples = append(samples, v)
+		}
+		return samples, nil
+	case "scalar":
+		var pair []json.RawMessage
+		if err := json.Unmarshal(result, &pair); err != nil {
+			return nil, fmt.Errorf("decoding scalar: %w", err)
+		}
+		v, err := sampleValue(pair)
+		if err != nil {
+			return nil, err
+		}
+		return []float64{v}, nil
+	default:
+		return nil, fmt.Errorf("result type %q is not an instant vector or scalar", resultType)
+	}
+}
+
+// sampleValue pulls the float64 from a Prometheus [timestamp, "value"] pair.
+// Prometheus writes NaN and infinities as "NaN", "+Inf" and "-Inf", which
+// ParseFloat reads.
+func sampleValue(pair []json.RawMessage) (float64, error) {
 	if len(pair) < 2 {
 		return 0, fmt.Errorf("expected [timestamp, value] pair, got %d elements", len(pair))
 	}
