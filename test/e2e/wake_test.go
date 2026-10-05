@@ -92,7 +92,10 @@ var _ = Describe("Wake on request", func() {
 		Eventually(func(g Gomega) {
 			attempt++
 			page, _ := runCurl(fmt.Sprintf("curl-page-%d", attempt), ns, ingressURL, browser...)
-			g.Expect(page).To(ContainSubstring("Waking up " + name))
+			// The page names only the address the browser opened, never the
+			// workload behind it.
+			g.Expect(page).To(ContainSubstring("Waking up <span>" + host + "</span>"))
+			g.Expect(page).NotTo(ContainSubstring(name))
 			g.Expect(page).To(ContainSubstring("status=503"))
 		}, 2*time.Minute, time.Second).Should(Succeed())
 
@@ -116,19 +119,21 @@ var _ = Describe("Wake on request", func() {
 		)
 		By("running a caller that Hybernate manages, with nothing in its environment naming the app")
 		startWebApp(name, ns, 1)
-		startWebApp(callerName, ns, 1)
+		startCaller(callerName, ns)
 		manage(ns, "Deployment", callerName, "1h")
 		manage(ns, "Deployment", name, "1m")
 		waitForDoorman(ns, name)
 
-		By("connecting from the caller to the paused app")
-		// Retried until kube-proxy routes the Service to the doorman; a
-		// connection the doorman holds isn't refused.
+		By("requesting the paused app from the caller")
+		// A request, not just a connection: the doorman doesn't wake a
+		// workload for a connection that sends nothing, as a TCP health
+		// check's doesn't. Retried until kube-proxy routes the Service to
+		// the doorman, which then holds the request until the app is Ready.
 		Eventually(func() error {
 			_, err := utils.Run(exec.Command("kubectl", "exec", "-n", ns, "deploy/"+callerName, "--",
-				"/agnhost", "connect", "--timeout", "5s", name+":80"))
+				"curl", "-sS", "--fail", "--max-time", "150", "http://"+name+"/hostname"))
 			return err
-		}, time.Minute, 2*time.Second).Should(Succeed())
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 
 		expectWokenByRequest(ns, "deployment", name, 1)
 
@@ -405,6 +410,29 @@ var webContainer = fmt.Sprintf(`        - name: web
 // startWebApp runs webManifest and waits for all of its replicas.
 func startWebApp(name, ns string, replicas int) {
 	Expect(kubectlApply(webManifest(name, ns, replicas))).To(Succeed())
+	rollout(ns, "deployment/"+name)
+}
+
+// startCaller starts a workload that makes requests on demand: curl, idle
+// until a spec runs it in the pod.
+func startCaller(name, ns string) {
+	Expect(kubectlApply(fmt.Sprintf(`
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: %[1]s, namespace: %[2]s}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: %[1]s}}
+  template:
+    metadata: {labels: {app: %[1]s}}
+    spec:
+      containers:
+        - name: caller
+          image: curlimages/curl:8.7.1
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          resources: {requests: {cpu: 10m, memory: 16Mi}}
+`, name, ns))).To(Succeed())
 	rollout(ns, "deployment/"+name)
 }
 
