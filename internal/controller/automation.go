@@ -231,7 +231,7 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 	recheck := &ctrl.Result{RequeueAfter: r.pausedRecheck()}
 	r.clearIdleVeto(workload)
 	engine := r.forecastEngine(workload)
-	woken := r.wokenByActivity(ctx, workload, target)
+	woken := r.wokenByActivity(workload, target)
 	r.seePausedDemand(ctx, workload, engine, woken)
 	r.updatePredictionStatus(ctx, workload, engine)
 

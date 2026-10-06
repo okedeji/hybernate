@@ -547,33 +547,14 @@ func nextCheck(now, pauseAt, activeUntil time.Time) time.Duration {
 // the operator's, such as a laptop's, so a change since the pause began
 // counts whatever time it states, and only a change counts: a last-activity
 // set before a requested pause, which ran the clock out early, doesn't undo
-// it. A pause recorded without the annotations, by an older version, wakes
-// on a last-activity no older than the pause, or an active-until hold that
-// hasn't ended.
-func (r *Reconciler) wokenByActivity(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) bool {
-	now := r.now()
-	var pausedAt time.Time
-	var recorded *v1alpha1.WakeAnnotations
-	if pause := workload.Status.Pause; pause != nil {
-		recorded = pause.WakeAnnotations
-		if pause.PausedAt != nil {
-			pausedAt = pause.PausedAt.Time
-		}
+// it.
+func (r *Reconciler) wokenByActivity(workload *v1alpha1.ManagedWorkload, target client.Object) bool {
+	var recorded v1alpha1.WakeAnnotations
+	if pause := workload.Status.Pause; pause != nil && pause.WakeAnnotations != nil {
+		recorded = *pause.WakeAnnotations
 	}
-	if recorded != nil {
-		return activityAnnotationChanged(workload, recorded.Workload) ||
-			target != nil && activityAnnotationChanged(target, recorded.Target)
-	}
-	for _, obj := range []client.Object{workload, target} {
-		if obj == nil {
-			continue
-		}
-		lastActivity, activeUntil := r.activityAnnotations(ctx, obj, now)
-		if (!lastActivity.IsZero() && !lastActivity.Before(pausedAt)) || activeUntil.After(now) {
-			return true
-		}
-	}
-	return false
+	return activityAnnotationChanged(workload, recorded.Workload) ||
+		target != nil && activityAnnotationChanged(target, recorded.Target)
 }
 
 // reportPrometheusUnavailable surfaces a Prometheus activity source that can't

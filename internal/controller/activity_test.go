@@ -505,8 +505,11 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 		name       string
 		target     *appsv1.Deployment
 		onWorkload map[string]string
-		wantWake   bool
-		wantSource v1alpha1.ActivitySource
+		// beforePause says the annotations were already there when the
+		// pause began, so its record holds them.
+		beforePause bool
+		wantWake    bool
+		wantSource  v1alpha1.ActivitySource
 	}{
 		{
 			name: "last-activity newer than the pause",
@@ -531,6 +534,7 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 			onWorkload: map[string]string{
 				v1alpha1.AnnotationLastRequest: fixedTime.Add(-3 * time.Hour).Format(time.RFC3339),
 			},
+			beforePause: true,
 		},
 		{
 			name: "active-until in the future",
@@ -545,6 +549,7 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 			target: clockTarget("app:v1", map[string]string{
 				v1alpha1.AnnotationLastActivity: fixedTime.Add(-3 * time.Hour).Format(time.RFC3339),
 			}),
+			beforePause: true,
 		},
 	}
 
@@ -553,7 +558,13 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 			workload := clockWorkload(fixedTime.Add(-3*time.Hour), tt.target)
 			workload.Annotations = tt.onWorkload
 			workload.Status.Phase = v1alpha1.PhasePaused
-			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 2, PausedAt: &pausedAt}
+			recorded := &v1alpha1.WakeAnnotations{}
+			if tt.beforePause {
+				recorded.Workload = activityAnnotationValues(workload)
+				recorded.Target = activityAnnotationValues(tt.target)
+			}
+			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 2, PausedAt: &pausedAt,
+				WakeAnnotations: recorded}
 
 			pauser := runClock(t, workload, tt.target, clockOpts{metrics: idleCPU})
 
