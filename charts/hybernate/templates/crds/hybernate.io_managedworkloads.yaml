@@ -691,6 +691,12 @@ spec:
                   (pause or resume).
                 format: date-time
                 type: string
+              lastPauseRequest:
+                description: |-
+                  LastPauseRequest is the last hybernate.io/pause-requested value
+                  Hybernate acted on, so each request is acted on once, across restarts.
+                  The PauseRequest condition says what came of it.
+                type: string
               lastScaledUp:
                 description: |-
                   LastScaledUp is the last time something other than Hybernate scaled
