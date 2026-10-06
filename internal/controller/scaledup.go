@@ -158,6 +158,10 @@ func (r *Reconciler) reconcileScaledToZero(ctx context.Context, workload *v1alph
 	r.setCondition(workload, conditionScaledToZero, metav1.ConditionTrue, "ScaledToZero",
 		"scaled to zero outside Hybernate, so Hybernate leaves it off: it doesn't pause it, wake it, or route "+
 			"requests for it until its replicas are set above zero")
+	if err := r.refusePauseRequest(ctx, workload, "Normal", ReasonScaledToZero,
+		"it's scaled to zero outside Hybernate, so it's off already"); err != nil {
+		return ctrl.Result{}, err
+	}
 	r.clearIdleVeto(workload)
 	r.trackDryRun(workload)
 	if workload.Status.Phase == v1alpha1.PhaseIdle {

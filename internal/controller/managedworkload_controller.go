@@ -183,7 +183,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	if duplicate, err := r.checkDuplicate(ctx, &workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking duplicate target: %w", err)
 	} else if duplicate {
-		return ctrl.Result{RequeueAfter: duplicateRecheckInterval}, nil
+		return r.reconcileDuplicate(ctx, &workload)
 	}
 
 	if workload.Status.Phase == "" || workload.Status.Phase == v1alpha1.PhaseCreating {
@@ -267,7 +267,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 func (r *Reconciler) resumeTransition(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	phase := workload.Status.Phase
 	if workload.Spec.DryRun && (phase == v1alpha1.PhasePausing || phase == v1alpha1.PhasePaused) {
-		return r.handleResume(ctx, workload, &wakeEvent{reason: reasonDryRunWake,
+		return r.handleResume(ctx, workload, &phaseEvent{reason: reasonDryRunWake,
 			message: "dry-run is on, so Hybernate wakes the workload it had paused"})
 	}
 	switch phase {
@@ -275,7 +275,7 @@ func (r *Reconciler) resumeTransition(ctx context.Context, workload *v1alpha1.Ma
 		if desired := workload.Spec.DesiredState; desired != nil && *desired == v1alpha1.DesiredStateRunning {
 			return r.handleResume(ctx, workload, nil)
 		}
-		return r.handlePause(ctx, workload, target)
+		return r.handlePause(ctx, workload, target, nil)
 	case v1alpha1.PhaseResuming:
 		return r.handleResume(ctx, workload, nil)
 	default:
@@ -289,7 +289,7 @@ func (r *Reconciler) reconcileDesiredState(ctx context.Context, workload *v1alph
 		r.clearCondition(workload, conditionWouldPause, "NotHeldBack")
 	}
 	if desired == nil {
-		return nil, nil
+		return r.reconcilePauseRequest(ctx, workload, target)
 	}
 
 	switch *desired {
@@ -297,8 +297,11 @@ func (r *Reconciler) reconcileDesiredState(ctx context.Context, workload *v1alph
 		if workload.Spec.DryRun {
 			return nil, r.reportWouldPause(ctx, workload)
 		}
+		if until, held := gitOpsHold(workload, r.now()); held && workload.Status.Phase != v1alpha1.PhasePaused {
+			return &ctrl.Result{RequeueAfter: until.Sub(r.now())}, nil
+		}
 		before := workload.Status.Phase
-		result, err := r.handlePause(ctx, workload, target)
+		result, err := r.handlePause(ctx, workload, target, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -336,16 +339,15 @@ func (r *Reconciler) reportWouldPause(ctx context.Context, workload *v1alpha1.Ma
 // handlePause drives the workload to Paused. What the pause changes is
 // recorded in the same status write that enters Pausing, before anything is
 // scaled, so an interrupted pause is finished, or undone, from the record
-// rather than from a target that's already at zero.
-func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
+// rather than from a target that's already at zero. why, if given, is
+// announced once the workload is Pausing.
+func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object,
+	why *phaseEvent) (*ctrl.Result, error) {
 	if workload.Spec.DryRun {
 		return nil, nil
 	}
 	switch workload.Status.Phase {
 	case v1alpha1.PhaseRunning, v1alpha1.PhaseIdle:
-		if until, held := gitOpsHold(workload, r.now()); held {
-			return &ctrl.Result{RequeueAfter: until.Sub(r.now())}, nil
-		}
 		if err := r.preparePause(ctx, workload, target); err != nil {
 			return nil, err
 		}
@@ -357,6 +359,9 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 		}
 		if err := r.transition(ctx, workload, v1alpha1.PhasePausing, "PauseRequested"); err != nil {
 			return nil, err
+		}
+		if why != nil {
+			r.emitEvent(workload, false, "Normal", why.reason, actionPause, "%s", why.message)
 		}
 	case v1alpha1.PhasePausing:
 		if workload.Status.Pause == nil {
@@ -403,16 +408,17 @@ func (r *Reconciler) preparePause(ctx context.Context, workload *v1alpha1.Manage
 	return nil
 }
 
-// wakeEvent says why a paused workload wakes. It's emitted once the workload
-// is Resuming, so a retried wake doesn't announce itself twice.
-type wakeEvent struct {
+// phaseEvent says why a workload pauses or wakes. It's emitted once the
+// workload is Pausing or Resuming, so a retried pause or wake doesn't
+// announce itself twice.
+type phaseEvent struct {
 	reason, message string
 }
 
 // handleResume drives the workload to Running: a paused one, or one pausing,
 // is scaled back up and Running once its pods are Ready; an Idle one hasn't
 // been paused yet and is simply Running again.
-func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.ManagedWorkload, why *wakeEvent) (*ctrl.Result, error) {
+func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.ManagedWorkload, why *phaseEvent) (*ctrl.Result, error) {
 	switch workload.Status.Phase {
 	case v1alpha1.PhaseIdle:
 		if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ResumeRequested"); err != nil {
@@ -555,6 +561,16 @@ func (r *Reconciler) announceHandBack(workload *v1alpha1.ManagedWorkload, replic
 	r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume, "restored to %d replicas: %s", replicas, why)
 }
 
+// reconcileDuplicate leaves a target another ManagedWorkload manages to
+// that one, which the DuplicateTarget condition reports.
+func (r *Reconciler) reconcileDuplicate(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
+	c := meta.FindStatusCondition(workload.Status.Conditions, conditionDuplicateTarget)
+	if err := r.refusePauseRequest(ctx, workload, "Warning", conditionDuplicateTarget, c.Message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: duplicateRecheckInterval}, nil
+}
+
 // reconcileIgnored stops managing a target labelled hybernate.io/ignore,
 // restoring it first if it's paused, so the label never leaves it off.
 func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
@@ -562,6 +578,10 @@ func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.Ma
 	reported := conditionFalseWith(workload, conditionTargetAvailable, "TargetIgnored")
 	r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetIgnored",
 		fmt.Sprintf("%s %s has %s label", ref.Kind, ref.Name, v1alpha1.LabelIgnore))
+	if err := r.refusePauseRequest(ctx, workload, "Warning", "TargetIgnored", fmt.Sprintf(
+		"%s %s has the %s label, so Hybernate doesn't manage it", ref.Kind, ref.Name, v1alpha1.LabelIgnore)); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	routed := len(workload.Status.Doorman) > 0
 	released, replicas, err := r.releaseTarget(ctx, workload)
@@ -588,6 +608,11 @@ func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.Ma
 // doorman while its target is gone: a request held there waits for pods
 // that nothing will start, where without the doorman it fails at once.
 func (r *Reconciler) reconcileTargetMissing(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
+	ref := workload.Spec.Target
+	if err := r.refusePauseRequest(ctx, workload, "Warning", ReasonTargetNotFound,
+		fmt.Sprintf("%s %s not found", ref.Kind, ref.Name)); err != nil {
+		return ctrl.Result{}, err
+	}
 	routed := len(workload.Status.Doorman) > 0
 	if err := r.removeDoorman(ctx, workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing doorman routes: %w", err)

@@ -125,9 +125,9 @@ func conflicted(scaledUp time.Time) *v1alpha1.ManagedWorkload {
 	return w
 }
 
-// After a GitOps tool undoes a pause, Hybernate waits before pausing again,
-// so it doesn't restart the workload in a loop with the tool.
-func TestHandlePause_WaitsAfterAGitOpsConflict(t *testing.T) {
+// After a GitOps tool undoes a pause, the idle clock waits before pausing
+// again, so it doesn't restart the workload in a loop with the tool.
+func TestIdleClock_WaitsAfterAGitOpsConflict(t *testing.T) {
 	tests := []struct {
 		name      string
 		scaledUp  time.Duration
@@ -138,16 +138,21 @@ func TestHandlePause_WaitsAfterAGitOpsConflict(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			workload := conflicted(fixedTime.Add(-tt.scaledUp))
+			workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
+			workload.Status.LastTransitionTime = ptr.To(metav1.NewTime(fixedTime.Add(-time.Minute)))
+			workload.Status.Activity = &v1alpha1.ActivityStatus{
+				LastActivityTime:  metav1.NewTime(fixedTime.Add(-2 * time.Hour)),
+				LastEvaluatedTime: ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second))),
+			}
 			pauser := &stubPauser{}
-			r := newTestReconcilerWithReplicas(t, conflicted(fixedTime.Add(-tt.scaledUp)), pauser, 3)
-			w := getWorkload(t, r, "api")
+			r := newTestReconcilerWithReplicas(t, workload, pauser, 3)
 
-			result, err := r.handlePause(context.Background(), w, nil)
+			result, err := r.Reconcile(context.Background(), reconcileFor("api"))
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantPause, pauser.pauseCalls > 0)
 			if !tt.wantPause {
-				require.NotNil(t, result)
 				assert.Equal(t, 50*time.Minute, result.RequeueAfter, "until an hour after the conflict")
 				assert.Equal(t, v1alpha1.PhaseIdle, getWorkload(t, r, "api").Status.Phase)
 			}

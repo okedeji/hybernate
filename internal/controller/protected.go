@@ -60,6 +60,10 @@ func (r *Reconciler) reconcileProtected(ctx context.Context, workload *v1alpha1.
 	r.setCondition(workload, conditionProtected, metav1.ConditionTrue, "ProtectedNamespace",
 		fmt.Sprintf("namespace %s is protected, so Hybernate doesn't pause workloads in it; label it %s=%s to allow it",
 			workload.Namespace, v1alpha1.LabelAllowProtected, v1alpha1.True))
+	if err := r.refusePauseRequest(ctx, workload, "Warning", ReasonProtected, fmt.Sprintf(
+		"namespace %s is protected, so Hybernate doesn't pause workloads in it", workload.Namespace)); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	routed := len(workload.Status.Doorman) > 0
 	released, replicas, err := r.releaseTarget(ctx, workload)

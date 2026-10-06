@@ -189,43 +189,80 @@ func isAwake(phase v1alpha1.WorkloadPhase) bool {
 // dependencyHold reports why a workload whose clock has run out must stay
 // up anyway, and records it in conditions. A nil result means it may act.
 func (r *Reconciler) dependencyHold(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
+	h, err := r.heldByDependencies(ctx, workload)
+	if err != nil {
+		return nil, err
+	}
+
+	if h.cycle {
+		if !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionDependencyCycle) {
+			r.emitEvent(workload, workload.Spec.DryRun, "Warning", conditionDependencyCycle, actionEvaluateIdle, "%s",
+				h.message())
+		}
+		r.setCondition(workload, conditionDependencyCycle, metav1.ConditionTrue, conditionDependencyCycle, h.message())
+		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+	}
+	r.clearCondition(workload, conditionDependencyCycle, "NoCycle")
+
+	if len(h.holders) == 0 {
+		r.clearCondition(workload, conditionHeldByDependents, "NoAwakeDependents")
+		return nil, nil
+	}
+	if !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionHeldByDependents) {
+		r.emitEvent(workload, workload.Spec.DryRun, "Normal", conditionHeldByDependents, actionEvaluateIdle,
+			"idle, but %s", h.message())
+	}
+	r.setCondition(workload, conditionHeldByDependents, metav1.ConditionTrue, "DependentsAwake", h.message())
+	return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+}
+
+// dependencyHolds is what keeps a workload from pausing for the workloads
+// around it: a dependsOn cycle through it, or awake dependents.
+type dependencyHolds struct {
+	cycle   bool
+	holders []string
+}
+
+func (h dependencyHolds) held() bool {
+	return h.cycle || len(h.holders) > 0
+}
+
+// condition is the condition type, and the event reason, that reports h.
+func (h dependencyHolds) condition() string {
+	if h.cycle {
+		return conditionDependencyCycle
+	}
+	return conditionHeldByDependents
+}
+
+func (h dependencyHolds) message() string {
+	if h.cycle {
+		return "dependsOn forms a cycle through this workload, so it won't pause until the cycle is removed"
+	}
+	return "kept awake for " + strings.Join(h.holders, ", ")
+}
+
+// heldByDependencies finds what keeps workload from pausing for the
+// workloads around it, without recording it.
+func (r *Reconciler) heldByDependencies(ctx context.Context, workload *v1alpha1.ManagedWorkload) (dependencyHolds, error) {
 	ctx, cancel := context.WithTimeout(ctx, dependencyTimeout)
 	defer cancel()
 
 	g, err := r.loadDependencyGraph(ctx)
 	if err != nil {
-		return nil, err
+		return dependencyHolds{}, err
 	}
-
 	if g.inCycle(workload) {
-		msg := "dependsOn forms a cycle through this workload, so it won't pause until the cycle is removed"
-		if !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionDependencyCycle) {
-			r.emitEvent(workload, workload.Spec.DryRun, "Warning", conditionDependencyCycle, actionEvaluateIdle, "%s", msg)
-		}
-		r.setCondition(workload, conditionDependencyCycle, metav1.ConditionTrue, conditionDependencyCycle, msg)
-		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+		return dependencyHolds{cycle: true}, nil
 	}
-	r.clearCondition(workload, conditionDependencyCycle, "NoCycle")
-
-	var holders []string
+	var h dependencyHolds
 	for _, d := range g.dependents(workload) {
 		if isAwake(d.Status.Phase) && g.holds(d, workload) {
-			holders = append(holders, d.Namespace+"/"+d.Name)
+			h.holders = append(h.holders, d.Namespace+"/"+d.Name)
 		}
 	}
-	if len(holders) == 0 {
-		r.clearCondition(workload, conditionHeldByDependents, "NoAwakeDependents")
-		return nil, nil
-	}
-
-	slices.Sort(holders)
-	msg := "kept awake for " + strings.Join(holders, ", ")
-	if !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionHeldByDependents) {
-		r.emitEvent(workload, workload.Spec.DryRun, "Normal", conditionHeldByDependents, actionEvaluateIdle,
-			"idle, but %s", msg)
-	}
-	r.setCondition(workload, conditionHeldByDependents, metav1.ConditionTrue, "DependentsAwake", msg)
-	return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+	slices.Sort(h.holders)
+	return h, nil
 }
 
 // clearCondition flips a condition to False if it's present, so a resolved

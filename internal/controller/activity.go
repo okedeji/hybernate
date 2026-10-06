@@ -364,8 +364,9 @@ func podTemplateHash(target client.Object) string {
 }
 
 // reconcileIdleClock pauses a workload once it has been inactive for
-// IdleAfter. Phase Idle means the clock has run out: in dry-run the workload
-// stays Idle and reports the pause it would make; otherwise it pauses.
+// IdleAfter. Phase Idle means the clock has run out, or a pause was
+// requested: in dry-run the workload stays Idle and reports the pause it
+// would make; otherwise it pauses.
 func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object,
 	engine forecaster, usage float64) (*ctrl.Result, error) {
 	now := r.now()
@@ -390,7 +391,7 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 		r.setCondition(workload, conditionPrometheusAvailable, metav1.ConditionTrue, "QueriesEvaluated", "")
 	}
 
-	if obs.activeUntil.After(now) || now.Before(pauseAt) {
+	if obs.activeUntil.After(now) || activeSinceClockRanOut(workload, now, pauseAt) {
 		if workload.Status.Phase == v1alpha1.PhaseIdle {
 			source := workload.Status.Activity.LastActivitySource
 			slept, freed, measured := r.endWouldBePause(workload)
@@ -436,7 +437,23 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 	if workload.Spec.DryRun {
 		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 	}
-	return r.handlePause(ctx, workload, target)
+	if until, held := gitOpsHold(workload, now); held {
+		return &ctrl.Result{RequeueAfter: until.Sub(now)}, nil
+	}
+	return r.handlePause(ctx, workload, target, nil)
+}
+
+// activeSinceClockRanOut reports whether there has been activity since the
+// workload's clock last ran out. Running, it's within idleAfter. Idle, the
+// pause it's in, or would be in under dry-run, began at the move to Idle,
+// and only activity after that ends it, as only that wakes a paused
+// workload: a pause request runs the clock out early, with the activity seen
+// before it still within idleAfter.
+func activeSinceClockRanOut(workload *v1alpha1.ManagedWorkload, now, pauseAt time.Time) bool {
+	if began := workload.Status.LastTransitionTime; workload.Status.Phase == v1alpha1.PhaseIdle && began != nil {
+		return workload.Status.Activity.LastActivityTime.After(began.Time)
+	}
+	return now.Before(pauseAt)
 }
 
 func (r *Reconciler) reportActivityResumed(workload *v1alpha1.ManagedWorkload, source v1alpha1.ActivitySource,
@@ -526,10 +543,13 @@ func nextCheck(now, pauseAt, activeUntil time.Time) time.Duration {
 }
 
 // wokenByActivity reports whether a paused workload's annotations ask for it
-// to wake: one set since the pause began, a last-activity no older than the
-// pause, or an active-until hold that hasn't ended. Annotations are stamped
-// to the second, and from clocks other than the operator's, such as a
-// laptop's, so a change counts whatever time it states.
+// to wake. Annotations are stamped to the second, and from clocks other than
+// the operator's, such as a laptop's, so a change since the pause began
+// counts whatever time it states, and only a change counts: a last-activity
+// set before a requested pause, which ran the clock out early, doesn't undo
+// it. A pause recorded without the annotations, by an older version, wakes
+// on a last-activity no older than the pause, or an active-until hold that
+// hasn't ended.
 func (r *Reconciler) wokenByActivity(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) bool {
 	now := r.now()
 	var pausedAt time.Time
@@ -540,9 +560,9 @@ func (r *Reconciler) wokenByActivity(ctx context.Context, workload *v1alpha1.Man
 			pausedAt = pause.PausedAt.Time
 		}
 	}
-	if recorded != nil && (activityAnnotationChanged(workload, recorded.Workload) ||
-		target != nil && activityAnnotationChanged(target, recorded.Target)) {
-		return true
+	if recorded != nil {
+		return activityAnnotationChanged(workload, recorded.Workload) ||
+			target != nil && activityAnnotationChanged(target, recorded.Target)
 	}
 	for _, obj := range []client.Object{workload, target} {
 		if obj == nil {

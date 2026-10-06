@@ -215,7 +215,10 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	}
 	r.clearCondition(workload, conditionManualOverride, "Automated")
 
-	if workload.Spec.IdlePolicy == nil {
+	// Under dry-run, Idle is a would-be pause being measured, which a pause
+	// request begins whatever the idle policy, and only activity ends.
+	measuring := workload.Spec.DryRun && phase == v1alpha1.PhaseIdle
+	if workload.Spec.IdlePolicy == nil && !measuring {
 		r.clearIdleVeto(workload)
 		if phase == v1alpha1.PhaseIdle {
 			if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "NoIdlePolicy"); err != nil {
@@ -271,7 +274,7 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 		if wakeSource(workload) == v1alpha1.ActivitySourceRequest {
 			message = "a request is waiting, waking"
 		}
-		return r.handleResume(ctx, workload, &wakeEvent{reason: ReasonWokeByActivity, message: message})
+		return r.handleResume(ctx, workload, &phaseEvent{reason: ReasonWokeByActivity, message: message})
 	}
 
 	if workload.Spec.IdlePolicy == nil || !workload.Spec.IdlePolicy.AutoResume {
@@ -298,7 +301,7 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 		return recheck, nil
 	}
 
-	return r.handleResume(ctx, workload, &wakeEvent{reason: ReasonAutoResume, message: fmt.Sprintf(
+	return r.handleResume(ctx, workload, &phaseEvent{reason: ReasonAutoResume, message: fmt.Sprintf(
 		"forecast expects %.0f%% utilization %s (threshold %d%%), waking ahead of demand", predictedPercent, when, threshold)})
 }
 
