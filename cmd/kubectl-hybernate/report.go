@@ -187,8 +187,9 @@ func writeReport(stdout, stderr io.Writer, result scanResult, opts scanOptions) 
 	return nil
 }
 
-func isTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
+// isTerminal reports whether stream, such as stdout or stdin, is a terminal.
+func isTerminal(stream any) bool {
+	f, ok := stream.(*os.File)
 	if !ok {
 		return false
 	}

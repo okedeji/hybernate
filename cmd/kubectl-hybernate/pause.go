@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -42,6 +43,13 @@ var errNotPaused = errors.New("wasn't paused")
 // Paused when the wait ran out.
 var errNotPausedYet = errors.New("isn't Paused yet")
 
+// demandExpected is Hybernate declining a pause because the forecast
+// expects demand within the hour, which the person asking can override.
+type demandExpected struct{ msg string }
+
+func (e demandExpected) Error() string { return e.msg }
+func (e demandExpected) Unwrap() error { return errNotPaused }
+
 const gitOpsGuide = "https://okedeji.io/hybernate/guides/gitops/"
 
 // What the operator's PauseRequest condition says came of a request.
@@ -49,6 +57,8 @@ const (
 	conditionPauseRequest = "PauseRequest"
 	reasonDryRun          = "DryRun"
 	reasonScaledToZero    = "ScaledToZero"
+
+	reasonForecastExpectsDemand = "ForecastExpectsDemand"
 )
 
 type pauseOptions struct {
@@ -56,6 +66,13 @@ type pauseOptions struct {
 	timeout      time.Duration
 	pollInterval time.Duration
 	now          func() time.Time
+
+	// overrideForecast pauses even when the forecast expects demand
+	// within the hour, without asking.
+	overrideForecast bool
+	// confirm asks the person running the command a yes-or-no question,
+	// or is nil when there's no one to ask.
+	confirm func(question string) (bool, error)
 }
 
 func pauseCmd(kube *kubeFlags) *cobra.Command {
@@ -74,9 +91,12 @@ Paused, or until Hybernate says why it won't pause it.
 Hybernate pauses it as it would an idle workload, but sooner: it doesn't
 pause a workload that awake workloads depend on, one an active-until
 annotation holds awake, one in a protected namespace, or one in dry-run,
-where it counts a would-be pause instead. Asking overrides the forecast
-expecting demand, and the hour Hybernate otherwise waits after Argo CD or
-Flux undid a pause.
+where it counts a would-be pause instead. Asking overrides the hour
+Hybernate otherwise waits after Argo CD or Flux undid a pause.
+
+When the forecast expects the workload to be busy within the hour, Hybernate
+says when, and pause asks whether to pause it anyway, since it would likely
+be woken straight back. --yes pauses it without asking, as a script needs.
 
 NAME is the workload, as status shows it, such as api or statefulset/postgres,
 or its ManagedWorkload's name.
@@ -84,6 +104,9 @@ or its ManagedWorkload's name.
 Examples:
   # Pause a preview environment for the night
   kubectl hybernate pause api -n preview-42
+
+  # Pause it even if the forecast expects it to be busy soon
+  kubectl hybernate pause api -n preview-42 --yes
 
   # Return as soon as the pause is requested
   kubectl hybernate pause api -n preview-42 --wait=false`,
@@ -101,6 +124,9 @@ Examples:
 			if namespace == "" {
 				namespace = at.namespace
 			}
+			if isTerminal(cmd.InOrStdin()) {
+				opts.confirm = askYesNo(cmd.InOrStdin(), cmd.ErrOrStderr())
+			}
 			err = pause(ctx, k8s, client.ObjectKey{Namespace: namespace, Name: args[0]}, opts, cmd.OutOrStdout(),
 				cmd.ErrOrStderr())
 			if errors.Is(err, errNotPausedYet) || errors.Is(err, errNotPaused) {
@@ -113,6 +139,8 @@ Examples:
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "",
 		"Namespace of the workload (defaults to the kubeconfig context's)")
 	cmd.Flags().BoolVar(&opts.wait, "wait", true, "Wait until the workload is Paused, or Hybernate says why it isn't")
+	cmd.Flags().BoolVarP(&opts.overrideForecast, "yes", "y", false,
+		"Pause it even if the forecast expects it to be busy within the hour, without asking")
 	addTimeoutFlag(cmd, &opts.timeout, "How long to wait")
 	return cmd
 }
@@ -142,21 +170,62 @@ func pause(ctx context.Context, c client.Client, key client.ObjectKey, opts paus
 	}
 
 	warnIfGitOpsUndoes(ctx, c, w, ref, errOut)
-	token := start.UTC().Format(time.RFC3339Nano)
+	token, err := requestPause(ctx, c, w, ref, opts.overrideForecast, opts.now)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "%s\n", pauseMessage(ref, w, opts.wait))
+	if !opts.wait {
+		return nil
+	}
+	err = waitForPause(ctx, c, key, ref, token, start, opts, out)
+
+	var declined demandExpected
+	if !errors.As(err, &declined) {
+		return err
+	}
+	if opts.confirm == nil {
+		return fmt.Errorf("%w; pass --yes to pause it anyway", declined)
+	}
+	yes, cerr := opts.confirm(declined.Error() + "\nPause it anyway? [y/N] ")
+	if cerr != nil {
+		return fmt.Errorf("asking whether to pause anyway: %w", cerr)
+	}
+	if !yes {
+		_, _ = fmt.Fprintf(out, "left %s running\n", ref)
+		return nil
+	}
+	if err := c.Get(ctx, key, w); err != nil {
+		return fmt.Errorf("getting ManagedWorkload %s: %w", key, err)
+	}
+	if token, err = requestPause(ctx, c, w, ref, true, opts.now); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "%s\n", pauseMessage(ref, w, true))
+	return waitForPause(ctx, c, key, ref, token, start, opts, out)
+}
+
+// requestPause asks Hybernate to pause the workload with a fresh
+// hybernate.io/pause-requested token, and returns it. Every request says
+// whether it overrides the forecast, so an override doesn't outlive the
+// request it was asked with.
+func requestPause(ctx context.Context, c client.Client, w *v1alpha1.ManagedWorkload, ref string,
+	overrideForecast bool, now func() time.Time) (string, error) {
+	token := now().UTC().Format(time.RFC3339Nano)
 	patch := client.MergeFrom(w.DeepCopy())
 	if w.Annotations == nil {
 		w.Annotations = map[string]string{}
 	}
 	w.Annotations[v1alpha1.AnnotationPauseRequested] = token
+	if overrideForecast {
+		w.Annotations[v1alpha1.AnnotationPauseOverridesForecast] = v1alpha1.True
+	} else {
+		delete(w.Annotations, v1alpha1.AnnotationPauseOverridesForecast)
+	}
 	if err := c.Patch(ctx, w, patch); err != nil {
-		return fmt.Errorf("requesting a pause of %s: %w", ref, err)
+		return "", fmt.Errorf("requesting a pause of %s: %w", ref, err)
 	}
-
-	_, _ = fmt.Fprintf(out, "%s\n", pauseMessage(ref, w, opts.wait))
-	if !opts.wait {
-		return nil
-	}
-	return waitForPause(ctx, c, key, ref, token, start, opts, out)
+	return token, nil
 }
 
 // pauseMessage says what the request does from the state the workload is in.
@@ -230,6 +299,11 @@ func pauseAnswered(w *v1alpha1.ManagedWorkload, ref string, requested bool, out 
 	case reasonScaledToZero:
 		_, _ = fmt.Fprintf(out, "%s is scaled to zero outside Hybernate, so it's off already\n", ref)
 		return true, nil
+	case reasonForecastExpectsDemand:
+		// The operator's message also says how to override it through the
+		// annotation, which the plugin asks about instead.
+		why, _, _ = strings.Cut(why, ";")
+		return true, demandExpected{msg: fmt.Sprintf("%s %s: %s", ref, errNotPaused, why)}
 	}
 	return true, fmt.Errorf("%s %w: %s", ref, errNotPaused, why)
 }
@@ -257,4 +331,22 @@ func warnIfGitOpsUndoes(ctx context.Context, c client.Client, w *v1alpha1.Manage
 		_, _ = fmt.Fprintf(out, "  %s\n", line)
 	}
 	_, _ = fmt.Fprintf(out, "See %s\n", gitOpsGuide)
+}
+
+// askYesNo asks a question on out and reads the answer from in, taking
+// only y or yes as yes.
+func askYesNo(in io.Reader, out io.Writer) func(string) (bool, error) {
+	reader := bufio.NewReader(in)
+	return func(question string) (bool, error) {
+		_, _ = fmt.Fprint(out, question)
+		answer, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(answer)) {
+		case "y", "yes":
+			return true, nil
+		}
+		return false, nil
+	}
 }

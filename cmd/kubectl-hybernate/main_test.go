@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,8 @@ func runCLI(t *testing.T, c client.Client, args ...string) (string, error) {
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
+	// No terminal to answer a question on, wherever the tests run.
+	root.SetIn(strings.NewReader(""))
 	root.SetArgs(args)
 	err := root.Execute()
 	return out.String(), err

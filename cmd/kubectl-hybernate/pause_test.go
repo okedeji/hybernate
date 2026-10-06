@@ -17,7 +17,10 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -315,5 +318,107 @@ func TestPause_WarnsWhenGitOpsWillUndoIt(t *testing.T) {
 			assert.Contains(t, out, tt.fix)
 			assert.Contains(t, out, "See https://okedeji.io/hybernate/guides/gitops/")
 		})
+	}
+}
+
+// expectsDemand answers a request the way the operator does when the
+// forecast expects the workload to be busy within the hour: it declines one
+// that doesn't override the forecast, and pauses one that does.
+func expectsDemand(w *v1alpha1.ManagedWorkload) {
+	if w.Annotations[v1alpha1.AnnotationPauseOverridesForecast] == v1alpha1.True {
+		pauses(w)
+		return
+	}
+	refuses(v1alpha1.PhaseRunning, "ForecastExpectsDemand", "not paused: the forecast expects demand at 80% of "+
+		"requests in the hour from 09:00 UTC; ask again overriding the forecast to pause anyway")(w)
+}
+
+// When the forecast expects the workload to be busy soon, pause says when
+// and asks; it pauses only if the answer is yes, and without anyone to ask,
+// says how to pause it anyway.
+func TestPause_AsksWhenTheForecastExpectsDemand(t *testing.T) {
+	const declined = "preview-42/api wasn't paused: the forecast expects demand at 80% of requests in the hour " +
+		"from 09:00 UTC"
+	tests := []struct {
+		name         string
+		confirm      func(question string) (bool, error)
+		wantErr      string
+		wantOut      string
+		wantPaused   bool
+		wantOverride bool
+	}{
+		{name: "no one to ask", wantErr: declined + "; pass --yes to pause it anyway"},
+		{name: "answered no", confirm: func(string) (bool, error) { return false, nil },
+			wantOut: "left preview-42/api running\n"},
+		{name: "answered yes", confirm: func(string) (bool, error) { return true, nil },
+			wantOut: "preview-42/api is Paused after", wantPaused: true, wantOverride: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newClient(t, operator(expectsDemand), managedWorkload(v1alpha1.PhaseRunning))
+			var asked string
+			opts := pauseOptions{wait: true, pollInterval: time.Millisecond, now: time.Now}
+			if tt.confirm != nil {
+				opts.confirm = func(question string) (bool, error) {
+					asked = question
+					return tt.confirm(question)
+				}
+			}
+			var out bytes.Buffer
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			err := pause(ctx, c, client.ObjectKey{Namespace: "preview-42", Name: "api"}, opts, &out, io.Discard)
+
+			if tt.wantErr != "" {
+				require.ErrorIs(t, err, errNotPaused)
+				assert.EqualError(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Contains(t, out.String(), tt.wantOut)
+			}
+			if tt.confirm != nil {
+				assert.Equal(t, declined+"\nPause it anyway? [y/N] ", asked)
+			}
+			got := annotations(t, c)[v1alpha1.AnnotationPauseOverridesForecast] == v1alpha1.True
+			assert.Equal(t, tt.wantOverride, got, "the forecast is overridden only when asked to")
+			assert.Equal(t, tt.wantPaused, strings.Contains(out.String(), "is Paused"))
+		})
+	}
+}
+
+// --yes overrides the forecast with the first request, without asking.
+func TestPause_YesOverridesTheForecast(t *testing.T) {
+	c := newClient(t, operator(expectsDemand), managedWorkload(v1alpha1.PhaseRunning))
+
+	out, err := runCLI(t, c, "pause", "api", "--yes")
+
+	require.NoError(t, err)
+	assert.NotContains(t, out, "Pause it anyway?")
+	assert.Contains(t, out, "preview-42/api is Paused after")
+	assert.Equal(t, v1alpha1.True, annotations(t, c)[v1alpha1.AnnotationPauseOverridesForecast])
+}
+
+// An override asked for with an earlier request doesn't carry over to the
+// next one, which asks again.
+func TestPause_OverrideIsForOneRequest(t *testing.T) {
+	w := managedWorkload(v1alpha1.PhaseRunning)
+	w.Annotations = map[string]string{v1alpha1.AnnotationPauseOverridesForecast: v1alpha1.True}
+	c := newClient(t, operator(expectsDemand), w)
+
+	_, err := runCLI(t, c, "pause", "api")
+
+	require.ErrorIs(t, err, errNotPaused)
+	assert.NotContains(t, annotations(t, c), v1alpha1.AnnotationPauseOverridesForecast)
+}
+
+func TestAskYesNo(t *testing.T) {
+	for answer, want := range map[string]bool{"y\n": true, "YES\n": true, " yes \n": true, "n\n": false,
+		"\n": false, "": false, "sure\n": false} {
+		var out bytes.Buffer
+		got, err := askYesNo(strings.NewReader(answer), &out)("Pause it anyway? [y/N] ")
+		require.NoError(t, err)
+		assert.Equal(t, want, got, "answer %q", answer)
+		assert.Equal(t, "Pause it anyway? [y/N] ", out.String())
 	}
 }
