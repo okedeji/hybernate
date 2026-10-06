@@ -38,3 +38,16 @@ jobs:
           sha256: ${{ matrix.kind-sha256 }}
       - name: Running Test e2e
         run: make test-e2e KIND_NODE_IMAGE=${{ matrix.node-image }}
+
+  # Branch protection requires a check named E2E, which a matrix job can't
+  # report under that name. This one passes only if every version did, so
+  # the requirement holds whichever versions the matrix lists.
+  e2e:
+    name: E2E
+    needs: [test-e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULT: ${{ needs.test-e2e.result }}
+        run: test "$RESULT" = success
