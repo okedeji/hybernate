@@ -124,15 +124,6 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              desiredState:
-                description: |-
-                  DesiredState overrides automation and forces the workload into the given
-                  state. When set, the operator stops evaluating the idle policy and
-                  drives the workload to this state instead.
-                enum:
-                - Running
-                - Paused
-                type: string
               dryRun:
                 description: |-
                   DryRun makes the operator evaluate all policies and emit events but
