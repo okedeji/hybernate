@@ -38,6 +38,8 @@ kubectl annotate managedworkload my-api -n staging --overwrite \
   hybernate.io/pause-requested="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
+To pause it even when the forecast expects demand within the hour, also set `hybernate.io/pause-overrides-forecast: "true"`; set it, or remove it, with every request, since it applies to the request it comes with.
+
 It's an annotation rather than a spec field so that Argo CD and Flux, which own the spec of a ManagedWorkload kept in Git, leave it alone. Hybernate acts on each value once: it records the value it handled in `status.lastPauseRequest`, which survives an operator restart, and says what came of it in the `PauseRequest` condition.
 
 The request runs the idle clock out now, and the workload is paused by the same rules as an idle pause:
@@ -45,7 +47,7 @@ The request runs the idle clock out now, and the workload is paused by the same 
 | The workload | What Hybernate does | `PauseRequest` condition |
 |--------------|---------------------|--------------------------|
 | `Running` or `Idle` | Pauses it, with a `PauseRequested` event, then `Paused` | `True`, `Pausing` |
-| Held by the forecast, which expects demand soon | Pauses it: you asked. The forecast keeps learning | `True`, `Pausing` |
+| A confident forecast expects demand within the hour | Leaves it running and says when the demand is expected, since a pause would likely be woken straight back. `kubectl hybernate pause` asks whether to pause it anyway; a request with `hybernate.io/pause-overrides-forecast: "true"`, which `--yes` sets, pauses it | `False`, `ForecastExpectsDemand` |
 | Within the hour Hybernate waits after Argo CD or Flux undid its last pause | Pauses it: you asked. If the tool undoes it again, that's a new [`GitOpsConflict`](gitops.md) | `True`, `Pausing` |
 | `Pausing` | Finishes the pause, then marks the request handled | `True`, `AlreadyPaused` |
 | `Paused` | Marks the request handled | `True`, `AlreadyPaused` |

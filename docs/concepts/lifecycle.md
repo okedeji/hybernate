@@ -35,7 +35,7 @@ A workload already at zero replicas, scaled there by a person, a pipeline or KED
 
 ### On request
 
-- **Running or Idle → Pausing → Paused**: `kubectl hybernate pause`, which sets a new `hybernate.io/pause-requested` value. The idle clock runs out at once, and the workload is paused by the rules of an idle pause, except that the forecast's veto and the hour after a GitOps conflict don't hold it back. In dry-run it goes **Running → Idle** instead, as a would-be pause. See [Pause Now](../guides/pause.md#pause-now)
+- **Running or Idle → Pausing → Paused**: `kubectl hybernate pause`, which sets a new `hybernate.io/pause-requested` value. The idle clock runs out at once, and the workload is paused by the rules of an idle pause, except that the hour after a GitOps conflict doesn't hold it back. A forecast expecting demand within the hour declines it, saying when, unless the request overrides the forecast. In dry-run it goes **Running → Idle** instead, as a would-be pause. See [Pause Now](../guides/pause.md#pause-now)
 - **Paused → Resuming → Running**: `kubectl hybernate wake`, which changes an activity annotation, or any of the automatic wakes above: a requested pause wakes like any other
 
 ## Idempotency
