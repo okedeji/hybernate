@@ -321,56 +321,76 @@ func TestPauseRequest_DryRun(t *testing.T) {
 	assert.Equal(t, int32(1), got.Status.DryRun.Pauses)
 }
 
-// The forecast expecting demand, and the hour Hybernate waits after a
-// GitOps tool undid its last pause, both hold back the idle clock. Someone
-// asking for the pause overrides both.
-func TestPauseRequest_OverridesTheForecastAndTheGitOpsHold(t *testing.T) {
-	expectsDemand := func(r *Reconciler) {
-		r.engines = newEngineRegistry(func() forecaster {
-			return &stubForecaster{phase: forecast.DailyActive, predictValue: 400}
-		})
-	}
+// A GitOps tool undoing the last pause holds the idle clock back for an
+// hour, but not a request: someone asked, and the plugin has already warned
+// them the tool will likely undo it again.
+func TestPauseRequest_OverridesTheGitOpsHold(t *testing.T) {
 	undoneByArgo := func(w *v1alpha1.ManagedWorkload) {
 		w.Status.LastScaledUp = &v1alpha1.ScaledUp{At: metav1.NewTime(fixedTime.Add(-10 * time.Minute)),
 			By: "argocd-controller", GitOps: "Argo CD", Replicas: 3}
 		meta.SetStatusCondition(&w.Status.Conditions, metav1.Condition{Type: conditionGitOpsConflict,
 			Status: metav1.ConditionTrue, Reason: "PauseUndone"})
 	}
-	tests := []struct {
-		name   string
-		mutate func(*v1alpha1.ManagedWorkload)
-		engine func(*Reconciler)
-	}{
-		{name: "the forecast expects demand", mutate: func(*v1alpha1.ManagedWorkload) {}, engine: expectsDemand},
-		{name: "a GitOps tool undid the last pause", mutate: undoneByArgo, engine: func(*Reconciler) {}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			idle := requestedPause()
-			delete(idle.Annotations, v1alpha1.AnnotationPauseRequested)
-			idle.Status.Activity.LastActivityTime = metav1.NewTime(fixedTime.Add(-2 * time.Hour))
-			tt.mutate(idle)
-			r := lifecycleReconciler(t, idle, 3, interceptor.Funcs{})
-			tt.engine(r)
+	idle := requestedPause()
+	delete(idle.Annotations, v1alpha1.AnnotationPauseRequested)
+	idle.Status.Activity.LastActivityTime = metav1.NewTime(fixedTime.Add(-2 * time.Hour))
+	undoneByArgo(idle)
+	r := lifecycleReconciler(t, idle, 3, interceptor.Funcs{})
 
-			reconcileUntilSettled(t, r)
+	reconcileUntilSettled(t, r)
 
-			require.NotEqual(t, v1alpha1.PhasePaused, getWorkload(t, r, "api").Status.Phase,
-				"the idle clock is held back")
+	require.NotEqual(t, v1alpha1.PhasePaused, getWorkload(t, r, "api").Status.Phase,
+		"the idle clock is held back")
 
-			requested := requestedPause()
-			tt.mutate(requested)
-			r = lifecycleReconciler(t, requested, 3, interceptor.Funcs{})
-			tt.engine(r)
+	requested := requestedPause()
+	undoneByArgo(requested)
+	r = lifecycleReconciler(t, requested, 3, interceptor.Funcs{})
 
-			reconcileUntilSettled(t, r)
+	reconcileUntilSettled(t, r)
 
-			got := getWorkload(t, r, "api")
-			assert.Equal(t, v1alpha1.PhasePaused, got.Status.Phase, "the request isn't")
-			assert.Equal(t, int32(0), targetReplicas(t, r))
-			assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionIdleVetoed))
+	assert.Equal(t, v1alpha1.PhasePaused, getWorkload(t, r, "api").Status.Phase, "the request isn't")
+	assert.Equal(t, int32(0), targetReplicas(t, r))
+}
+
+// A forecast expecting demand within the hour declines a pause request,
+// saying when, so the person asking can decide; asked again overriding the
+// forecast, the workload pauses.
+func TestPauseRequest_ForecastDeclinesUnlessOverridden(t *testing.T) {
+	expectsDemand := func(r *Reconciler) {
+		r.engines = newEngineRegistry(func() forecaster {
+			return &stubForecaster{phase: forecast.DailyActive, predictValue: 400}
 		})
 	}
+
+	declined := requestedPause()
+	r := lifecycleReconciler(t, declined, 3, interceptor.Funcs{})
+	expectsDemand(r)
+
+	reconcileUntilSettled(t, r)
+
+	got := getWorkload(t, r, "api")
+	assert.NotEqual(t, v1alpha1.PhasePaused, got.Status.Phase)
+	assert.Equal(t, int32(3), targetReplicas(t, r))
+	cond := pauseRequestCondition(t, got)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, reasonForecastExpectsDemand, cond.Reason)
+	assert.Contains(t, cond.Message, "the forecast expects demand")
+	assert.Contains(t, cond.Message, "in the hour from")
+	assert.Equal(t, got.Annotations[v1alpha1.AnnotationPauseRequested], got.Status.LastPauseRequest,
+		"answered, so it isn't asked again on every reconcile")
+	assert.Equal(t, 1, strings.Count(drainEvents(t, r), reasonForecastExpectsDemand))
+
+	overridden := requestedPause()
+	overridden.Annotations[v1alpha1.AnnotationPauseOverridesForecast] = v1alpha1.True
+	r = lifecycleReconciler(t, overridden, 3, interceptor.Funcs{})
+	expectsDemand(r)
+
+	reconcileUntilSettled(t, r)
+
+	got = getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhasePaused, got.Status.Phase)
+	assert.Equal(t, int32(0), targetReplicas(t, r))
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionIdleVetoed))
 }
 
 // A request that finds the workload pausing, or waking, is answered once

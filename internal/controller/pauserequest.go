@@ -41,6 +41,8 @@ const (
 	reasonAlreadyPaused = "AlreadyPaused"
 	reasonActiveUntil   = "ActiveUntil"
 	reasonDryRun        = "DryRun"
+
+	reasonForecastExpectsDemand = "ForecastExpectsDemand"
 )
 
 // pendingPauseRequest is the hybernate.io/pause-requested value Hybernate
@@ -82,9 +84,11 @@ func (r *Reconciler) refusePauseRequest(ctx context.Context, workload *v1alpha1.
 // it. The request runs the idle clock out now, and the workload is paused as
 // an idle one is, to wake on a request, on activity, or by autoResume. The
 // rules an idle pause keeps still apply: an active-until hold, awake
-// dependents and dry-run all stop it. Two don't, because someone asked: the
-// forecast expecting demand, and the hour Hybernate waits after a GitOps
-// tool undid its last pause.
+// dependents and dry-run all stop it. The forecast expecting demand within
+// the hour declines it too, saying when, unless the request overrides the
+// forecast: the person asking decides, knowing it would likely be woken
+// straight back. The hour Hybernate waits after a GitOps tool undid its last
+// pause doesn't stop it, because someone asked.
 //
 // The callers before it answer a request for a workload Hybernate isn't
 // managing, and one scaled to zero already. One that arrives while the
@@ -124,6 +128,14 @@ func (r *Reconciler) reconcilePauseRequest(ctx context.Context, workload *v1alph
 
 	if workload.Spec.DryRun {
 		return r.pauseRequestedInDryRun(ctx, workload)
+	}
+
+	if workload.Annotations[v1alpha1.AnnotationPauseOverridesForecast] != v1alpha1.True {
+		if vetoed, predicted, hour := r.forecastVeto(ctx, workload, r.forecastEngine(workload)); vetoed {
+			return nil, r.refusePauseRequest(ctx, workload, "Normal", reasonForecastExpectsDemand, fmt.Sprintf(
+				"the forecast expects demand at %.0f%% of requests in the hour from %s; ask again overriding the forecast to pause anyway",
+				predicted, hour.UTC().Format("15:04 UTC")))
+		}
 	}
 
 	r.clearIdleVeto(workload)
