@@ -99,7 +99,6 @@ var _ = ginkgo.Describe("Doorman routing through the operator's cache", func() {
 		w := envtestWorkload(ns)
 		w.Name = name
 		w.Spec.Target.Name = name
-		w.Spec.DesiredState = nil
 		gomega.Expect(k8sClient.Create(ctx, w)).To(gomega.Succeed())
 		w.Status.Phase = v1alpha1.PhasePaused
 		target := envtestDeployment(ns, 0)

@@ -184,9 +184,6 @@ func wakeMessage(ref string, phase v1alpha1.WorkloadPhase, wait bool) string {
 // the user gets the reason instead of a timeout.
 func checkWakeable(w *v1alpha1.ManagedWorkload) error {
 	ref := w.Namespace + "/" + w.Spec.Target.Name
-	if d := w.Spec.DesiredState; d != nil && *d != v1alpha1.DesiredStateRunning {
-		return fmt.Errorf("%s %w: spec.desiredState is %s; remove it or set it to Running", ref, errNotWakeable, *d)
-	}
 	conditions := w.Status.Conditions
 	if c := meta.FindStatusCondition(conditions, "TargetAvailable"); c != nil && c.Status == metav1.ConditionFalse {
 		return fmt.Errorf("%s %w: Hybernate isn't managing it: %s", ref, errNotWakeable, oneLine(c.Message))

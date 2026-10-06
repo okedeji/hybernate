@@ -152,7 +152,7 @@ func lowestFreePort(used func(int32) bool) (int32, error) {
 }
 
 func TestReconcileDoorman_RoutesPausedWorkload(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	headless := service("api-headless", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80})
 	headless.Spec.ClusterIP = corev1.ClusterIPNone
 	external := service("api-external", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80})
@@ -198,7 +198,7 @@ func TestReconcileDoorman_RoutesPausedWorkload(t *testing.T) {
 }
 
 func TestReconcileDoorman_KeptWhileResumingRemovedWhenRunning(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
 	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
@@ -223,16 +223,9 @@ func TestReconcileDoorman_NotRouted(t *testing.T) {
 		wantReason string
 	}{
 		{
-			name: "manual pause doesn't wake on request",
-			workload: func() *v1alpha1.ManagedWorkload {
-				return lifecycleWorkload("api", ptr.To(v1alpha1.DesiredStatePaused), v1alpha1.PhasePaused)
-			},
-			doorman: doormanEndpoints("10.0.0.7"),
-		},
-		{
 			name: "opted out",
 			workload: func() *v1alpha1.ManagedWorkload {
-				w := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+				w := lifecycleWorkload("api", v1alpha1.PhasePaused)
 				w.Spec.Wake = &v1alpha1.WakeSpec{OnRequest: ptr.To(false)}
 				return w
 			},
@@ -240,12 +233,12 @@ func TestReconcileDoorman_NotRouted(t *testing.T) {
 		},
 		{
 			name:       "no doorman pod is ready",
-			workload:   func() *v1alpha1.ManagedWorkload { return lifecycleWorkload("api", nil, v1alpha1.PhasePaused) },
+			workload:   func() *v1alpha1.ManagedWorkload { return lifecycleWorkload("api", v1alpha1.PhasePaused) },
 			wantReason: "DoormanUnavailable",
 		},
 		{
 			name:     "doorman pods aren't ready",
-			workload: func() *v1alpha1.ManagedWorkload { return lifecycleWorkload("api", nil, v1alpha1.PhasePaused) },
+			workload: func() *v1alpha1.ManagedWorkload { return lifecycleWorkload("api", v1alpha1.PhasePaused) },
 			doorman: func() *discoveryv1.EndpointSlice {
 				slice := doormanEndpoints("10.0.0.7")
 				slice.Endpoints[0].Conditions.Ready = ptr.To(false)
@@ -278,8 +271,8 @@ func TestReconcileDoorman_NotRouted(t *testing.T) {
 // One doorman serves the whole cluster, so two workloads must never share a
 // doorman port.
 func TestReconcileDoorman_PortsAreUniqueAcrossWorkloads(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
-	other := lifecycleWorkload("other", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
+	other := lifecycleWorkload("other", v1alpha1.PhasePaused)
 	other.Namespace = "preview-9"
 	other.UID = "other-uid"
 	other.Status.Doorman = []v1alpha1.DoormanRoute{{Service: "other", PortName: "http", DoormanPort: 20000}}
@@ -296,10 +289,10 @@ func TestReconcileDoorman_PortsAreUniqueAcrossWorkloads(t *testing.T) {
 // A port this workload held while paused before may since have gone to
 // another workload; keeping it would send one workload's traffic to the other.
 func TestReconcileDoorman_MovesOffAPortTakenByAnotherWorkload(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	const taken = int32(21000)
 	workload.Status.Doorman = []v1alpha1.DoormanRoute{{Service: "api", PortName: "http", DoormanPort: taken}}
-	other := lifecycleWorkload("other", nil, v1alpha1.PhasePaused)
+	other := lifecycleWorkload("other", v1alpha1.PhasePaused)
 	other.Namespace = "preview-9"
 	other.UID = "other-uid"
 	other.Status.Doorman = []v1alpha1.DoormanRoute{{Service: "other", PortName: "http", DoormanPort: taken}}
@@ -324,7 +317,7 @@ func TestReconcileDoorman_ConcurrentPausesGetDistinctPorts(t *testing.T) {
 	targets := make([]*appsv1.Deployment, n)
 	for i := range n {
 		name := fmt.Sprintf("app-%d", i)
-		workloads[i] = lifecycleWorkload(name, nil, v1alpha1.PhasePaused)
+		workloads[i] = lifecycleWorkload(name, v1alpha1.PhasePaused)
 		workloads[i].UID = types.UID(name)
 		targets[i] = appTarget()
 		targets[i].Name = name
@@ -355,9 +348,9 @@ func TestReconcileDoorman_ConcurrentPausesGetDistinctPorts(t *testing.T) {
 // moment. It isn't handed to another workload until the doorman's drain is
 // over, or that workload would get the first one's traffic.
 func TestReconcileDoorman_DrainingPortsAreNotReused(t *testing.T) {
-	first := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	first := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	first.UID = "api-uid"
-	second := lifecycleWorkload("billing", nil, v1alpha1.PhasePaused)
+	second := lifecycleWorkload("billing", v1alpha1.PhasePaused)
 	second.UID = "billing-uid"
 	billing := appTarget()
 	billing.Name = "billing"
@@ -388,7 +381,7 @@ func TestReconcileDoorman_DrainingPortsAreNotReused(t *testing.T) {
 // The doorman's slices outlast any path that stops routing: turning the
 // doorman off removes every one of the workload's.
 func TestReconcileDoorman_DisablingRemovesSlices(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
 	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
@@ -403,7 +396,7 @@ func TestReconcileDoorman_DisablingRemovesSlices(t *testing.T) {
 }
 
 func TestReconcileDoorman_LeavesASliceItDoesNotOwn(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	theirs := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: doorman.SliceName("api", "api", discoveryv1.AddressTypeIPv4), Namespace: "default",
@@ -423,7 +416,7 @@ func TestReconcileDoorman_LeavesASliceItDoesNotOwn(t *testing.T) {
 }
 
 func TestReconcileDoorman_CopiesTheServiceProxyName(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	svc := service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80})
 	svc.Labels = map[string]string{labelServiceProxyName: "custom-proxy"}
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"), svc)
@@ -439,7 +432,7 @@ func TestReconcileDoorman_CopiesTheServiceProxyName(t *testing.T) {
 // Ports that only health checks or scrapers use can be left out, so they
 // fail while the workload is paused instead of waking it.
 func TestReconcileDoorman_IgnoresAnnotatedPorts(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	svc := service("api", map[string]string{"app": "api"},
 		corev1.ServicePort{Name: "http", Port: 80},
 		corev1.ServicePort{Name: "metrics", Port: 9090},
@@ -484,7 +477,7 @@ func TestReconcileDoorman_IPFamilies(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+			workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 			r := doormanReconciler(t, append([]client.Object{workload, tt.svc}, tt.doorman...)...)
 
 			require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
@@ -512,9 +505,9 @@ func TestReconcileDoorman_IPFamilies(t *testing.T) {
 // Service to the doorman under its own slice, and once either is running,
 // the Service sends traffic to it rather than waking the other.
 func TestReconcileDoorman_SharedService(t *testing.T) {
-	stable := lifecycleWorkload("stable", nil, v1alpha1.PhasePaused)
+	stable := lifecycleWorkload("stable", v1alpha1.PhasePaused)
 	stable.UID = "uid-stable"
-	canary := lifecycleWorkload("canary", nil, v1alpha1.PhasePaused)
+	canary := lifecycleWorkload("canary", v1alpha1.PhasePaused)
 	canary.UID = "uid-canary"
 	shop := service("shop", map[string]string{"app": "shop"}, corev1.ServicePort{Name: "http", Port: 80})
 	r := doormanReconciler(t, stable, canary, doormanEndpoints("10.0.0.7"), shop)
@@ -597,7 +590,7 @@ func TestReconcileDoorman_SkipsGKENEGServices(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+			workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 			r := doormanReconciler(t, append([]client.Object{workload, doormanEndpoints("10.0.0.7")}, tt.services...)...)
 
 			require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
@@ -618,7 +611,7 @@ func TestReconcileDoorman_SkipsGKENEGServices(t *testing.T) {
 // Requests through a skipped Service fail while the workload is paused, so
 // that's surfaced as a warning, once rather than on every reconcile.
 func TestReconcileDoorman_WarnsOnceAboutASkippedService(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	svc := service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80})
 	svc.Annotations = map[string]string{annotationGKENEG: `{"ingress":true}`}
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"), svc)
@@ -678,7 +671,7 @@ func TestReconcile_StoppingManagementRemovesDoormanRouting(t *testing.T) {
 		{name: "doorman turned off, then woken", stop: func(t *testing.T, r *Reconciler) {
 			r.DoormanService = ""
 			w := fetch(t, r, "api")
-			w.Spec.DesiredState = desiredState(v1alpha1.DesiredStateRunning)
+			w.Annotations = map[string]string{v1alpha1.AnnotationLastActivity: fixedTime.Format(time.RFC3339)}
 			require.NoError(t, r.Update(context.Background(), w))
 		}},
 	}
@@ -806,7 +799,7 @@ func TestReconcile_RoutingFailureWhileWakingIsAnnouncedOnce(t *testing.T) {
 }
 
 func TestRouteDoorman_ReportsFailuresAndBacksOff(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
 	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
@@ -847,7 +840,7 @@ func TestIsDoormanEndpoints(t *testing.T) {
 // aren't cached, so a workload left to them is looked at again soon: once
 // they're gone, requests through the Service must wake it.
 func TestRouteDoorman_RechecksAServiceLeftToOtherPods(t *testing.T) {
-	workload := lifecycleWorkload("canary", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("canary", v1alpha1.PhasePaused)
 	target := appTarget()
 	target.Spec.Template.Labels = map[string]string{"app": "shop", "track": "canary"}
 	shop := service("shop", map[string]string{"app": "shop"}, corev1.ServicePort{Name: "http", Port: 80})
@@ -865,7 +858,7 @@ func TestRouteDoorman_RechecksAServiceLeftToOtherPods(t *testing.T) {
 // leaves the slices pointing at their ports. The next attempt keeps them,
 // rather than moving the Service to a new port on every retry.
 func TestReconcileDoorman_KeepsTheSlicesPortsWhenStatusWasNotWritten(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
 	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
@@ -889,9 +882,9 @@ func TestReconcileDoorman_KeepsTheSlicesPortsWhenStatusWasNotWritten(t *testing.
 // that lasts, so it's never given to another workload while it still
 // receives the first one's traffic.
 func TestReconcileDoorman_KeepsAPortWhileItsSliceRemains(t *testing.T) {
-	first := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	first := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	first.UID = "api-uid"
-	second := lifecycleWorkload("billing", nil, v1alpha1.PhasePaused)
+	second := lifecycleWorkload("billing", v1alpha1.PhasePaused)
 	second.UID = "billing-uid"
 	billing := appTarget()
 	billing.Name = "billing"
@@ -924,7 +917,7 @@ func TestReconcileDoorman_KeepsAPortWhileItsSliceRemains(t *testing.T) {
 // the next write tries to create it again. That's the cache catching up,
 // not a routing failure: it's retried soon, without a warning.
 func TestRouteDoorman_AStaleCacheIsNotAFailure(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
 	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
@@ -944,7 +937,7 @@ func TestRouteDoorman_AStaleCacheIsNotAFailure(t *testing.T) {
 // With watchNamespaces, the operator has a Role in each watched namespace
 // and nothing cluster-wide, so ports in use are read namespace by namespace.
 func TestReconcileDoorman_AllocatesWithOnlyNamespacedAccess(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhasePaused)
+	workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
 	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
 	r.WatchNamespaces = []string{"default"}

@@ -299,24 +299,26 @@ func TestWakeOnScaleUp_StaleCacheIsNotAScaleUp(t *testing.T) {
 
 // A workload scaled to zero outside Hybernate is meant to be off. Hybernate
 // neither pauses it, which would record zero replicas to restore, nor ever
-// starts it: not on idle, not on desiredState, not on a later wake.
+// starts it: not on idle, not on a pause request, not on a later wake.
 func TestScaledToZero_IsLeftOff(t *testing.T) {
 	idleLongAgo := &v1alpha1.ActivityStatus{LastActivityTime: metav1.NewTime(fixedTime.Add(-2 * time.Hour)),
 		LastEvaluatedTime: ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second)))}
 	idlePolicy := &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
 	tests := []struct {
-		name    string
-		phase   v1alpha1.WorkloadPhase
-		desired *v1alpha1.DesiredState
+		name      string
+		phase     v1alpha1.WorkloadPhase
+		requested bool
 	}{
 		{name: "idle for longer than idleAfter", phase: v1alpha1.PhaseRunning},
 		{name: "already found idle", phase: v1alpha1.PhaseIdle},
-		{name: "desiredState Paused", phase: v1alpha1.PhaseRunning, desired: desiredState(v1alpha1.DesiredStatePaused)},
-		{name: "desiredState Running", phase: v1alpha1.PhaseRunning, desired: desiredState(v1alpha1.DesiredStateRunning)},
+		{name: "pause requested", phase: v1alpha1.PhaseRunning, requested: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			workload := lifecycleWorkload("api", tt.desired, tt.phase)
+			workload := lifecycleWorkload("api", tt.phase)
+			if tt.requested {
+				withPauseRequested(workload)
+			}
 			workload.Spec.IdlePolicy = idlePolicy
 			workload.Status.Activity = idleLongAgo.DeepCopy()
 			r := lifecycleReconciler(t, workload, 0, interceptor.Funcs{})
@@ -329,7 +331,7 @@ func TestScaledToZero_IsLeftOff(t *testing.T) {
 			assert.Equal(t, int32(0), targetReplicas(t, r))
 			assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionScaledToZero))
 			events := drainEvents(t, r)
-			assert.Equal(t, 1, strings.Count(events, ReasonScaledToZero), events)
+			assert.Equal(t, 1, strings.Count(events, "scaled to zero outside Hybernate; left off"), events)
 			assert.NotContains(t, events, ReasonPaused)
 		})
 	}
@@ -348,7 +350,7 @@ func TestScaledToZero_StaleCacheDoesntPause(t *testing.T) {
 		}
 		return nil
 	}}
-	workload := lifecycleWorkload("api", desiredState(v1alpha1.DesiredStatePaused), v1alpha1.PhaseRunning)
+	workload := withPauseRequested(lifecycleWorkload("api", v1alpha1.PhaseRunning))
 	r := lifecycleReconciler(t, workload, 0, stale)
 
 	reconcileUntilSettled(t, r)
@@ -361,7 +363,7 @@ func TestScaledToZero_StaleCacheDoesntPause(t *testing.T) {
 // Scaled back up, the workload is managed again, starting with a fresh
 // idle clock rather than one that ran out while it was off.
 func TestScaledToZero_BackUpIsActivity(t *testing.T) {
-	workload := lifecycleWorkload("api", nil, v1alpha1.PhaseRunning)
+	workload := lifecycleWorkload("api", v1alpha1.PhaseRunning)
 	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
 	workload.Status.Activity = &v1alpha1.ActivityStatus{LastActivityTime: metav1.NewTime(fixedTime.Add(-2 * time.Hour)),
 		LastEvaluatedTime: ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second)))}

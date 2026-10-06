@@ -395,15 +395,14 @@ func TestKindQualifiedName(t *testing.T) {
 		"a cut that ends on a dot is still a valid name")
 }
 
-// Settings no annotation controls, such as a desiredState patched in as
-// the pause guide shows, survive the annotations being applied again.
+// Settings no annotation controls, such as costTracking rates patched in,
+// survive the annotations being applied again.
 func TestOptIn_UserSettingsSurvive(t *testing.T) {
 	d := optInDeployment("api", managedLabel, map[string]string{v1alpha1.AnnotationDependsOn: "statefulset/postgres"})
 	r, _ := optInReconciler(t, optInNamespace(nil, nil), d)
 	reconcileOptIn(t, r, "api")
 	mw, _ := managedWorkload(t, r, "api")
 	cpu := resource.MustParse("0.05")
-	mw.Spec.DesiredState = ptr.To(v1alpha1.DesiredStatePaused)
 	mw.Spec.Prediction.Confidence = 70
 	mw.Spec.CostTracking = &v1alpha1.CostTrackingSpec{Rates: &v1alpha1.CostRates{CPUPerHour: &cpu}}
 	mw.Spec.IdlePolicy.Activity.Prometheus = []v1alpha1.PrometheusActivity{{PromQL: "sum(up)"}}
@@ -417,7 +416,6 @@ func TestOptIn_UserSettingsSurvive(t *testing.T) {
 	reconcileOptIn(t, r, "api")
 
 	mw, _ = managedWorkload(t, r, "api")
-	assert.Equal(t, ptr.To(v1alpha1.DesiredStatePaused), mw.Spec.DesiredState)
 	assert.Equal(t, 70, mw.Spec.Prediction.Confidence)
 	assert.NotNil(t, mw.Spec.CostTracking)
 	assert.Equal(t, []v1alpha1.PrometheusActivity{{PromQL: "sum(up)"}}, mw.Spec.IdlePolicy.Activity.Prometheus)

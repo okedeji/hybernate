@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -148,28 +147,19 @@ func TestWake_TimesOut(t *testing.T) {
 	assert.Contains(t, err.Error(), "kubectl describe managedworkload api -n preview-42")
 }
 
-func TestWake_RefusesWhatActivityCantWake(t *testing.T) {
-	manual := managedWorkload(v1alpha1.PhasePaused)
-	manual.Spec.DesiredState = ptr.To(v1alpha1.DesiredStatePaused)
+// A ManagedWorkload another one's target already belongs to isn't acted on,
+// so a wake through it would only wait out the timeout.
+func TestWake_RefusesADuplicate(t *testing.T) {
+	duplicate := managedWorkload(v1alpha1.PhaseRunning)
+	duplicate.Status.Conditions = []metav1.Condition{{Type: "DuplicateTarget", Status: metav1.ConditionTrue,
+		Reason: "DuplicateTarget", Message: "Deployment/api is already managed by api-first"}}
+	c := newClient(t, interceptor.Funcs{}, duplicate)
 
-	tests := []struct {
-		name     string
-		workload *v1alpha1.ManagedWorkload
-		wantHint string
-	}{
-		{name: "paused by desiredState", workload: manual, wantHint: "remove it or set it to Running"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := newClient(t, interceptor.Funcs{}, tt.workload)
+	err := wake(testContext(t), c, apiKey, testOptions(), &bytes.Buffer{})
 
-			err := wake(testContext(t), c, apiKey, testOptions(), &bytes.Buffer{})
-
-			require.ErrorIs(t, err, errNotWakeable)
-			assert.Contains(t, err.Error(), tt.wantHint)
-			assert.Empty(t, annotations(t, c), "nothing is stamped when it couldn't wake it")
-		})
-	}
+	require.ErrorIs(t, err, errNotWakeable)
+	assert.Contains(t, err.Error(), "Deployment/api is already managed by api-first")
+	assert.Empty(t, annotations(t, c), "nothing is stamped when it couldn't wake it")
 }
 
 func TestWake_NotFound(t *testing.T) {

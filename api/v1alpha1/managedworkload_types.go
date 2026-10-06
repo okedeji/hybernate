@@ -54,14 +54,6 @@ func init() {
 
 // --- Spec ---
 
-// +kubebuilder:validation:Enum=Running;Paused
-type DesiredState string
-
-const (
-	DesiredStateRunning DesiredState = "Running"
-	DesiredStatePaused  DesiredState = "Paused"
-)
-
 // ManagedWorkloadSpec defines the desired lifecycle behavior for a workload.
 type ManagedWorkloadSpec struct {
 	// Target identifies the workload to manage (e.g. a Deployment or
@@ -69,12 +61,6 @@ type ManagedWorkloadSpec struct {
 	// at zero: create another ManagedWorkload to manage another workload.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="target is immutable; create another ManagedWorkload to manage another workload"
 	Target WorkloadRef `json:"target"`
-
-	// DesiredState overrides automation and forces the workload into the given
-	// state. When set, the operator stops evaluating the idle policy and
-	// drives the workload to this state instead.
-	// +optional
-	DesiredState *DesiredState `json:"desiredState,omitempty"`
 
 	// IdlePolicy configures automatic pausing: the operator pauses the
 	// workload once it has had no activity for IdlePolicy.IdleAfter.

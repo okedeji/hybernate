@@ -341,11 +341,6 @@ func (in *ManagedWorkloadList) DeepCopyObject() runtime.Object {
 func (in *ManagedWorkloadSpec) DeepCopyInto(out *ManagedWorkloadSpec) {
 	*out = *in
 	out.Target = in.Target
-	if in.DesiredState != nil {
-		in, out := &in.DesiredState, &out.DesiredState
-		*out = new(DesiredState)
-		**out = **in
-	}
 	if in.IdlePolicy != nil {
 		in, out := &in.IdlePolicy, &out.IdlePolicy
 		*out = new(IdlePolicySpec)

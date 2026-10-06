@@ -315,10 +315,9 @@ func (r *Reconciler) stampActivity(ctx context.Context, dep *v1alpha1.ManagedWor
 // waitForDependencies holds a resume until every waitForReady dependency's
 // pods are Ready. It doesn't wait for one that won't become Ready by
 // waiting, which would leave this workload at zero for good: one that
-// doesn't exist or can't be seen (reported by checkDependenciesExist), one
-// whose desiredState is Paused, or an unmanaged one scaled to zero. A
-// managed one still paused is woken again, in case the first wake was
-// missed.
+// doesn't exist or can't be seen (reported by checkDependenciesExist), or
+// one scaled to zero outside Hybernate. A managed one still paused is woken
+// again, in case the first wake was missed.
 func (r *Reconciler) waitForDependencies(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
 	refs := slices.DeleteFunc(slices.Clone(workload.Spec.DependsOn), func(ref v1alpha1.DependencyRef) bool {
 		return !ref.WaitForReady
@@ -384,9 +383,6 @@ func (r *Reconciler) waitForDependencies(ctx context.Context, workload *v1alpha1
 // waiting, or "" when it may. dep is its ManagedWorkload, if it has one.
 func wontStart(dep *v1alpha1.ManagedWorkload, target client.Object) string {
 	if dep != nil {
-		if dep.Spec.DesiredState != nil && *dep.Spec.DesiredState == v1alpha1.DesiredStatePaused {
-			return "its desiredState is Paused"
-		}
 		switch dep.Status.Phase {
 		case v1alpha1.PhasePaused, v1alpha1.PhasePausing, v1alpha1.PhaseResuming:
 			return ""
@@ -453,30 +449,6 @@ func (r *Reconciler) checkDependenciesExist(ctx context.Context, workload *v1alp
 		parts = append(parts, "can't be seen, so it isn't held or woken: "+strings.Join(hidden, ", "))
 	}
 	r.setCondition(workload, conditionDependencyNotFound, metav1.ConditionTrue, reason, strings.Join(parts, "; "))
-	return nil
-}
-
-// warnIfDependentsAwake notes when a manual pause overrides the
-// dependency hold. The user's choice wins, but dependents may now fail.
-func (r *Reconciler) warnIfDependentsAwake(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	ctx, cancel := context.WithTimeout(ctx, dependencyTimeout)
-	defer cancel()
-
-	g, err := r.loadDependencyGraph(ctx)
-	if err != nil {
-		return err
-	}
-	var awake []string
-	for _, d := range g.dependents(workload) {
-		if isAwake(d.Status.Phase) {
-			awake = append(awake, d.Namespace+"/"+d.Name)
-		}
-	}
-	if len(awake) > 0 {
-		slices.Sort(awake)
-		r.emitEvent(workload, false, "Warning", "DependentsAwake", actionPause,
-			"desiredState overrides the dependency hold while %s still depend on it", strings.Join(awake, ", "))
-	}
 	return nil
 }
 

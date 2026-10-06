@@ -72,11 +72,16 @@ func envtestWorkload(namespace string) *v1alpha1.ManagedWorkload {
 	return &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: namespace},
 		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target:       v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-			DesiredState: ptr.To(v1alpha1.DesiredStatePaused),
-			Prediction:   v1alpha1.PredictionSpec{Confidence: 85},
+			Target:     v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85},
 		},
 	}
+}
+
+// withPauseRequested asks for w's workload to be paused now.
+func withPauseRequested(w *v1alpha1.ManagedWorkload) *v1alpha1.ManagedWorkload {
+	w.Annotations = map[string]string{v1alpha1.AnnotationPauseRequested: pauseToken}
+	return w
 }
 
 var _ = ginkgo.Describe("ManagedWorkload validation", func() {
@@ -125,7 +130,7 @@ var _ = ginkgo.Describe("A pause interrupted by a conflict", func() {
 	ginkgo.BeforeEach(func() {
 		ns = envtestNamespace()
 		gomega.Expect(k8sClient.Create(ctx, envtestDeployment(ns, 3))).To(gomega.Succeed())
-		gomega.Expect(k8sClient.Create(ctx, envtestWorkload(ns))).To(gomega.Succeed())
+		gomega.Expect(k8sClient.Create(ctx, withPauseRequested(envtestWorkload(ns)))).To(gomega.Succeed())
 
 		base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -259,8 +264,8 @@ func TestKEDAUninstalledWhileTheOperatorRuns(t *testing.T) {
 		require.NoError(t, c.Create(ctx, d))
 		w := envtestWorkload("shop")
 		w.Name, w.Spec.Target.Name = name, name
-		if name == "web" {
-			w.Spec.DesiredState = nil
+		if name == "api" {
+			withPauseRequested(w)
 		}
 		require.NoError(t, c.Create(ctx, w))
 	}

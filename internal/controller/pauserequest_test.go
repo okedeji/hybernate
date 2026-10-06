@@ -50,8 +50,7 @@ const pauseToken = "2026-03-14T11:59:30.123456789Z"
 // requestedPause is a running workload, active five minutes ago, with an
 // hour's idle clock, whose pause has been requested.
 func requestedPause() *v1alpha1.ManagedWorkload {
-	w := lifecycleWorkload("api", nil, v1alpha1.PhaseRunning)
-	w.Annotations = map[string]string{v1alpha1.AnnotationPauseRequested: pauseToken}
+	w := withPauseRequested(lifecycleWorkload("api", v1alpha1.PhaseRunning))
 	w.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
 	w.Status.LastTransitionTime = ptr.To(metav1.NewTime(fixedTime.Add(-3 * time.Hour)))
 	w.Status.Activity = &v1alpha1.ActivityStatus{
@@ -221,7 +220,7 @@ func TestPauseRequest_Refused(t *testing.T) {
 			name: "another ManagedWorkload manages the target", replicas: 3,
 			mutate: func(w *v1alpha1.ManagedWorkload) { w.UID = "bbb" },
 			objs: []client.Object{func() client.Object {
-				owner := lifecycleWorkload("api-first", nil, v1alpha1.PhaseRunning)
+				owner := lifecycleWorkload("api-first", v1alpha1.PhaseRunning)
 				owner.UID = "aaa"
 				owner.Spec.Target.Name = "api"
 				return owner

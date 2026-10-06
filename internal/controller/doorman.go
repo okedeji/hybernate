@@ -92,14 +92,10 @@ const (
 )
 
 // wakeOnRequest reports whether the workload's Services should route to the
-// doorman while it's paused. A manual pause is excluded: the doorman wakes
-// workloads, and a workload paused by desiredState doesn't wake until the
-// user says so, so holding its connections would only delay a failure.
+// doorman while it's paused, which they do unless wake.onRequest is false.
 func wakeOnRequest(workload *v1alpha1.ManagedWorkload) bool {
-	if w := workload.Spec.Wake; w != nil && w.OnRequest != nil && !*w.OnRequest {
-		return false
-	}
-	return workload.Spec.DesiredState == nil
+	w := workload.Spec.Wake
+	return w == nil || w.OnRequest == nil || *w.OnRequest
 }
 
 // doormanEligible reports whether doorman routes should exist now. They're

@@ -206,15 +206,6 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	}
 	r.updatePredictionStatus(ctx, workload, engine)
 
-	if workload.Spec.DesiredState != nil {
-		r.clearIdleVeto(workload)
-		if err := r.reportManualOverride(ctx, workload); err != nil {
-			return nil, err
-		}
-		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
-	}
-	r.clearCondition(workload, conditionManualOverride, "Automated")
-
 	// Under dry-run, Idle is a would-be pause being measured, which a pause
 	// request begins whatever the idle policy, and only activity ends.
 	measuring := workload.Spec.DryRun && phase == v1alpha1.PhaseIdle
@@ -233,25 +224,6 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	return r.reconcileIdleClock(ctx, workload, target, engine, usage)
 }
 
-// reportManualOverride notes, once, that desiredState has taken over from
-// automation, which goes on learning the forecast but doesn't act on it.
-func (r *Reconciler) reportManualOverride(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	desired := *workload.Spec.DesiredState
-	msg := fmt.Sprintf("desiredState is %s, so automation doesn't pause or wake the workload", desired)
-	if c := meta.FindStatusCondition(workload.Status.Conditions, conditionManualOverride); c != nil &&
-		c.Status == metav1.ConditionTrue && c.Message == msg {
-		return nil
-	}
-	r.setCondition(workload, conditionManualOverride, metav1.ConditionTrue, "DesiredStateSet", msg)
-	if err := r.Status().Update(ctx, workload); err != nil {
-		return fmt.Errorf("recording the manual override: %w", err)
-	}
-	opmetrics.AutomationSkipped.WithLabelValues(workload.Namespace, workload.Name).Inc()
-	r.emitEvent(workload, false, "Normal", ReasonAutomationSkipped, actionEvaluate,
-		"automation skipped, desiredState is manually set to %s", desired)
-	return nil
-}
-
 // reconcileWake resumes a paused workload when an activity annotation asks
 // for it, or ahead of the demand a confident forecast predicts. Otherwise
 // it's looked at again when that forecast could next change its mind.
@@ -259,15 +231,9 @@ func (r *Reconciler) reconcileWake(ctx context.Context, workload *v1alpha1.Manag
 	recheck := &ctrl.Result{RequeueAfter: r.pausedRecheck()}
 	r.clearIdleVeto(workload)
 	engine := r.forecastEngine(workload)
-	manual := workload.Spec.DesiredState != nil
-	woken := !manual && r.wokenByActivity(ctx, workload, target)
-	r.seePausedDemand(ctx, workload, engine, manual, woken)
+	woken := r.wokenByActivity(ctx, workload, target)
+	r.seePausedDemand(ctx, workload, engine, woken)
 	r.updatePredictionStatus(ctx, workload, engine)
-
-	if manual {
-		return recheck, r.reportManualOverride(ctx, workload)
-	}
-	r.clearCondition(workload, conditionManualOverride, "Automated")
 
 	if woken {
 		message := "activity annotation is newer than the pause, waking"
@@ -359,21 +325,20 @@ func pausedRequest(workload *v1alpha1.ManagedWorkload) float64 {
 // seePausedDemand is a look at a paused workload's demand. Behind the
 // doorman, any request would have woken it, so a look that finds it still
 // paused found no demand, and one that finds a request waking it found
-// some. Without the doorman, or under a manual pause that requests don't
-// end, demand can't be seen at all.
+// some. Without the doorman, demand can't be seen at all.
 //
 // The demand a wake shows is at least twice the activity threshold, of
 // what the workload requested: the forecast approaches a pattern it is
 // learning from below, so an hour seen at the threshold itself would never
 // quite be forecast to reach it. Once awake, the workload's own usage
 // counts if it's more.
-func (r *Reconciler) seePausedDemand(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, manual, woken bool) {
+func (r *Reconciler) seePausedDemand(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster, woken bool) {
 	routed := meta.IsStatusConditionTrue(workload.Status.Conditions, conditionWakeOnRequest)
 	var demand float64
 	if woken {
 		demand = 2 * pausedRequest(workload) * float64(cpuThresholdFor(workload)) / 100
 	}
-	r.seeDemand(ctx, workload, engine, demand, (routed || woken) && !manual)
+	r.seeDemand(ctx, workload, engine, demand, routed || woken)
 }
 
 // resumeWarmup is how long after a wake an awake workload's usage isn't

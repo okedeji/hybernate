@@ -216,7 +216,7 @@ func TestReconciler_AppliesTimezoneToTheForecast(t *testing.T) {
 }
 
 func TestEngineRegistry_ForgetsADeletedWorkload(t *testing.T) {
-	workload := lifecycleWorkload("forgotten", nil, v1alpha1.PhaseRunning)
+	workload := lifecycleWorkload("forgotten", v1alpha1.PhaseRunning)
 	workload.UID = "uid-deleted"
 	workload.Finalizers = []string{finalizerName}
 	deleting := metav1.NewTime(fixedTime)

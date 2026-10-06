@@ -32,7 +32,7 @@ import (
 // whose CPU is above the activity threshold, on a clock the test controls.
 func busyWorkloadReconciler(t *testing.T) (*Reconciler, *time.Time) {
 	t.Helper()
-	workload := lifecycleWorkload("busy-app", nil, v1alpha1.PhaseRunning)
+	workload := lifecycleWorkload("busy-app", v1alpha1.PhaseRunning)
 	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
 	r := newTestReconciler(t, workload, &stubPauser{})
 	r.metrics = &stubMetrics{cpuMillis: 500, cpuPerReplica: 1000, memoryPerReplica: 1 << 30, replicas: 1}
@@ -143,7 +143,7 @@ func TestWithoutVolatile(t *testing.T) {
 // must be written promptly enough that a short idleAfter never pauses a
 // workload that was busy a minute before the restart.
 func TestReconcile_ActivitySurvivesARestart(t *testing.T) {
-	workload := lifecycleWorkload("busy-app", nil, v1alpha1.PhaseRunning)
+	workload := lifecycleWorkload("busy-app", v1alpha1.PhaseRunning)
 	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: 5 * time.Minute}}
 	r := newTestReconciler(t, workload, &stubPauser{pauseDone: true})
 	r.metrics = &stubMetrics{cpuMillis: 500, cpuPerReplica: 1000, replicas: 1}

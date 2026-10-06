@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -265,11 +264,7 @@ func TestDependencies_WakingWakesDependencies(t *testing.T) {
 }
 
 func TestDependencies_WaitForReady(t *testing.T) {
-	pausedPostgres := func(desired *v1alpha1.DesiredState) *v1alpha1.ManagedWorkload {
-		w := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
-		w.Spec.DesiredState = desired
-		return w
-	}
+	pausedPostgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
 	tests := []struct {
 		name        string
 		postgres    client.Object
@@ -280,10 +275,8 @@ func TestDependencies_WaitForReady(t *testing.T) {
 		{name: "dependency pods not ready", postgres: postgresTarget(1, 0), wantWait: true},
 		{name: "dependency ready", postgres: postgresTarget(1, 1)},
 		{name: "paused dependency is woken again and waited for", postgres: postgresTarget(0, 0),
-			managed: pausedPostgres(nil), wantWait: true, wantRewoken: true},
+			managed: pausedPostgres, wantWait: true, wantRewoken: true},
 		{name: "unmanaged dependency scaled to zero won't start", postgres: postgresTarget(0, 0)},
-		{name: "dependency held paused by desiredState won't start", postgres: postgresTarget(0, 0),
-			managed: pausedPostgres(ptr.To(v1alpha1.DesiredStatePaused))},
 	}
 
 	for _, tt := range tests {
@@ -356,66 +349,6 @@ func TestDependencies_NotFoundCondition(t *testing.T) {
 			assert.Equal(t, tt.wantMissing, meta.IsStatusConditionTrue(api.Status.Conditions, conditionDependencyNotFound))
 		})
 	}
-}
-
-func TestDependencies_ManualPauseWarnsWhenDependentsAwake(t *testing.T) {
-	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhaseRunning)
-	postgres.Spec.DesiredState = ptr.To(v1alpha1.DesiredStatePaused)
-	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, postgresRef())
-	pauser := &stubPauser{pauseDone: true}
-	r := depReconciler(t, pauser, postgres, api, postgresTarget(1, 1))
-
-	_, err := r.reconcileDesiredState(context.Background(), postgres, nil)
-	require.NoError(t, err)
-
-	assert.Equal(t, 1, pauser.pauseCalls, "a manual pause still wins")
-	recorder, ok := r.Recorder.(*events.FakeRecorder)
-	require.True(t, ok)
-	var warned bool
-	for len(recorder.Events) > 0 {
-		if strings.Contains(<-recorder.Events, "DependentsAwake") {
-			warned = true
-		}
-	}
-	assert.True(t, warned, "the override is reported")
-}
-
-// A manual pause held back, here after a GitOps tool undid the last, is
-// tried on every reconcile; the override is reported when it begins.
-func TestDependencies_ManualPauseWarnsOnceItBegins(t *testing.T) {
-	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhaseRunning)
-	postgres.Spec.DesiredState = ptr.To(v1alpha1.DesiredStatePaused)
-	postgres.Status.LastScaledUp = &v1alpha1.ScaledUp{At: metav1.NewTime(fixedTime.Add(-10 * time.Minute))}
-	meta.SetStatusCondition(&postgres.Status.Conditions, metav1.Condition{Type: conditionGitOpsConflict,
-		Status: metav1.ConditionTrue, Reason: "PauseUndone"})
-	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, postgresRef())
-	pauser := &stubPauser{pauseDone: true}
-	r := depReconciler(t, pauser, postgres, api, postgresTarget(1, 1))
-	recorder := r.Recorder.(*events.FakeRecorder)
-	warnings := func() int {
-		n := 0
-		for len(recorder.Events) > 0 {
-			if strings.Contains(<-recorder.Events, "DependentsAwake") {
-				n++
-			}
-		}
-		return n
-	}
-
-	for range 3 {
-		_, err := r.reconcileDesiredState(context.Background(), postgres, nil)
-		require.NoError(t, err)
-	}
-	assert.Zero(t, pauser.pauseCalls, "held back")
-	assert.Zero(t, warnings(), "nothing overridden yet")
-
-	r.clock = func() time.Time { return fixedTime.Add(time.Hour) }
-	for range 2 {
-		_, err := r.reconcileDesiredState(context.Background(), postgres, nil)
-		require.NoError(t, err)
-	}
-	assert.Equal(t, 1, pauser.pauseCalls)
-	assert.Equal(t, 1, warnings())
 }
 
 func TestFindRelatedWorkloads_Dependencies(t *testing.T) {

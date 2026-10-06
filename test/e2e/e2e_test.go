@@ -191,38 +191,29 @@ var _ = Describe("Manager", func() {
 		)
 
 		BeforeAll(func() {
-			By("creating a namespace and a two-replica Deployment to manage")
+			By("creating a namespace and a two-replica web app behind a Service to manage")
 			_, err := utils.Run(exec.Command("kubectl", "create", "ns", appNamespace))
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() {
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", appNamespace, "--wait=false"))
 			})
-
-			Expect(kubectlApply(deploymentManifest(appName, appNamespace, 2))).To(Succeed())
-
-			_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+appName,
-				"-n", appNamespace, "--timeout=2m"))
-			Expect(err).NotTo(HaveOccurred())
+			startWebApp(appName, appNamespace, 2)
 		})
 
-		It("pauses, resumes, and releases a workload", func() {
-			By("requesting a pause")
-			Expect(kubectlApply(fmt.Sprintf(`
-apiVersion: hybernate.io/v1alpha1
-kind: ManagedWorkload
-metadata:
-  name: %[1]s
-  namespace: %[2]s
-spec:
-  target: {kind: Deployment, name: %[1]s}
-  desiredState: Paused
-  prediction: {confidence: 85}
-`, appName, appNamespace))).To(Succeed())
+		It("pauses on request, wakes on a request, and releases a workload", func() {
+			By("managing it with an idle clock that won't run out during the spec")
+			manage(appNamespace, "Deployment", appName, "1h")
+			Eventually(func() (string, error) {
+				return jsonpath("managedworkload", appName, appNamespace, "{.status.phase}")
+			}).Should(Equal("Running"))
 
-			Eventually(func(g Gomega) {
-				g.Expect(jsonpath("managedworkload", appName, appNamespace, "{.status.phase}")).To(Equal("Paused"))
-				g.Expect(jsonpath("deployment", appName, appNamespace, "{.spec.replicas}")).To(Equal("0"))
-			}).Should(Succeed())
+			By("pausing it now with kubectl hybernate pause")
+			out, err := utils.Run(exec.Command(pluginBinary, "pause", appName, "-n", appNamespace, "--timeout", "3m"))
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(ContainSubstring(appNamespace + "/" + appName + " is Paused after"))
+			Expect(jsonpath("deployment", appName, appNamespace, "{.spec.replicas}")).To(Equal("0"))
+			Expect(jsonpath("managedworkload", appName, appNamespace,
+				`{.status.conditions[?(@.type=="PauseRequest")].reason}`)).To(Equal("Pausing"))
 
 			By("checking the API server accepted the events.k8s.io event")
 			Eventually(func(g Gomega) {
@@ -232,15 +223,11 @@ spec:
 				g.Expect(out).To(ContainSubstring(appName + "/Pause"))
 			}).Should(Succeed())
 
-			By("resuming to the previous replica count")
-			_, err := utils.Run(exec.Command("kubectl", "patch", "managedworkload", appName, "-n", appNamespace,
-				"--type=merge", "-p", `{"spec":{"desiredState":"Running"}}`))
-			Expect(err).NotTo(HaveOccurred())
-
-			Eventually(func(g Gomega) {
-				g.Expect(jsonpath("managedworkload", appName, appNamespace, "{.status.phase}")).To(Equal("Running"))
-				g.Expect(jsonpath("deployment", appName, appNamespace, "{.status.readyReplicas}")).To(Equal("2"))
-			}).Should(Succeed())
+			By("waking it with a request to its Service, as for a pause the idle clock made")
+			waitForDoorman(appNamespace, appName)
+			Expect(curlInCluster("curl-lifecycle", appNamespace, fmt.Sprintf("http://%s/hostname", appName),
+				"--retry", "10", "--retry-delay", "1", "--retry-connrefused")).To(HavePrefix(appName + "-"))
+			expectWokenByRequest(appNamespace, "deployment", appName, 2)
 
 			By("deleting the ManagedWorkload, which must release its finalizer and leave the Deployment")
 			_, err = utils.Run(exec.Command("kubectl", "delete", "managedworkload", appName,

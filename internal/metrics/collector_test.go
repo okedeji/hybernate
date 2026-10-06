@@ -43,7 +43,6 @@ func TestAllMetricsRegistered(t *testing.T) {
 		// Tier 3
 		"hybernate_idle_seconds",
 		"hybernate_prediction_regime_changes_total",
-		"hybernate_automation_skipped_total",
 		"hybernate_dryrun_actions_total",
 		"hybernate_target_unavailable_total",
 
@@ -72,7 +71,6 @@ func TestAllMetricsRegistered(t *testing.T) {
 	ExternalScaleUps.WithLabelValues("argo-cd").Inc()
 	IdleSeconds.WithLabelValues("ns", "w").Set(60)
 	PredictionRegimeChanges.WithLabelValues("ns", "w").Inc()
-	AutomationSkipped.WithLabelValues("ns", "w").Inc()
 	DryrunActions.WithLabelValues("scale_up").Inc()
 	TargetUnavailable.WithLabelValues("ns", "w").Inc()
 
@@ -98,7 +96,6 @@ func TestDeleteWorkload(t *testing.T) {
 	IdleDetections.WithLabelValues("shop", "gone").Inc()
 	IdleSeconds.WithLabelValues("shop", "gone").Set(60)
 	PredictionRegimeChanges.WithLabelValues("shop", "gone").Inc()
-	AutomationSkipped.WithLabelValues("shop", "gone").Inc()
 	TargetUnavailable.WithLabelValues("shop", "gone").Inc()
 	DoormanWakes.WithLabelValues("shop", "gone", "success").Inc()
 	IdleSeconds.WithLabelValues("shop", "kept").Set(60)

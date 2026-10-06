@@ -198,8 +198,8 @@ var chosen = map[string]bool{
 
 // wakeCauses are the event reasons that say what woke a workload. The
 // Resumed that follows one adds nothing, so it's left out; a Resumed with no
-// cause before it, such as a wake by desiredState or by protecting the
-// namespace, is the only record of that wake, so it's kept.
+// cause before it, such as a hand-back on protecting the namespace, is the
+// only record of that wake, so it's kept.
 var wakeCauses = map[string]bool{
 	"WokeByActivity": true,
 	"WokenByRequest": true,
@@ -414,9 +414,6 @@ func savedThisMonth(w *v1alpha1.ManagedWorkload, now time.Time) float64 {
 
 // nextFor says what happens to a workload next, or what's stopping it.
 func nextFor(w *v1alpha1.ManagedWorkload, targetActiveUntil, now time.Time) string {
-	if d := w.Spec.DesiredState; d != nil {
-		return "kept " + strings.ToLower(string(*d)) + " by desiredState"
-	}
 	conditions := w.Status.Conditions
 	if c := meta.FindStatusCondition(conditions, "TargetAvailable"); c != nil && c.Status == metav1.ConditionFalse {
 		if c.Reason == "TargetIgnored" {

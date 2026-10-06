@@ -242,13 +242,12 @@ func optInSpec(target v1alpha1.WorkloadRef, workload, namespace map[string]strin
 
 // keepUserSettings carries over, from a label-created ManagedWorkload's
 // current spec, everything no annotation sets, so an edit made to it, such
-// as setting desiredState with kubectl patch, isn't undone. Those are
-// desiredState, prediction, costTracking, the Prometheus activity queries,
-// and waitForReady on a dependency the annotation still lists. The target
-// is never changed once the ManagedWorkload exists.
+// as setting costTracking rates with kubectl patch, isn't undone. Those are
+// prediction, costTracking, the Prometheus activity queries, and
+// waitForReady on a dependency the annotation still lists. The target is
+// never changed once the ManagedWorkload exists.
 func keepUserSettings(spec *v1alpha1.ManagedWorkloadSpec, current *v1alpha1.ManagedWorkloadSpec) {
 	spec.Target = current.Target
-	spec.DesiredState = current.DesiredState
 	spec.Prediction = current.Prediction
 	spec.CostTracking = current.CostTracking
 	if current.IdlePolicy != nil && current.IdlePolicy.Activity != nil {

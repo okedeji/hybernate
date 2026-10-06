@@ -66,9 +66,6 @@ const (
 	// and every workload queued behind it, forever.
 	reconcileTimeout = 2 * time.Minute
 
-	conditionWouldPause     = "WouldPause"
-	conditionManualOverride = "ManualOverride"
-
 	reasonDryRunWake = "DryRunWake"
 )
 
@@ -233,7 +230,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 		return r.reconcileScaledToZero(ctx, &workload, observed)
 	}
 
-	result, err = r.reconcileDesiredState(ctx, &workload, target)
+	result, err = r.reconcilePauseRequest(ctx, &workload, target)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -262,8 +259,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 // resumeTransition finishes a pause or resume that an earlier reconcile
 // started but didn't complete, without which a transient failure would strand
 // the workload in the intermediate phase. It also turns back a pause the
-// workload must no longer be in: dry-run never leaves a workload paused, and
-// desiredState Running doesn't wait for a pause to finish first.
+// workload must no longer be in: dry-run never leaves a workload paused.
 func (r *Reconciler) resumeTransition(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	phase := workload.Status.Phase
 	if workload.Spec.DryRun && (phase == v1alpha1.PhasePausing || phase == v1alpha1.PhasePaused) {
@@ -272,68 +268,12 @@ func (r *Reconciler) resumeTransition(ctx context.Context, workload *v1alpha1.Ma
 	}
 	switch phase {
 	case v1alpha1.PhasePausing:
-		if desired := workload.Spec.DesiredState; desired != nil && *desired == v1alpha1.DesiredStateRunning {
-			return r.handleResume(ctx, workload, nil)
-		}
 		return r.handlePause(ctx, workload, target, nil)
 	case v1alpha1.PhaseResuming:
 		return r.handleResume(ctx, workload, nil)
 	default:
 		return nil, nil
 	}
-}
-
-func (r *Reconciler) reconcileDesiredState(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
-	desired := workload.Spec.DesiredState
-	if desired == nil || *desired != v1alpha1.DesiredStatePaused || !workload.Spec.DryRun {
-		r.clearCondition(workload, conditionWouldPause, "NotHeldBack")
-	}
-	if desired == nil {
-		return r.reconcilePauseRequest(ctx, workload, target)
-	}
-
-	switch *desired {
-	case v1alpha1.DesiredStatePaused:
-		if workload.Spec.DryRun {
-			return nil, r.reportWouldPause(ctx, workload)
-		}
-		if until, held := gitOpsHold(workload, r.now()); held && workload.Status.Phase != v1alpha1.PhasePaused {
-			return &ctrl.Result{RequeueAfter: until.Sub(r.now())}, nil
-		}
-		before := workload.Status.Phase
-		result, err := r.handlePause(ctx, workload, target, nil)
-		if err != nil {
-			return nil, err
-		}
-		// Warned once the pause has begun: one held back, such as after a
-		// GitOps tool undid the last, is tried again on every reconcile.
-		if began := (before == v1alpha1.PhaseRunning || before == v1alpha1.PhaseIdle) &&
-			workload.Status.Phase != before; began {
-			if err := r.warnIfDependentsAwake(ctx, workload); err != nil {
-				return nil, err
-			}
-		}
-		return result, nil
-	case v1alpha1.DesiredStateRunning:
-		return r.handleResume(ctx, workload, nil)
-	default:
-		return nil, nil
-	}
-}
-
-// reportWouldPause stands in for a desiredState pause under dry-run, which
-// never takes an action that reduces availability.
-func (r *Reconciler) reportWouldPause(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	if meta.IsStatusConditionTrue(workload.Status.Conditions, conditionWouldPause) {
-		return nil
-	}
-	r.setCondition(workload, conditionWouldPause, metav1.ConditionTrue, "DryRun",
-		"desiredState is Paused, but dry-run is on, so the workload is left running")
-	if err := r.Status().Update(ctx, workload); err != nil {
-		return fmt.Errorf("recording the pause dry-run held back: %w", err)
-	}
-	r.emitEvent(workload, true, "Normal", ReasonPaused, actionPause, "desiredState is Paused; would pause")
-	return nil
 }
 
 // handlePause drives the workload to Paused. What the pause changes is

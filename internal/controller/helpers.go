@@ -37,7 +37,6 @@ import (
 
 const (
 	ReasonPredictionFed          = "PredictionFed"
-	ReasonAutomationSkipped      = "AutomationSkipped"
 	ReasonIdleDetected           = "IdleDetected"
 	ReasonIdleVetoed             = "IdleVetoed"
 	ReasonActivityResumed        = "ActivityResumed"
@@ -59,7 +58,6 @@ const (
 // requires: what the operator did or tried to do when the event fired.
 const (
 	actionForecast          = "Forecast"
-	actionEvaluate          = "EvaluateAutomation"
 	actionEvaluateIdle      = "EvaluateIdle"
 	actionPause             = "Pause"
 	actionResume            = "Resume"

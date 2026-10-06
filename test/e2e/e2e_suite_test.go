@@ -40,12 +40,14 @@ var (
 	// managerImage is built from the working tree and loaded into kind. Its
 	// tag isn't latest, so the kubelet never tries to pull it.
 	managerImage = "hybernate:e2e"
-	// pauseImage runs the Deployment the lifecycle test manages. The Makefile
-	// preloads it into kind so the test doesn't depend on a registry pull.
+	// pauseImage runs the Deployments the specs manage without serving them.
+	// The Makefile preloads it into kind so the tests don't depend on a
+	// registry pull.
 	pauseImage = "registry.k8s.io/pause:3.10"
 	// pluginBinary is the kubectl plugin, built by the suite.
 	pluginBinary = "bin/kubectl-hybernate"
-	// webImage serves HTTP for the wake-on-request spec; also preloaded.
+	// webImage serves HTTP for the specs that wake a workload on a request;
+	// also preloaded.
 	webImage = "registry.k8s.io/e2e-test-images/agnhost:2.52"
 )
 

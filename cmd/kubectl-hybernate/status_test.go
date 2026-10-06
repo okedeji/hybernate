@@ -165,7 +165,6 @@ Recent pauses and wakes:
 }
 
 func TestNextFor(t *testing.T) {
-	paused := v1alpha1.DesiredStatePaused
 	tests := []struct {
 		name   string
 		mutate func(*v1alpha1.ManagedWorkload)
@@ -178,9 +177,6 @@ func TestNextFor(t *testing.T) {
 			w.Status.Phase = v1alpha1.PhaseIdle
 			w.Status.Activity = activity(v1alpha1.ActivitySourceCPU, 2*time.Hour, -time.Hour)
 		}, want: "pauses now"},
-		{name: "kept by desiredState", mutate: func(w *v1alpha1.ManagedWorkload) {
-			w.Spec.DesiredState = &paused
-		}, want: "kept paused by desiredState"},
 		{name: "held by active-until", mutate: func(w *v1alpha1.ManagedWorkload) {
 			w.Annotations = map[string]string{v1alpha1.AnnotationActiveUntil: statusNow.Add(2 * time.Hour).Format(time.RFC3339)}
 			w.Status.Activity = activity(v1alpha1.ActivitySourceCPU, 2*time.Hour, -time.Hour)
@@ -360,8 +356,8 @@ func TestStatus_RepeatedNamespaceCountsOnce(t *testing.T) {
 	assert.Len(t, result.Recent, 1)
 }
 
-// A wake that the operator records only as Resumed, such as one by
-// desiredState or by protecting the namespace, is still listed.
+// A wake that the operator records only as Resumed, such as a hand-back on
+// protecting the namespace, is still listed.
 func TestStatus_WakeWithoutACause(t *testing.T) {
 	w := statusWorkloadObj("shop", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, time.Hour)
 	out := runStatus(t, newStatusClient(t, interceptor.Funcs{}, w,

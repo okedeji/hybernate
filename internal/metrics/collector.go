@@ -96,11 +96,6 @@ var (
 		Help: "Total regime changes detected by the prediction engine.",
 	}, []string{"namespace", "workload"})
 
-	AutomationSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_automation_skipped_total",
-		Help: "Total times a manual desiredState took over from automation.",
-	}, []string{"namespace", "workload"})
-
 	DryrunActions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_dryrun_actions_total",
 		Help: "Total actions that would have been taken in dry-run mode.",
@@ -170,7 +165,6 @@ func init() {
 		// Tier 3
 		IdleSeconds,
 		PredictionRegimeChanges,
-		AutomationSkipped,
 		DryrunActions,
 		TargetUnavailable,
 
@@ -196,7 +190,6 @@ var perWorkload = []interface {
 	IdleDetections,
 	IdleSeconds,
 	PredictionRegimeChanges,
-	AutomationSkipped,
 	TargetUnavailable,
 	DoormanWakes,
 }

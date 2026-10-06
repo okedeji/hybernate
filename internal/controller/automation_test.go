@@ -223,18 +223,15 @@ func TestAutoResume_LeadIsCountedToTheLocalHour(t *testing.T) {
 }
 
 func TestAutomation_PausedIsRequeued(t *testing.T) {
-	for _, desired := range []*v1alpha1.DesiredState{nil, desiredState(v1alpha1.DesiredStatePaused)} {
-		workload := pausedForecastWorkload()
-		workload.Spec.DesiredState = desired
-		r := newAutomationReconciler(t, workload, &stubForecaster{phase: forecast.Observing}, automationOpts{})
-		r.clock = func() time.Time { return fixedTime.Add(10 * time.Minute) }
+	workload := pausedForecastWorkload()
+	r := newAutomationReconciler(t, workload, &stubForecaster{phase: forecast.Observing}, automationOpts{})
+	r.clock = func() time.Time { return fixedTime.Add(10 * time.Minute) }
 
-		result, err := r.reconcileAutomation(context.Background(), workload, nil)
+	result, err := r.reconcileAutomation(context.Background(), workload, nil)
 
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		assert.Equal(t, statusFlushInterval, result.RequeueAfter)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, statusFlushInterval, result.RequeueAfter)
 }
 
 // autoResume fires through the requeues a paused workload schedules itself,
@@ -261,28 +258,6 @@ func TestAutoResume_FiresOnTimeAlone(t *testing.T) {
 
 	require.Equal(t, 1, pauser.resumeCalls, "autoResume never fired")
 	assert.Equal(t, fixedTime.Add(time.Hour-autoResumeLead), now, "woken as the lead before the busy hour begins")
-}
-
-func TestAutomation_DesiredStateStillUpdatesStatus(t *testing.T) {
-	workload := automationWorkload(v1alpha1.PhaseRunning)
-	workload.Spec.DesiredState = desiredState(v1alpha1.DesiredStatePaused)
-
-	engine := &stubForecaster{
-		phase:           forecast.DailySuggesting,
-		dailyConfidence: 72,
-		dataPoints:      30,
-	}
-	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &stubMetrics{}})
-
-	result, err := r.reconcileAutomation(context.Background(), workload, nil)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, activityCheckInterval, result.RequeueAfter, "the forecast goes on learning")
-
-	// Prediction status should be updated even though desiredState is set.
-	assert.NotNil(t, workload.Status.Prediction)
-	assert.Equal(t, "Suggesting", workload.Status.Prediction.DailyPhase)
-	assert.Equal(t, 72, workload.Status.Prediction.DailyConfidence)
 }
 
 func TestAutomation_NoIdlePolicyOnlyLearns(t *testing.T) {
@@ -535,22 +510,17 @@ func TestPausedHour_DemandBehindTheDoorman(t *testing.T) {
 	tests := []struct {
 		name   string
 		routed bool
-		manual bool
 		wakeAt time.Duration
 		want   []float64
 	}{
 		{name: "paused all hour", routed: true, want: []float64{0}},
 		{name: "woken by a request", routed: true, wakeAt: 10 * time.Minute, want: []float64{20}},
 		{name: "not routed, so demand can't be seen", routed: false},
-		{name: "paused by desiredState, which a request doesn't end", routed: true, manual: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			workload := pausedForecastWorkload()
 			workload.Spec.IdlePolicy.AutoResume = false
-			if tt.manual {
-				workload.Spec.DesiredState = desiredState(v1alpha1.DesiredStatePaused)
-			}
 			if tt.routed {
 				meta.SetStatusCondition(&workload.Status.Conditions, metav1.Condition{
 					Type: conditionWakeOnRequest, Status: metav1.ConditionTrue, Reason: "DoormanRouted"})
