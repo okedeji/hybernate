@@ -785,7 +785,9 @@ func TestServer_ACallerLeavingFreesItsPlace(t *testing.T) {
 	require.NoError(t, conn.Close())
 
 	require.Eventually(t, func() bool { return wakes(resultCanceled) == before+1 }, 5*time.Second, 10*time.Millisecond)
-	assert.Zero(t, heldCount(s))
+	// The place is freed as the connection's handler returns, just after
+	// its result is counted.
+	assert.Eventually(t, func() bool { return heldCount(s) == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
 // A caller that sent a request body before leaving frees its place too,
@@ -801,8 +803,9 @@ func TestServer_ACallerLeavingAfterSendingABodyFreesItsPlace(t *testing.T) {
 	require.NoError(t, conn.Close())
 
 	require.Eventually(t, func() bool { return wakes(resultCanceled) == before+1 }, 5*time.Second, 10*time.Millisecond)
-	assert.Zero(t, heldCount(s))
-	assert.Zero(t, bufferedBytes(s), "its buffered body is let go")
+	assert.Eventually(t, func() bool { return heldCount(s) == 0 }, 5*time.Second, 10*time.Millisecond)
+	assert.Eventually(t, func() bool { return bufferedBytes(s) == 0 }, 5*time.Second, 10*time.Millisecond,
+		"its buffered body is let go")
 }
 
 // A body larger than a held connection may buffer still reaches the
