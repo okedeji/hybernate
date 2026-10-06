@@ -70,6 +70,13 @@ const (
 	// it.
 	AnnotationLastRequestFrom = "hybernate.io/last-request-from"
 
+	// AnnotationPauseRequested asks Hybernate to pause a ManagedWorkload's
+	// workload now rather than when its idle clock runs out. The value is a
+	// token, such as the time of the request, that only needs to differ from
+	// the last request's: Hybernate acts on each value once, recording it in
+	// status.lastPauseRequest. kubectl hybernate pause sets it.
+	AnnotationPauseRequested = "hybernate.io/pause-requested"
+
 	// Settings for a workload opted in with LabelManaged, set on the
 	// workload or its namespace; the workload's own wins.
 	AnnotationDryRun        = "hybernate.io/dry-run"

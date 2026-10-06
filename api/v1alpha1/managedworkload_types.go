@@ -329,6 +329,12 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	DryRun *DryRunStatus `json:"dryRun,omitempty"`
 
+	// LastPauseRequest is the last hybernate.io/pause-requested value
+	// Hybernate acted on, so each request is acted on once, across restarts.
+	// The PauseRequest condition says what came of it.
+	// +optional
+	LastPauseRequest string `json:"lastPauseRequest,omitempty"`
+
 	// LastActedAt is when the operator last mutated the target workload
 	// (pause or resume).
 	// +optional
