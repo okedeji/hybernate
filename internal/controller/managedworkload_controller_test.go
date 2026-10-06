@@ -1194,6 +1194,8 @@ func TestReconcile_IdleDetectionIsCountedOnce(t *testing.T) {
 	workload.Status.Activity = &v1alpha1.ActivityStatus{LastActivityTime: metav1.NewTime(fixedTime.Add(-2 * time.Hour)),
 		LastEvaluatedTime: ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second)))}
 	r := lifecycleReconciler(t, workload, 1, failStatusWrite(inPhase(v1alpha1.PhaseIdle)))
+	counted := metrics.IdleDetections.WithLabelValues("default", "counted-once")
+	before := testutil.ToFloat64(counted)
 
 	res, err := r.Reconcile(context.Background(), reconcileFor("counted-once"))
 	require.NoError(t, err, "a conflict is retried, not reported")
@@ -1202,7 +1204,7 @@ func TestReconcile_IdleDetectionIsCountedOnce(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, v1alpha1.PhaseIdle, getWorkload(t, r, "counted-once").Status.Phase)
-	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.IdleDetections.WithLabelValues("default", "counted-once")))
+	assert.Equal(t, before+1, testutil.ToFloat64(counted))
 	assert.Equal(t, 1, strings.Count(drainEvents(t, r), ReasonIdleDetected))
 }
 
