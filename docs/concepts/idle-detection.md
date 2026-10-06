@@ -55,13 +55,16 @@ From a terminal, [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md
 
 A workload at zero replicas that Hybernate didn't pause isn't checked at all: it's already off, and [left that way](../guides/pause.md#workloads-already-at-zero). For any other, each check runs in this order:
 
-1. `desiredState` is set: the workload is under manual control, and automation does nothing. Without an `idlePolicy`, automation doesn't pause it either.
-2. CPU, or a configured Prometheus query, can't be read: stay awake (see [below](#when-a-source-cant-be-read)).
-3. `active-until` is in the future: stay awake.
-4. The last activity is less than `idleAfter` ago: stay awake.
-5. The [forecast](forecasting.md) is confident (`DailyActive` or later) and predicts demand above `cpuThreshold` in the hour under way or the next: stay awake. The `IdleVetoed` condition is `True`, with reason `ForecastExpectsDemand` and a message naming the hour, while this holds the pause back, and an `IdleVetoed` event marks the start of each veto.
-6. Another workload that [depends on](dependencies.md) this one is awake, or `dependsOn` forms a cycle: stay awake (`HeldByDependents` or `DependencyCycle`).
-7. Otherwise the clock has run out. The phase becomes `Idle`, with an `IdleDetected` event, and the workload is [paused](../guides/pause.md).
+1. CPU, or a configured Prometheus query, can't be read: stay awake (see [below](#when-a-source-cant-be-read)).
+2. `active-until` is in the future: stay awake.
+3. The last activity is less than `idleAfter` ago: stay awake.
+4. The [forecast](forecasting.md) is confident (`DailyActive` or later) and predicts demand above `cpuThreshold` in the hour under way or the next: stay awake. The `IdleVetoed` condition is `True`, with reason `ForecastExpectsDemand` and a message naming the hour, while this holds the pause back, and an `IdleVetoed` event marks the start of each veto.
+5. Another workload that [depends on](dependencies.md) this one is awake, or `dependsOn` forms a cycle: stay awake (`HeldByDependents` or `DependencyCycle`).
+6. Otherwise the clock has run out. The phase becomes `Idle`, with an `IdleDetected` event, and the workload is [paused](../guides/pause.md).
+
+Without an `idlePolicy`, none of this runs, and the workload is only paused when someone asks.
+
+A [pause request](../guides/pause.md#pause-now), from `kubectl hybernate pause`, runs the clock out at once. Steps 1, 3 and 4 don't apply, and nor does the hour Hybernate waits after a GitOps tool undid its last pause, since someone asked; an `active-until` hold, awake dependents and a `dependsOn` cycle still keep the workload up, and the request is answered with the reason.
 
 With `dryRun: true`, the phase still becomes `Idle` and the `IdleDetected` event carries a `[dry-run]` prefix, but nothing is changed. If activity resumes, the phase goes back to `Running`. See [Dry Run](../guides/dry-run.md).
 
@@ -101,9 +104,9 @@ status:
 A paused workload wakes when:
 
 - A request reaches one of its Services. The request is held while the workload starts, then answered; see [Wake on Request](wake-on-request.md).
-- A `hybernate.io/last-activity`, `last-request` or `active-until` annotation on the ManagedWorkload or its target changes after the pause began, whatever time it states, so a clock that's behind the operator's can't lose a wake; or a `last-activity` time is no older than the pause, or an `active-until` hold is in the future. This is how a "start environment" button in a developer portal works.
+- A `hybernate.io/last-activity`, `last-request` or `active-until` annotation on the ManagedWorkload or its target changes after the pause began, whatever time it states, so a clock that's behind the operator's can't lose a wake. Only a change counts: the pause records the annotations as they stood, so a value set before it, even one stating a later time, doesn't wake it. `kubectl hybernate wake` sets one, and this is how a "start environment" button in a developer portal works. A pause made by v0.1.x, which recorded no annotations, wakes instead on a `last-activity` no older than the pause, or an `active-until` hold in the future.
 - `autoResume: true` is set and a confident forecast predicts demand above `cpuThreshold` for the current hour, or for the next hour once it's 15 minutes away, so the workload is ready before people arrive.
-- Something other than Hybernate scales it up, such as `kubectl scale`, or `desiredState` is set to `Running`.
+- Something other than Hybernate scales it up, such as `kubectl scale`.
 - Dry-run is turned on: dry-run never leaves a workload paused.
 
 Each wake restarts the clock, so a woken workload gets a full `idleAfter` before it can pause again. The clock records `lastActivitySource: request` when a held request woke it, `scaled-up` when something else scaled it up, and `woke` for any other wake.

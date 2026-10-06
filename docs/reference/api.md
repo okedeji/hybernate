@@ -13,7 +13,6 @@
 | `target` | `WorkloadRef` | Yes | | The workload to manage. Can't be changed once set |
 | `target.kind` | `Deployment` \| `StatefulSet` | Yes | `Deployment` | Target kind |
 | `target.name` | string | Yes | | Target name (same namespace) |
-| `desiredState` | `Running` \| `Paused` | No | | Manual lifecycle override |
 | `idlePolicy` | `IdlePolicySpec` | No | | Idle detection configuration. Without it, the workload is never paused automatically |
 | `idlePolicy.idleAfter` | duration | No | `1h` | Time without activity before pausing |
 | `idlePolicy.activity.cpuThreshold` | int | No | `10` | CPU utilization % of requests above which the workload is active (1-100) |
@@ -49,6 +48,7 @@
 | `phase` | `WorkloadPhase` | Current lifecycle phase |
 | `conditions[]` | `Condition` | Standard Kubernetes conditions; see [Lifecycle](../concepts/lifecycle.md#status-conditions) |
 | `lastActedAt` | time | When the operator last paused or resumed the target |
+| `lastPauseRequest` | string | The last `hybernate.io/pause-requested` value acted on, so each request is acted on once; the `PauseRequest` condition says what came of it. See [Pause Now](../guides/pause.md#pause-now) |
 | `lastTransitionTime` | time | Last phase change |
 | `activity.lastActivityTime` | time | Most recent activity from any source |
 | `activity.lastActivitySource` | string | `created`, `woke`, `request`, `cpu`, `rollout`, `annotation`, `prometheus`, `unobserved`, or `scaled-up` |

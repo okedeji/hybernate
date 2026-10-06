@@ -1,6 +1,6 @@
 # Lifecycle
 
-Every ManagedWorkload moves through a defined set of phases. The operator drives transitions based on workload activity, forecasts, and manual overrides. Its one action is to pause: it never deletes a workload or its storage.
+Every ManagedWorkload moves through a defined set of phases. The operator drives transitions based on workload activity, forecasts, and pauses asked for with `kubectl hybernate pause`. Its one action is to pause: it never deletes a workload or its storage.
 
 ## Phases
 
@@ -15,7 +15,7 @@ Every ManagedWorkload moves through a defined set of phases. The operator drives
 |-------|-------------|
 | _(none)_ | A ManagedWorkload that has just been created has no phase until its first reconcile, which sets `Running`. `kubectl hybernate status` shows it as `creating`. (`Creating` is accepted by the API but never set.) |
 | **Running** | Workload is active. Its activity clock is evaluated on each reconcile. |
-| **Idle** | No activity for `idleAfter`. The operator pauses it, or in dry-run reports the pause it would make. |
+| **Idle** | No activity for `idleAfter`, or a pause was requested. The operator pauses it, or in dry-run reports the pause it would make. |
 | **Pausing** | What the pause will change is recorded, and the workload is being scaled to zero. |
 | **Paused** | Workload is at zero replicas. |
 | **Resuming** | Previous replica count is being restored. Transitions to Running when the pods are Ready. |
@@ -24,7 +24,7 @@ A workload already at zero replicas, scaled there by a person, a pipeline or KED
 
 ## Transition Triggers
 
-### Automatic (no `desiredState` set)
+### Automatic
 
 - **Running → Idle**: No activity for `idleAfter`, no `active-until` hold, no confident forecast of demand, no awake dependents, CPU (and any Prometheus query) readable, and at least one replica; see [Idle Detection](idle-detection.md#the-decision)
 - **Idle → Pausing**: Right away, unless the workload is in dry-run, or a GitOps tool undid its last pause within the hour
@@ -33,12 +33,10 @@ A workload already at zero replicas, scaled there by a person, a pipeline or KED
 - **Paused → Running**: Something other than Hybernate scales it up, see [Argo CD and Flux](../guides/gitops.md); or Hybernate lets go of it, see [When Hybernate Lets Go](../guides/pause.md#when-hybernate-lets-go)
 - **Resuming → Running**: Every replica it was restored to is Ready
 
-### Manual (`desiredState` set)
+### On request
 
-- **Running or Idle → Pausing → Paused**: `desiredState: Paused`, unless the workload is already at zero replicas
-- **Pausing or Paused → Resuming → Running**, and **Idle → Running**: `desiredState: Running`
-
-Manual overrides take priority over automation, which keeps learning the forecast but doesn't act on it; the `ManualOverride` condition says so. Remove `desiredState` to return to automatic management. See [Pause and Resume](../guides/pause.md).
+- **Running or Idle → Pausing → Paused**: `kubectl hybernate pause`, which sets a new `hybernate.io/pause-requested` value. The idle clock runs out at once, and the workload is paused by the rules of an idle pause, except that the forecast's veto and the hour after a GitOps conflict don't hold it back. In dry-run it goes **Running → Idle** instead, as a would-be pause. See [Pause Now](../guides/pause.md#pause-now)
+- **Paused → Resuming → Running**: `kubectl hybernate wake`, which changes an activity annotation, or any of the automatic wakes above: a requested pause wakes like any other
 
 ## Idempotency
 
@@ -67,8 +65,7 @@ The operator sets standard Kubernetes conditions on the CR, each with `Reason`, 
 | `DependencyNotFound` | A `dependsOn` workload doesn't exist, or can't be seen | `DependencyNotFound`, or `DependencyNotVisible` when it's only outside `watchNamespaces` or not readable; `False`: `DependenciesFound`, `NoDependencies` |
 | `DuplicateTarget` | Another, older ManagedWorkload manages the same target, so this one does nothing | `DuplicateTarget`; `False`: `Resolved` |
 | `Protected` | Its namespace is protected, so it's never paused | `ProtectedNamespace`; `False`: `NotProtected` |
-| `ManualOverride` | `desiredState` is set, so automation doesn't pause or wake it | `DesiredStateSet`; `False`: `Automated` |
-| `WouldPause` | In dry-run, `desiredState: Paused` would have paused it | `DryRun`; `False`: `NotHeldBack` |
+| `PauseRequest` | The last [pause request](../guides/pause.md#pause-now) paused the workload, or found it paused; `False` says why it didn't | `Pausing`, `AlreadyPaused`; `False`: `DryRun`, `ActiveUntil`, `HeldByDependents`, `DependencyCycle`, `Protected`, `ScaledToZero`, `TargetNotFound`, `TargetIgnored`, `DuplicateTarget` |
 | `GitOpsConflict` | A GitOps tool undid its last pause; removed once a pause holds. See [Argo CD and Flux](../guides/gitops.md) | `PauseUndone` |
 | `Autoscaled` | An HPA or KEDA ScaledObject scales it, and its range; see [HPA and KEDA](../guides/autoscalers.md) | `HPA`, `KEDA` |
 | `ScaledToZero` | It was scaled to zero outside Hybernate, so Hybernate leaves it off: it doesn't pause it, wake it, or route requests for it until its replicas are set above zero | `ScaledToZero`; `False`: `HasReplicas` |
@@ -77,12 +74,13 @@ The operator sets standard Kubernetes conditions on the CR, each with `Reason`, 
 
 User-visible state changes emit Kubernetes events that show up in `kubectl describe`, each once, when the change happens:
 
-- Lifecycle: `IdleDetected`, `Paused`, `Resumed`, `ActivityResumed` (in dry-run, with what the would-be pause would have freed)
+- Lifecycle: `IdleDetected`, `PauseRequested`, `Paused`, `Resumed`, `ActivityResumed` (in dry-run, with what the would-be pause would have freed)
+- A pause request Hybernate didn't act on: an event whose reason says why, the same as the `PauseRequest` condition's
 - What woke it: `WokeByActivity`, `WokenByRequest` (from the doorman), `AutoResume`, `ScaledUp`, `DryRunWake`
 - Scaled to zero outside Hybernate, and left off: `ScaledToZero`
-- What holds it awake: `IdleVetoed`, `HeldByDependents`, `DependencyCycle`, `AutomationSkipped` (when `desiredState` takes over)
+- What holds it awake: `IdleVetoed`, `HeldByDependents`, `DependencyCycle`
 - A GitOps tool undoing a pause, and the conflict ending: `GitOpsConflict`, `GitOpsConflictResolved`
-- Problems: `TargetNotFound`, `DuplicateTarget`, `NoPodMetrics`, `NoCPURequests`, `MetricsUnavailable`, `QueryFailed`, `EndpointNotConfigured`, `RoutingFailed`, `UnsupportedLoadBalancer`, `RequestNotServed`, `Protected`, `DependentsAwake`
+- Problems: `TargetNotFound`, `DuplicateTarget`, `NoPodMetrics`, `NoCPURequests`, `MetricsUnavailable`, `QueryFailed`, `EndpointNotConfigured`, `RoutingFailed`, `UnsupportedLoadBalancer`, `RequestNotServed`, `Protected`
 - The forecast: `PredictionFed` each hour it learns, `RegimeChange` when it's demoted, `ForecastReset` when its saved state can't be read
 - Learned dependencies: `DependenciesLearned`
 

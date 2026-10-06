@@ -125,7 +125,6 @@ Requests to the paused workload then fail, as they would without Hybernate. With
 
 | Situation | What happens |
 |-----------|--------------|
-| `desiredState: Paused` | Not routed. A manual pause only ends when you change it, so holding the connection would only delay the error |
 | No Service selects the workload, or none has a TCP port that isn't in `hybernate.io/doorman-ignore-ports` | `WakeOnRequest=False`, reason `NoServices` |
 | A headless Service (`clusterIP: None`) | Not routed. Callers resolve pod IPs from DNS and never reach the doorman; wake the workload with an [activity annotation](idle-detection.md#activity-annotations) instead |
 | A Service without a selector, or an `ExternalName` Service | Not routed, since its endpoints aren't the workload's pods |

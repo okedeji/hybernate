@@ -17,20 +17,9 @@ Because the record is written first, a pause interrupted at any point, by an ope
 
 **Automatically:** once the workload has had no activity for `idlePolicy.idleAfter`; see [Idle Detection](../concepts/idle-detection.md).
 
-**Now:** with [`kubectl hybernate pause`](#pause-now).
+**Now:** with [`kubectl hybernate pause`](#pause-now), to wake when it's next used.
 
-**Manually:**
-
-```bash
-kubectl patch managedworkload my-api -n staging \
-  --type merge -p '{"spec":{"desiredState":"Paused"}}'
-```
-
-This works on a ManagedWorkload created from the `hybernate.io/managed` label too: the opt-in controller keeps `desiredState`, which no annotation sets. Find a label-created ManagedWorkload's name with `kubectl get managedworkloads -n staging`; it's the workload's name, or `<name>-<kind>` such as `api-statefulset` when that's taken.
-
-A workload paused with `desiredState` stays paused while it's set: activity, requests and `autoResume` don't wake it, and something else scaling it up is paused again. Set it to `Running` to wake it. Removing it instead hands the workload back to automation still paused, to wake like any paused workload, on a request or activity. Its `ManualOverride` condition says so. If workloads that depend on it are awake, the pause goes ahead anyway, with a `DependentsAwake` warning event.
-
-In [dry-run](dry-run.md), `desiredState: Paused` doesn't scale anything: the `WouldPause` condition and one `[dry-run]` event say what would have happened.
+Either way it's the same pause, which wakes on a request, on activity, or by `autoResume`. To keep a workload off until someone starts it again, scale it to zero yourself: Hybernate leaves it alone; see [Workloads Already at Zero](#workloads-already-at-zero).
 
 ### Pause Now
 
@@ -40,7 +29,7 @@ When you're done with a workload for the day, such as a preview environment, pau
 kubectl hybernate pause my-api -n staging
 ```
 
-The result is an ordinary pause, the same as one the idle clock makes: a request to the workload through the [doorman](../concepts/wake-on-request.md), a change to its [activity annotations](../concepts/idle-detection.md#activity-annotations), `autoResume`, or [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md#wake-a-workload) wakes it. It doesn't need an `idlePolicy`.
+The result is an ordinary pause, the same as one the idle clock makes: a request to the workload through the [doorman](../concepts/wake-on-request.md), a change to its [activity annotations](../concepts/idle-detection.md#activity-annotations), `autoResume`, or [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md#wake-a-workload) wakes it. It doesn't need an `idlePolicy`, and it works on a ManagedWorkload created from the `hybernate.io/managed` label as on one you wrote: name the workload, as `kubectl hybernate status` shows it.
 
 The plugin asks by setting the `hybernate.io/pause-requested` annotation on the ManagedWorkload to a token, the time of the request. Any tool can do the same; the value only has to differ from the last request's:
 
@@ -78,28 +67,20 @@ Resuming wakes the workload's [dependencies](../concepts/dependencies.md), scale
 **Automatically:**
 
 - A request to the workload's Service, through [wake on request](../concepts/wake-on-request.md)
-- A change to `hybernate.io/last-activity`, `hybernate.io/last-request` or `hybernate.io/active-until` on the ManagedWorkload or its target since the pause began, whatever time the new value states, or an `active-until` still in the future; [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md#wake-a-workload) sets one
+- A change to `hybernate.io/last-activity`, `hybernate.io/last-request` or `hybernate.io/active-until` on the ManagedWorkload or its target since the pause began, whatever time the new value states; [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md#wake-a-workload) sets one
 - With `autoResume: true`, 15 minutes ahead of the hour a confident forecast expects demand in
 - Something else scaling it up, such as `kubectl scale`: it's counted as activity and the workload goes straight to `Running`; see [Argo CD and Flux](gitops.md) for when that's a GitOps tool
 - Turning on [dry-run](dry-run.md), which never leaves a workload paused (`DryRunWake` event)
 
 A paused workload is looked at again at least every 5 minutes, 15 minutes before each hour and on the hour, as well as whenever it or its target changes.
 
-**Manually:**
+**On demand:**
 
 ```bash
-kubectl patch managedworkload my-api -n staging \
-  --type merge -p '{"spec":{"desiredState":"Running"}}'
+kubectl hybernate wake my-api -n staging
 ```
 
-The workload then stays running: automation doesn't pause it until `desiredState` is removed:
-
-```bash
-kubectl patch managedworkload my-api -n staging \
-  --type json -p '[{"op":"remove","path":"/spec/desiredState"}]'
-```
-
-To wake a workload once and leave automation in charge, use `kubectl hybernate wake my-api -n staging` instead.
+`wake` marks the workload active, which wakes it and restarts its idle clock, so it pauses again once it's had no activity for `idleAfter`. `--for 2h` keeps it awake for at least that long, as for a demo. To keep a workload running for good, remove its `idlePolicy`, or label it `hybernate.io/ignore: "true"`. See [kubectl Plugin](../getting-started/kubectl-plugin.md#wake-a-workload).
 
 ## When Hybernate Lets Go
 
@@ -117,11 +98,11 @@ If the target itself is deleted while paused, its Services stop routing to the d
 
 A workload scaled to zero outside Hybernate, by `kubectl scale`, a pipeline, or KEDA with no active trigger, is off on purpose, and Hybernate leaves it that way:
 
-- It isn't paused, whatever its idle clock or `desiredState: Paused` says: there's nothing running to pause, and a pause would record zero replicas to restore
-- It isn't woken: Hybernate only wakes what it paused, so neither a request, an activity annotation, `autoResume` nor `desiredState: Running` scales it up
+- It isn't paused, whatever its idle clock says, and a [pause request](#pause-now) is answered with `ScaledToZero`: there's nothing running to pause, and a pause would record zero replicas to restore
+- It isn't woken: Hybernate only wakes what it paused, so neither a request, an activity annotation, `autoResume` nor `kubectl hybernate wake` scales it up
 - Its Services aren't routed to the doorman, so a request to it fails as it would without Hybernate, rather than being held for pods that nothing will start
 
-The ManagedWorkload stays `Running`, with the `ScaledToZero` condition and one `ScaledToZero` event saying so. Once its replicas are set above zero, by whoever scaled it down, Hybernate manages it again, and counts that as activity, so its idle clock starts afresh.
+The ManagedWorkload stays `Running`, with the `ScaledToZero` condition and one `ScaledToZero` event saying so. That makes scaling it to zero yourself the way to keep a workload off until someone starts it. Once its replicas are set above zero, by whoever scaled it down, Hybernate manages it again, and counts that as activity, so its idle clock starts afresh.
 
 Hybernate never scales up a workload it didn't scale down. Handing back a pause recorded at zero replicas, Hybernate releases it at zero, with a `Resumed` event that says so.
 

@@ -85,4 +85,4 @@ With leader election, a Role `hybernate-leader-election` in the release namespac
 
 ## The plugin
 
-`kubectl hybernate` runs with your own kubeconfig and permissions, reads the same kinds of resources and their events, and changes nothing except for `wake` (activity annotations on a ManagedWorkload) and `enable` (the `hybernate.io/dry-run` annotation, on a workload or its namespace, or `spec.dryRun` on a ManagedWorkload you wrote). `scan` reads Prometheus through the API server's service proxy, or at `--prometheus-url`, and writes its report only to your machine, in a file only you can read.
+`kubectl hybernate` runs with your own kubeconfig and permissions, reads the same kinds of resources and their events, and changes nothing except for `wake` (activity annotations on a ManagedWorkload), `pause` (the `hybernate.io/pause-requested` annotation on a ManagedWorkload) and `enable` (the `hybernate.io/dry-run` annotation, on a workload or its namespace, or `spec.dryRun` on a ManagedWorkload you wrote). `scan` reads Prometheus through the API server's service proxy, or at `--prometheus-url`, and writes its report only to your machine, in a file only you can read.

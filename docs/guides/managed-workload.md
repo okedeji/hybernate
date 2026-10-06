@@ -18,7 +18,7 @@ spec:
     confidence: 85
 ```
 
-This is the absolute minimum: `target` and `prediction` are required, and `prediction: {}` takes the default confidence. The operator will watch the Deployment, track its cost and learn its forecast, but won't pause it until you add an idle policy.
+This is the absolute minimum: `target` and `prediction` are required, and `prediction: {}` takes the default confidence. The operator will watch the Deployment, track its cost and learn its forecast, but won't pause it on its own until you add an idle policy; [`kubectl hybernate pause`](pause.md#pause-now) pauses it when you ask.
 
 For most workloads you don't need to write one: the `hybernate.io/managed` label creates one from annotations; see [Opting In](opt-in.md). Write one yourself for settings annotations don't cover, such as Prometheus queries, `waitForReady`, or cost rates. A ManagedWorkload you write for a workload wins over the label.
 
@@ -71,17 +71,6 @@ spec:
 
 `target` can't be changed once the ManagedWorkload exists, since a paused target would be left at zero; the API server refuses the edit. To manage another workload, create another ManagedWorkload.
 
-### `desiredState`
-
-Optional manual override. When set, automation stops pausing and waking the workload, though the forecast keeps learning, and the operator drives the workload to this state. The `ManualOverride` condition says so.
-
-| Value | Effect |
-|-------|--------|
-| `Running` | Resume the workload (restore previous replicas), and keep it running |
-| `Paused` | Pause the workload (scale to zero), and keep it paused, even against activity, requests, or something else scaling it up |
-
-Remove the field to return to automatic management. See [Pause and Resume](pause.md).
-
 ### `idlePolicy`
 
 See [Idle Detection](../concepts/idle-detection.md) for how the activity clock works.
@@ -115,8 +104,6 @@ While the workload is paused, a request to any of its Services wakes it and is a
 | `onRequest` | bool | `true` | Hold requests to the paused workload and wake it. When `false`, requests fail while it's paused |
 | `maxWait` | duration | `2m` | How long a request is held while the workload wakes. After it, the connection is closed; the wake carries on |
 | `page` | bool | `true` | Answer a browser loading a page with a waking-up page that reloads until the workload is Running. Other requests are held either way |
-
-A workload paused with `desiredState: Paused` doesn't wake on request.
 
 ### `prediction`
 

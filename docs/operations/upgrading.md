@@ -42,23 +42,40 @@ v0.2.0 is a relaunch with breaking changes to the ManagedWorkload API, and there
 - The `status.cost` fields are renamed and mean something different: they cover the current calendar month and are priced on requests. Anything that reads `currentMonth*Hours`, `estimatedMonthlyCost`, `estimatedMonthlySavings` or `estimatedCostWithoutManagement` must move to the [new fields](../concepts/cost-tracking.md#status-fields).
 - The forecast's state is kept in `status.prediction.state`. The old `<name>-prediction-state` ConfigMaps are no longer read, and can be deleted.
 - `prediction.confidence` must be at least 50.
-- `desiredState: Destroyed` is gone; `desiredState` is `Running` or `Paused`.
+- `spec.desiredState` is gone, with nothing in its place; see [desiredState is removed](#desiredstate-is-removed) for what happens to a workload that sets it.
 - `spec.target` can no longer be changed once set.
 
 **Before upgrading**, fix the ManagedWorkloads the new CRD would reject. The API server lets an unchanged invalid field through, but refuses any change to it until it's valid. This lists them:
 
 ```bash
 kubectl get managedworkloads -A -o json | jq -r '.items[]
-  | select(.spec.desiredState == "Destroyed" or (.spec.prediction.confidence // 100) < 50)
+  | select((.spec.prediction.confidence // 100) < 50)
   | "\(.metadata.namespace)/\(.metadata.name)"'
 ```
 
-Set each one's `desiredState` to `Paused` or remove it, and raise its `prediction.confidence` to at least 50:
+Raise each one's `prediction.confidence` to at least 50:
 
 ```bash
-kubectl patch managedworkload <name> -n <namespace> --type=json -p '[{"op":"remove","path":"/spec/desiredState"}]'
 kubectl patch managedworkload <name> -n <namespace> --type=merge -p '{"spec":{"prediction":{"confidence":50}}}'
 ```
+
+### desiredState is removed
+
+`spec.desiredState` isn't in the new CRD's schema, so the API server prunes it, whatever its value, `Destroyed` included: the operator never sees it, and it's gone from the object the next time anything writes it. Nothing rejects it, so there's nothing to fix before upgrading, but remove it from manifests kept in Git: the API server drops it on every apply, and a GitOps tool may report the ManagedWorkload out of sync. To find the ManagedWorkloads that set it, run this before upgrading:
+
+```bash
+kubectl get managedworkloads -A -o json | jq -r '.items[]
+  | select(.spec.desiredState != null)
+  | "\(.metadata.namespace)/\(.metadata.name) \(.spec.desiredState) \(.status.phase)"'
+```
+
+What happens to each once the new operator runs:
+
+- **`Paused`, and paused:** it stays paused, now as an ordinary pause rather than one only `Running` would end. Its Services are routed to the doorman, unless `wake.onRequest` is `false`, so the next request to it wakes it, and so does `kubectl hybernate wake`, `autoResume` once the forecast is confident again, or scaling it up. It also wakes on an activity annotation, `hybernate.io/last-activity` or `hybernate.io/last-request` on the ManagedWorkload or its workload, that states a time since it was paused, or an `hybernate.io/active-until` still in the future: v0.1.x recorded no annotations with the pause, so one set while `desiredState` held it, which used to be ignored, wakes it as soon as the new operator starts. To keep a workload off until someone starts it, as `desiredState: Paused` did, take it out of Hybernate's hands: wake it with `kubectl hybernate wake`, then scale it to zero with `kubectl scale --replicas=0`. Hybernate leaves a workload someone else scaled to zero alone, and doesn't route its Services to the doorman, until its replicas are set above zero again (`ScaledToZero`).
+- **`Paused`, with `dryRun: true`:** v0.1.x paused it anyway. Dry-run now never leaves a workload paused, so it's woken, with a `DryRunWake` event, as soon as the new operator starts.
+- **`Running`:** automation is in charge again. With an `idlePolicy`, the workload is paused once it's had no activity for `idleAfter`. To keep it running, remove its `idlePolicy`, hold it with `hybernate.io/active-until`, or label the workload `hybernate.io/ignore: "true"`.
+
+To pause a workload now, run [`kubectl hybernate pause`](../guides/pause.md#pause-now), which pauses it until it's next used.
 
 **With Helm**, the chart now installs and upgrades the CRD itself. A v0.1.7 install left the CRD outside the release, so let Helm adopt it once, before `helm upgrade`:
 

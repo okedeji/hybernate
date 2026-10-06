@@ -35,7 +35,7 @@ The primary reconciler. Watches `ManagedWorkload` CRs and drives each workload t
 4. Learns the workload's dependencies from its environment
 5. Routes a paused workload's Services to the doorman, or stops routing them
 6. Finishes a pause or resume an earlier reconcile started
-7. Processes manual overrides (`desiredState`)
+7. Acts on a pause someone asked for with `kubectl hybernate pause`
 8. Runs the activity clock: records activity, and pauses once there has been none for `idleAfter`; for a paused workload, checks whether anything asks it to wake
 9. Accumulates cost data and writes status
 

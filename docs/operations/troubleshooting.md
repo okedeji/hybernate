@@ -54,7 +54,7 @@ kubectl get managedworkload my-api -n staging \
 
 `kubectl hybernate status` gives the reason in its NEXT column. Otherwise:
 
-- `desiredState: Running` keeps it running (`ManualOverride=True`), and without an `idlePolicy` nothing pauses it.
+- Without an `idlePolicy`, nothing pauses it on its own; [`kubectl hybernate pause`](../guides/pause.md#pause-now) pauses it when you ask.
 - `PrometheusAvailable=False`: a Prometheus activity query fails, or the operator has no `--prometheus-url`.
 - `Protected=True`: its namespace is protected.
 - `GitOpsConflict=True`: a GitOps tool undid its last pause, and Hybernate waits an hour before pausing again.
@@ -80,6 +80,21 @@ kubectl hybernate wake my-api -n staging
 
 It waits until the workload is Running, or tells you why it can't wake it. See the [kubectl plugin](../getting-started/kubectl-plugin.md#wake-a-workload).
 
+### Pausing a workload by hand
+
+```bash
+kubectl hybernate pause my-api -n staging
+```
+
+It waits until the workload is Paused, or prints why Hybernate didn't pause it. The answer stays in the `PauseRequest` condition:
+
+```bash
+kubectl get managedworkload my-api -n staging \
+  -o jsonpath='{.status.conditions[?(@.type=="PauseRequest")]}'
+```
+
+`False` gives the reason: workloads that depend on it are awake (`HeldByDependents`), a `hybernate.io/active-until` annotation holds it (`ActiveUntil`), it's in dry-run (`DryRun`) or a protected namespace (`Protected`), or it's scaled to zero already (`ScaledToZero`). Each request is answered once: fix the reason, then run `pause` again. See [Pause Now](../guides/pause.md#pause-now).
+
 ### Requests to a paused workload fail instead of waking it
 
 ```bash
@@ -87,7 +102,7 @@ kubectl get managedworkload my-api -n staging \
   -o jsonpath='{.status.conditions[?(@.type=="WakeOnRequest")]}'
 ```
 
-- **No condition, or `NotPaused`**: the workload isn't routed. A workload paused with `desiredState: Paused`, or with `wake.onRequest: false`, doesn't wake on request.
+- **No condition, or `NotPaused`**: the workload isn't routed. A workload with `wake.onRequest: false` doesn't wake on request.
 - **`NoServices`**: no Service with a selector and a ClusterIP selects the workload's pods on a TCP port, or every such port is in `hybernate.io/doorman-ignore-ports`. Headless Services aren't routed; see [Wake on Request](../concepts/wake-on-request.md#when-a-workload-isnt-routed).
 - **`ServedByOtherPods`**: another workload's Ready pods are behind the same Service, so requests go to them. See [Services shared with other workloads](../concepts/wake-on-request.md#services-shared-with-other-workloads).
 - **`UnsupportedLoadBalancer`**, or a Service named in the message as not routed: the Service is behind GKE container-native load balancing, which can't use the doorman. See [Compatibility](../reference/compatibility.md#cloud-load-balancers).

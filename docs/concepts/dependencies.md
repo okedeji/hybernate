@@ -52,7 +52,7 @@ The dependent then stays in `Resuming`, without scaling up, until every replica 
 WaitingForDependencies=True   waiting for preview-42/postgres (0 ready)
 ```
 
-There's no timeout, because a slow start is exactly why you'd set it. If the wait runs past 15 minutes, the `HybernateWorkloadStuck` alert fires. It doesn't wait for a dependency that can't start by waiting, which would leave the dependent at zero for good: one whose `desiredState` is `Paused`, or one Hybernate doesn't manage that's scaled to zero. `WaitingForDependencies=False` then names it. A managed dependency that's still paused is woken again every few seconds while the dependent waits.
+There's no timeout, because a slow start is exactly why you'd set it. If the wait runs past 15 minutes, the `HybernateWorkloadStuck` alert fires. It doesn't wait for a dependency that can't start by waiting, which would leave the dependent at zero for good: one Hybernate doesn't manage that's scaled to zero. `WaitingForDependencies=False` then names it. A managed dependency that's still paused is woken again every few seconds while the dependent waits.
 
 ## Edge cases
 
@@ -63,7 +63,7 @@ There's no timeout, because a slow start is exactly why you'd set it. If the wai
 | The dependency is in a namespace outside `watchNamespaces`, or Hybernate isn't allowed to read it | `DependencyNotFound=True` with reason `DependencyNotVisible`, naming why. It isn't held or woken, and nothing is blocked |
 | A cycle in `dependsOn` (A depends on B, B depends on A) | Each would hold the other awake forever, so neither pauses and both report `DependencyCycle=True` until it's removed |
 | A cycle through learned dependencies, such as two services that call each other | Not a cycle: a learned dependent doesn't hold a workload it's itself a dependency of. Each pauses when idle, and waking either wakes the other |
-| `desiredState: Paused` on a dependency that's in use | Your manual setting wins, with a `DependentsAwake` warning event naming the dependents |
+| `kubectl hybernate pause` on a dependency that's in use | It isn't paused: the request is answered with `PauseRequest=False`, reason `HeldByDependents`, and a `HeldByDependents` event naming the dependents, as for an idle pause. Pause the dependents first |
 | `dryRun: true` | The hold still applies and is reported; nothing is changed |
 
 ## Across namespaces

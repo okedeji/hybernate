@@ -68,9 +68,9 @@ The operator runs its full evaluation pipeline:
 |--------|-----------------|
 | Idle detection | The activity clock runs and the phase becomes `Idle` when it runs out, but the workload is **not** paused |
 | Forecast veto and dependency holds | Applied and reported as usual: `IdleVetoed`, `HeldByDependents`, `DependencyCycle` |
-| `desiredState: Paused` | Not acted on: the `WouldPause` condition is set, with one `[dry-run]` event, and the workload keeps running |
+| A [pause request](pause.md#pause-now) | Counted as a would-be pause: the phase becomes `Idle`, with a `[dry-run]` `PauseRequested` event and `PauseRequest=False`, reason `DryRun`, and the workload keeps running. Activity after the request ends the would-be pause, as it would wake a paused workload |
 | A workload Hybernate had already paused | Woken as soon as dry-run is turned on, with a `DryRunWake` event: dry-run never leaves a workload paused |
-| Wakes | Never held back: `desiredState: Running`, `kubectl hybernate wake`, and activity work as usual |
+| Wakes | Never held back: `kubectl hybernate wake` and activity work as usual |
 | Cost tracking | Costs are accumulated normally, all as awake time, since the workload never pauses; see [Cost Tracking](../concepts/cost-tracking.md#in-dry-run) |
 | Prediction engine | Data points are observed and confidence builds normally |
 | Events | The events for decisions dry-run holds back carry a `[dry-run]` prefix; see [Events](#events) |
@@ -126,11 +126,11 @@ When the clock runs out, and when activity ends the would-be pause:
 [dry-run] my-api: activity resumed (cpu): would have slept 3h12m, freeing $0.25; since Oct 1: would have paused 4 times, slept 96h12m, freeing $7.50
 ```
 
-The `[dry-run]` prefix marks the decisions dry-run holds back: `IdleDetected`, `ActivityResumed`, `IdleVetoed`, `HeldByDependents`, `DependencyCycle`, and the `Paused` event for a `desiredState: Paused` it doesn't act on. Events about what really happens, such as a wake, a forecast update, or a metrics problem, have no prefix.
+The `[dry-run]` prefix marks the decisions dry-run holds back: `IdleDetected`, `ActivityResumed`, `IdleVetoed`, `HeldByDependents`, `DependencyCycle`, and the `PauseRequested` event for a pause request it doesn't act on. Events about what really happens, such as a wake, a forecast update, or a metrics problem, have no prefix.
 
 ### Phase
 
-In dry-run the phase goes `Running` → `Idle` when the clock runs out, and back to `Running` at the next activity. The workload is never scaled down.
+In dry-run the phase goes `Running` → `Idle` when the clock runs out, or a pause is requested, and back to `Running` at the next activity. The workload is never scaled down.
 
 ## Recommended Workflow
 

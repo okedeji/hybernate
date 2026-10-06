@@ -34,8 +34,7 @@ These metrics help troubleshoot specific workload behavior.
 |--------|------|--------|-------------|
 | `hybernate_idle_seconds` | Gauge | `namespace`, `workload` | Seconds since the workload's last activity |
 | `hybernate_prediction_regime_changes_total` | Counter | `namespace`, `workload` | Regime changes detected |
-| `hybernate_automation_skipped_total` | Counter | `namespace`, `workload` | Automation skipped (manual override active) |
-| `hybernate_dryrun_actions_total` | Counter | `action` | Actions that would have been taken in dry-run; `action` is `idle_pause` |
+| `hybernate_dryrun_actions_total` | Counter | `action` | Actions that would have been taken in dry-run; `action` is `idle_pause`, or `requested_pause` for a pause asked for with `kubectl hybernate pause` |
 | `hybernate_target_unavailable_total` | Counter | `namespace`, `workload` | Target workload not found |
 
 ## Doorman

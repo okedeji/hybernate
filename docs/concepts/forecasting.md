@@ -20,7 +20,7 @@ The forecast is fed each hour once it's over, as the busiest moment seen in it:
 
 - While the workload is awake, its CPU is read every minute, and the hour records the highest reading. The peak, rather than the mean, is what the forecast's decisions need: the activity clock counts any minute above `cpuThreshold` as activity, so an hour busy only for its last ten minutes is an hour the workload has to be awake for. Usage in the first 15 minutes after a wake isn't counted: starting up isn't demand, and counted, a wake ahead of a busy hour would teach the forecast that the hour before it is busy too, so that it woke the workload earlier every week
 - While the workload is paused behind the [doorman](wake-on-request.md) (`WakeOnRequest=True`), a request would wake it, so a check that finds it still paused finds no demand. A request that wakes it counts as at least twice `cpuThreshold` of what it requested, however little it then uses, so the hour people arrive in is learned as busy
-- While the workload is paused without the doorman, or by `desiredState`, which a request doesn't end, demand can't be seen, and the hour isn't recorded: demand it can't see isn't zero
+- While the workload is paused without the doorman, demand can't be seen, and the hour isn't recorded: demand it can't see isn't zero
 - An hour is recorded only if it was checked from its start to its end. The hour under way is kept in memory, so after an operator restart or a leader change, the hour it happened in is skipped, unless it was only minutes old, rather than recorded from the part seen after it
 
 ## How It Works
