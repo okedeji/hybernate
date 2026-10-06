@@ -186,15 +186,18 @@ spec:
                   idle detection and wakes paused workloads ahead of predicted demand.
                 properties:
                   confidence:
-                    default: 85
+                    default: 75
                     description: |-
                       Confidence is the accuracy percentage (50-100) a season's forecasts
                       must reach before they drive decisions rather than only being
-                      reported. Accuracy is 1 - WAPE: 85 means the forecast's total error
-                      over the window is 15% of the demand in it. A season that falls 5
+                      reported. Accuracy is 1 - WAPE: 75 means the forecast's total error
+                      over the window is 25% of the demand in it. A season that falls 5
                       points below it stops driving decisions until it earns it again. The
                       minimum is 50 because below that a forecast that is wrong more than it
-                      is right would wake workloads and hold off pauses.
+                      is right would wake workloads and hold off pauses. The default of 75
+                      starts acting on a weekday pattern after about a week; a higher bar
+                      takes longer to reach, for little more accuracy, since a wrong forecast
+                      only wakes a workload early or keeps it up an hour longer.
                     maximum: 100
                     minimum: 50
                     type: integer
