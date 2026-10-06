@@ -26,6 +26,7 @@ spec:
                without Hybernate installed
       status   shows what Hybernate is pausing, waking and saving
       enable   ends dry-run, so Hybernate pauses a workload it's measuring
+      pause    pauses a workload now, to wake on its next request
       wake     wakes a paused workload and waits until it's ready
       deps     shows what a workload depends on and what depends on it
   platforms:

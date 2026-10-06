@@ -65,7 +65,8 @@ func newRootCmd(newClient clientFunc) *cobra.Command {
 		Short: "Hybernate kubectl plugin for workload lifecycle management",
 	}
 	kube := addKubeFlags(root.PersistentFlags(), newClient)
-	root.AddCommand(depsCmd(kube), enableCmd(kube), scanCmd(kube), statusCmd(kube), versionCmd(), wakeCmd(kube))
+	root.AddCommand(depsCmd(kube), enableCmd(kube), pauseCmd(kube), scanCmd(kube), statusCmd(kube), versionCmd(),
+		wakeCmd(kube))
 	for _, cmd := range root.Commands() {
 		silenceUsageOnceRunning(cmd)
 	}

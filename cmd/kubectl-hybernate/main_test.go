@@ -106,7 +106,7 @@ func notInstalled() interceptor.Funcs {
 // Without the CRD, the commands that need the operator say it isn't
 // installed, and an error from the cluster doesn't print usage.
 func TestCLI_NotInstalled(t *testing.T) {
-	for _, args := range [][]string{{"status"}, {"wake", "api"}, {"deps", "api"}} {
+	for _, args := range [][]string{{"status"}, {"wake", "api"}, {"pause", "api"}, {"deps", "api"}} {
 		t.Run(args[0], func(t *testing.T) {
 			out, err := runCLI(t, newStatusClient(t, notInstalled()), args...)
 
@@ -158,6 +158,7 @@ func TestCLI_ScanCantListNamespaces(t *testing.T) {
 func TestCLI_UsageForUsageErrors(t *testing.T) {
 	for _, args := range [][]string{
 		{"wake"},
+		{"pause"},
 		{"deps", "a", "b"},
 		{"status", "--bogus"},
 		{"status", "-n", "a", "-A"},
@@ -179,7 +180,7 @@ func TestCLI_Version(t *testing.T) {
 	assert.Equal(t, "kubectl-hybernate dev\n", out)
 }
 
-// wake, enable and deps default to the kubeconfig context's namespace.
+// wake, pause, enable and deps default to the kubeconfig context's namespace.
 func TestCLI_ContextNamespace(t *testing.T) {
 	t.Run("wake", func(t *testing.T) {
 		c := newClient(t, interceptor.Funcs{}, managedWorkload(v1alpha1.PhaseRunning))
@@ -189,6 +190,16 @@ func TestCLI_ContextNamespace(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "preview-42/api is already running; its idle clock restarts now\n", out)
 		assert.NotEmpty(t, annotations(t, c)[v1alpha1.AnnotationLastActivity])
+	})
+
+	t.Run("pause", func(t *testing.T) {
+		c := newClient(t, interceptor.Funcs{}, managedWorkload(v1alpha1.PhaseRunning))
+
+		out, err := runCLI(t, c, "pause", "deployment/api", "--wait=false")
+
+		require.NoError(t, err)
+		assert.Equal(t, "pausing preview-42/api\n", out)
+		assert.NotEmpty(t, annotations(t, c)[v1alpha1.AnnotationPauseRequested])
 	})
 
 	t.Run("deps", func(t *testing.T) {
@@ -269,7 +280,7 @@ current-context: a
 				assert.Equal(t, apiRequestTimeout, config.Timeout)
 			}},
 	}
-	for _, command := range []string{"status", "wake", "enable", "deps", "scan"} {
+	for _, command := range []string{"status", "wake", "pause", "enable", "deps", "scan"} {
 		for _, tt := range tests {
 			t.Run(command+" "+tt.name, func(t *testing.T) {
 				var got *rest.Config
@@ -278,7 +289,7 @@ current-context: a
 					return nil, fmt.Errorf("stop here")
 				})
 				args := []string{command, "--kubeconfig", kubeconfig}
-				if command == "wake" || command == "enable" || command == "deps" {
+				if command == "wake" || command == "pause" || command == "enable" || command == "deps" {
 					args = append(args, "api")
 				}
 				root.SetOut(&bytes.Buffer{})

@@ -1,8 +1,8 @@
 # kubectl Plugin
 
-The `kubectl hybernate` plugin scans a cluster for idle workloads, shows what Hybernate is doing in it, ends dry-run for workloads you've opted in, and wakes paused ones.
+The `kubectl hybernate` plugin scans a cluster for idle workloads, shows what Hybernate is doing in it, ends dry-run for workloads you've opted in, pauses workloads on demand, and wakes paused ones.
 
-`scan` and `status` read every namespace you can, and fall back to your kubeconfig context's namespace, with a note, when your access doesn't allow listing them all; `-n` names namespaces instead, and `-A` (`--all-namespaces`) insists on every one, failing rather than falling back. `wake`, `deps` and `enable` work in one namespace: `-n`, or your context's, as kubectl does.
+`scan` and `status` read every namespace you can, and fall back to your kubeconfig context's namespace, with a note, when your access doesn't allow listing them all; `-n` names namespaces instead, and `-A` (`--all-namespaces`) insists on every one, failing rather than falling back. `pause`, `wake`, `deps` and `enable` work in one namespace: `-n`, or your context's, as kubectl does.
 
 Every command takes kubectl's connection flags: `--kubeconfig`, `--context`, `--cluster`, `--user`, `--as`, `--as-group`, `--as-uid`, `--token`, `--server`, `--certificate-authority`, `--client-certificate`, `--client-key`, `--insecure-skip-tls-verify`, `--tls-server-name`, `--proxy-url`, `--username`, `--password`, `--disable-compression` and `--request-timeout`. Each request to the API server gives up after 30 seconds unless `--request-timeout` sets otherwise (`0` keeps the 30 seconds, unlike kubectl, where it means no limit), so a cluster that stops answering ends a command with an error, not a hang. `kubectl hybernate version` prints the plugin's version.
 
@@ -267,6 +267,51 @@ kubectl hybernate status --since 1h -o json
 | `--timeout` | | `1m` | How long to wait for the cluster before giving up |
 
 Your user needs `list` on `managedworkloads` and `events`, in every namespace or the ones passed with `-n`. Without access to events, it shows the rest and says so.
+
+## Pause a Workload
+
+```bash
+kubectl hybernate pause my-api -n staging
+```
+
+```
+pausing staging/my-api...
+staging/my-api is Paused after 4s; a request to it, or kubectl hybernate wake, wakes it
+```
+
+`pause` asks Hybernate to pause a workload now, instead of when its idle clock runs out: a preview environment at the end of the day, say. It's an ordinary pause, the same as an idle one: a request to the workload through the [doorman](../concepts/wake-on-request.md), [activity](../concepts/idle-detection.md#activity-annotations), `autoResume` or [`wake`](#wake-a-workload) wakes it. It works whether or not the workload has an `idlePolicy`. See [Pause and Resume](../guides/pause.md#pause-now) for exactly what Hybernate does with the request.
+
+```bash
+# Request the pause and return straight away
+kubectl hybernate pause my-api -n staging --wait=false
+```
+
+NAME is found as for [`wake`](#wake-a-workload).
+
+What it says depends on the phase:
+
+| Phase | What happens |
+|-------|--------------|
+| `Running` | It pauses, and `pause` waits until it's `Paused` |
+| `Idle` | It pauses now |
+| `Resuming` | It pauses once it's up |
+| `Pausing` | Already pausing; `pause` waits until it's `Paused` |
+| `Paused` | Already paused; `pause` returns at once |
+| dry-run | Never paused: Hybernate counts a would-be pause, and `pause` says so |
+
+Hybernate pauses it by the same rules as an idle pause, so `pause` exits 1 with Hybernate's reason when it won't: workloads that are awake depend on it, a `hybernate.io/active-until` annotation holds it awake, a `dependsOn` cycle runs through it, its namespace is protected, or the workload doesn't exist, is labelled `hybernate.io/ignore` or is managed by another ManagedWorkload. A workload scaled to zero outside Hybernate is off already, which `pause` says, exiting 0. Asking does override two things that hold back an idle pause: the forecast expecting demand soon, and the hour Hybernate waits after a GitOps tool undid its last pause.
+
+When Argo CD or Flux last set the workload's replicas, `pause` warns before asking, with the one-time fix: the tool sets them from Git again on its next sync, which undoes the pause. See [Argo CD and Flux](../guides/gitops.md).
+
+If the workload isn't `Paused`, and Hybernate hasn't said why, within `--timeout`, `pause` exits 1 with its phase and the `kubectl describe` command that says why.
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--namespace` | `-n` | kubeconfig context's | Namespace of the workload |
+| `--wait` | | `true` | Wait until the workload is Paused, or Hybernate says why it isn't |
+| `--timeout` | | `5m` | How long to wait, cluster calls included |
+
+Your user needs `get`, `list` and `patch` on `managedworkloads` in the namespace, and `get` on the workload for the GitOps warning, which is left out without it.
 
 ## Wake a Workload
 

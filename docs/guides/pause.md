@@ -17,6 +17,8 @@ Because the record is written first, a pause interrupted at any point, by an ope
 
 **Automatically:** once the workload has had no activity for `idlePolicy.idleAfter`; see [Idle Detection](../concepts/idle-detection.md).
 
+**Now:** with [`kubectl hybernate pause`](#pause-now).
+
 **Manually:**
 
 ```bash
@@ -29,6 +31,45 @@ This works on a ManagedWorkload created from the `hybernate.io/managed` label to
 A workload paused with `desiredState` stays paused while it's set: activity, requests and `autoResume` don't wake it, and something else scaling it up is paused again. Set it to `Running` to wake it. Removing it instead hands the workload back to automation still paused, to wake like any paused workload, on a request or activity. Its `ManualOverride` condition says so. If workloads that depend on it are awake, the pause goes ahead anyway, with a `DependentsAwake` warning event.
 
 In [dry-run](dry-run.md), `desiredState: Paused` doesn't scale anything: the `WouldPause` condition and one `[dry-run]` event say what would have happened.
+
+### Pause Now
+
+When you're done with a workload for the day, such as a preview environment, pause it now rather than waiting for `idleAfter`:
+
+```bash
+kubectl hybernate pause my-api -n staging
+```
+
+The result is an ordinary pause, the same as one the idle clock makes: a request to the workload through the [doorman](../concepts/wake-on-request.md), a change to its [activity annotations](../concepts/idle-detection.md#activity-annotations), `autoResume`, or [`kubectl hybernate wake`](../getting-started/kubectl-plugin.md#wake-a-workload) wakes it. It doesn't need an `idlePolicy`.
+
+The plugin asks by setting the `hybernate.io/pause-requested` annotation on the ManagedWorkload to a token, the time of the request. Any tool can do the same; the value only has to differ from the last request's:
+
+```bash
+kubectl annotate managedworkload my-api -n staging --overwrite \
+  hybernate.io/pause-requested="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+It's an annotation rather than a spec field so that Argo CD and Flux, which own the spec of a ManagedWorkload kept in Git, leave it alone. Hybernate acts on each value once: it records the value it handled in `status.lastPauseRequest`, which survives an operator restart, and says what came of it in the `PauseRequest` condition.
+
+The request runs the idle clock out now, and the workload is paused by the same rules as an idle pause:
+
+| The workload | What Hybernate does | `PauseRequest` condition |
+|--------------|---------------------|--------------------------|
+| `Running` or `Idle` | Pauses it, with a `PauseRequested` event, then `Paused` | `True`, `Pausing` |
+| Held by the forecast, which expects demand soon | Pauses it: you asked. The forecast keeps learning | `True`, `Pausing` |
+| Within the hour Hybernate waits after Argo CD or Flux undid its last pause | Pauses it: you asked. If the tool undoes it again, that's a new [`GitOpsConflict`](gitops.md) | `True`, `Pausing` |
+| `Pausing` | Finishes the pause, then marks the request handled | `True`, `AlreadyPaused` |
+| `Paused` | Marks the request handled | `True`, `AlreadyPaused` |
+| `Resuming` | Lets the wake finish, then pauses it | `True`, `Pausing` |
+| In [dry-run](dry-run.md) | Never scales it: counts a would-be pause in `status.dryRun`, moves it to `Idle`, and emits a `[dry-run]` `PauseRequested` event. Activity after the request ends the would-be pause, as it would wake a paused workload | `False`, `DryRun` |
+| Held awake by `hybernate.io/active-until` on it or its workload | Leaves it running, with a Warning event | `False`, `ActiveUntil` |
+| Depended on by awake workloads | Leaves it running, with a `HeldByDependents` event, as for an idle pause | `False`, `HeldByDependents` |
+| In a `dependsOn` cycle | Leaves it running, with a Warning event | `False`, `DependencyCycle` |
+| In a [protected namespace](opt-in.md#protected-namespaces) | Leaves it running, with a Warning event | `False`, `Protected` |
+| Scaled to zero outside Hybernate | Nothing to do: it's off already | `False`, `ScaledToZero` |
+| Its workload is missing, labelled `hybernate.io/ignore`, or managed by another ManagedWorkload | Nothing, with a Warning event | `False`, `TargetNotFound`, `TargetIgnored` or `DuplicateTarget` |
+
+A request Hybernate won't act on is answered once, not retried: ask again once the reason is gone. Activity from before the request doesn't undo it: the pause records the activity annotations as they stood, and only a change made since wakes the workload.
 
 ## Resume
 

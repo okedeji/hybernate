@@ -120,6 +120,7 @@ func TestCommands_GiveUpAtTimeout(t *testing.T) {
 		{name: "status", args: []string{"status"}},
 		{name: "status in a namespace", args: []string{"status", "-n", "preview-42"}},
 		{name: "wake", args: []string{"wake", "api", "-n", "preview-42"}},
+		{name: "pause", args: []string{"pause", "api", "-n", "preview-42"}},
 		{name: "enable", args: []string{"enable", "api", "-n", "preview-42"}},
 		{name: "enable --all", args: []string{"enable", "--all", "-n", "preview-42"}},
 		{name: "deps", args: []string{"deps", "api", "-n", "preview-42"}},
@@ -161,6 +162,8 @@ func TestCommands_RejectNonPositiveDurations(t *testing.T) {
 		{args: []string{"status", "--since", "-1h"}, want: "--since must be more than zero"},
 		{args: []string{"wake", "api", "--timeout", "0"}, want: "--timeout must be more than zero"},
 		{args: []string{"wake", "api", "--for", "-1h"}, want: "--for can't be negative"},
+		{args: []string{"pause", "api", "--timeout", "0"}, want: "--timeout must be more than zero"},
+		{args: []string{"pause", "api", "--timeout", "-1s"}, want: "--timeout must be more than zero"},
 		{args: []string{"enable", "api", "--timeout", "0"}, want: "--timeout must be more than zero"},
 		{args: []string{"deps", "api", "--timeout", "0"}, want: "--timeout must be more than zero"},
 	}

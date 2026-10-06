@@ -93,6 +93,7 @@ kubectl hybernate enable my-api -n staging
 - **Label opt-in**: `hybernate.io/managed: "true"` on a workload or namespace, with settings as annotations, all in the manifests you already keep in Git
 - **`kubectl hybernate scan`** finds idle workloads in a cluster and what they cost, with nothing installed, and with Prometheus replays the last week to show how long each would have slept and what that frees, in a report that opens in your browser to share
 - **`kubectl hybernate status`** shows what Hybernate is doing in a cluster on one screen: each workload's state, when it pauses next or what holds it awake, what needs attention, what it has saved, and the latest pauses and wakes with what caused them
+- **`kubectl hybernate pause`** pauses a workload now, such as a preview environment at the end of the day, to wake on its next request
 - **`kubectl hybernate wake`** wakes a paused workload from the terminal and waits until it's Running
 - **`kubectl hybernate enable`** ends dry-run once you trust what you've measured, and says what to change in Git when Argo CD or Flux applies the workload
 - **Cost tracking** per workload, for the current month: what it cost, what pausing saved, and a projection for the month, priced at the list price of the nodes it runs on
