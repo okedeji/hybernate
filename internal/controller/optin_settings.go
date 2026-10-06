@@ -235,7 +235,7 @@ func optInSpec(target v1alpha1.WorkloadRef, workload, namespace map[string]strin
 		},
 		// Every field the API server would default is set here, so the spec
 		// written matches the one stored and rewriting it changes nothing.
-		Prediction: v1alpha1.PredictionSpec{Confidence: 85},
+		Prediction: v1alpha1.PredictionSpec{Confidence: 75},
 	}
 	return spec, s.problems
 }

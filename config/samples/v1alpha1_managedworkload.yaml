@@ -14,5 +14,5 @@ spec:
     idleAfter: 1h
     autoResume: true
   prediction:
-    confidence: 85
+    confidence: 75
   dryRun: true

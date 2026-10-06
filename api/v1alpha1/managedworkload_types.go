@@ -163,14 +163,17 @@ type WorkloadRef struct {
 type PredictionSpec struct {
 	// Confidence is the accuracy percentage (50-100) a season's forecasts
 	// must reach before they drive decisions rather than only being
-	// reported. Accuracy is 1 - WAPE: 85 means the forecast's total error
-	// over the window is 15% of the demand in it. A season that falls 5
+	// reported. Accuracy is 1 - WAPE: 75 means the forecast's total error
+	// over the window is 25% of the demand in it. A season that falls 5
 	// points below it stops driving decisions until it earns it again. The
 	// minimum is 50 because below that a forecast that is wrong more than it
-	// is right would wake workloads and hold off pauses.
+	// is right would wake workloads and hold off pauses. The default of 75
+	// starts acting on a weekday pattern after about a week; a higher bar
+	// takes longer to reach, for little more accuracy, since a wrong forecast
+	// only wakes a workload early or keeps it up an hour longer.
 	// +kubebuilder:validation:Minimum=50
 	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=85
+	// +kubebuilder:default=75
 	Confidence int `json:"confidence"`
 }
 
