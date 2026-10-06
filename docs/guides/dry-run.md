@@ -54,7 +54,7 @@ spec:
   idlePolicy:
     idleAfter: 1h
   prediction:
-    confidence: 85
+    confidence: 75
   dryRun: true
 ```
 

@@ -77,7 +77,21 @@ That has a consequence for workloads paused without the [doorman](wake-on-reques
 
 The ManagedWorkload shows the phase per season, in `status.prediction`: `dailyPhase` and `weeklyPhase` are each `Observing`, `Suggesting` or `Active`, next to `dailyConfidence` and `weeklyConfidence`. `DailyActive`, for example, is `dailyPhase: Active` with `weeklyPhase: Observing`.
 
-The confidence threshold is configurable per workload via `spec.prediction.confidence` (default 85%, minimum 50%), and a change applies at the next reconcile. A phase is earned at the threshold and lost 5 points below it, so confidence hovering at the threshold doesn't switch the forecast on and off every hour.
+The confidence threshold is configurable per workload via `spec.prediction.confidence` (default 75%, minimum 50%), and a change applies at the next reconcile. A phase is earned at the threshold and lost 5 points below it, so confidence hovering at the threshold doesn't switch the forecast on and off every hour.
+
+### How Long It Takes
+
+Measured on simulated workloads from a fresh start, with every hour observed:
+
+| Workload | Default threshold (75) | Threshold 85 |
+|----------|------------------------|--------------|
+| Busy on weekdays 9 to 5, quiet nights and weekends | `DailyActive` after about 8 days, `FullyActive` after about 18 | About 15 days, and 25 |
+| The same pattern every day, weekends included | About 3 days, and 7 | About 7 days, and 9 |
+| Always busy, or always idle | 1 day, and 7 | 1 day, and 7 |
+
+A weekday pattern takes longest: until the forecast has seen enough weeks, it predicts a busy Saturday morning that never comes, and its daily confidence dips each weekend. A higher threshold waits for more evidence. A wrong forecast costs little either way, since it only wakes a workload early or keeps it up an hour longer, so the default favours starting sooner.
+
+None of this delays idle detection or wake on request, which work from the first hour: until the forecast is active, the first request of the morning wakes the workload, instead of `autoResume` having it ready.
 
 ## Confidence Scoring
 
@@ -87,7 +101,7 @@ Confidence is \( 1 - \text{WAPE} \), the **weighted absolute percentage error**:
 C = 1 - \frac{\sum_{i} |F(i) - Y(i)|}{\max\bigl(\sum_{i} Y(i),\; n \cdot f\bigr)}
 \]
 
-A confidence of 85% means the forecast's total error over the window is 15% of the demand in it. Unlike an average of per-hour percentage errors, it is defined when demand is zero, and an hour of zero demand forecast as zero isn't counted as a perfect hour. The denominator is never less than \( n \cdot f \), where \( f \) is the workload's mean hourly demand over about a week, and at least 10 millicores: a quiet weekend day is judged against the demand of a typical day, and a workload that idles at a few millicores isn't judged on its noise.
+A confidence of 75% means the forecast's total error over the window is 25% of the demand in it. Unlike an average of per-hour percentage errors, it is defined when demand is zero, and an hour of zero demand forecast as zero isn't counted as a perfect hour. The denominator is never less than \( n \cdot f \), where \( f \) is the workload's mean hourly demand over about a week, and at least 10 millicores: a quiet weekend day is judged against the demand of a typical day, and a workload that idles at a few millicores isn't judged on its noise.
 
 - **Daily confidence** is scored over the last 24 observed hours
 - **Weekly confidence** is scored over the last 168 observed hours: a whole week of weekdays and weekend must be forecast well, not just the day just gone

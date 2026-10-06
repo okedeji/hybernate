@@ -15,7 +15,7 @@ spec:
     kind: Deployment
     name: my-api
   prediction:
-    confidence: 85
+    confidence: 75
 ```
 
 This is the absolute minimum: `target` and `prediction` are required, and `prediction: {}` takes the default confidence. The operator will watch the Deployment, track its cost and learn its forecast, but won't pause it on its own until you add an idle policy; [`kubectl hybernate pause`](pause.md#pause-now) pauses it when you ask.
@@ -49,7 +49,7 @@ spec:
     page: true
 
   prediction:
-    confidence: 85
+    confidence: 75
 
   costTracking:
     rates:
@@ -109,7 +109,7 @@ While the workload is paused, a request to any of its Services wakes it and is a
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `confidence` | int (50-100) | `85` | Accuracy, as 1 − WAPE, a season's forecasts must reach before they drive decisions. See [Forecasting](../concepts/forecasting.md) |
+| `confidence` | int (50-100) | `75` | Accuracy, as 1 − WAPE, a season's forecasts must reach before they drive decisions. See [Forecasting](../concepts/forecasting.md) |
 
 `prediction` itself is required; `prediction: {}` takes the default.
 

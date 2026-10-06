@@ -28,7 +28,7 @@
 | `wake.maxWait` | duration | No | `2m` | How long a request is held while the workload wakes |
 | `wake.page` | bool | No | `true` | Answer a browser loading a page with a waking-up page instead of holding it |
 | `prediction` | `PredictionSpec` | Yes | | Forecast engine config; `{}` takes the defaults |
-| `prediction.confidence` | int (50-100) | No | `85` | Accuracy (1 − WAPE, %) a season's forecasts must reach before they drive decisions |
+| `prediction.confidence` | int (50-100) | No | `75` | Accuracy (1 − WAPE, %) a season's forecasts must reach before they drive decisions |
 | `costTracking` | `CostTrackingSpec` | No | | Custom cost rate overrides |
 | `costTracking.rates` | `CostRates` | No | node list prices, then AWS defaults | Custom cost rates |
 | `dryRun` | bool | No | `false` | Evaluate without pausing |
