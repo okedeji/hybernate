@@ -121,6 +121,15 @@ doorman:
       cpu: 10m
       memory: 64Mi
   networkPolicy:
+    # Who may reach paused workloads through the doorman, as NetworkPolicy
+    # peers, such as your ingress controller's namespace and the namespaces
+    # whose apps call paused workloads. A paused workload's own
+    # NetworkPolicy sees the doorman as the caller, so this is where callers
+    # are restricted while it's paused. Empty leaves the doorman open to
+    # every caller. Needs networkPolicy.enabled. For example:
+    #   - namespaceSelector:
+    #       matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+    ingressFrom: []
     # Limits where the doorman can connect: to pods, to pass on the
     # connections it holds, and to the API server. The doorman refuses
     # addresses that can't be a pod's, such as cloud metadata services;

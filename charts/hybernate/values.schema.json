@@ -99,6 +99,7 @@
         "networkPolicy": {
           "type": "object",
           "properties": {
+            "ingressFrom": {"type": "array", "items": {"type": "object", "minProperties": 1}},
             "egress": {
               "type": "object",
               "properties": {

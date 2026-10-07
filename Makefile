@@ -148,6 +148,13 @@ check-chart: ## Lint the Helm chart, render it for each provider's Kubernetes ve
 	@for d in 1h30m 0.5s 0h5m; do \
 		helm template hybernate charts/hybernate --set defaults.idleAfter=$$d >/dev/null || exit 1; \
 	done
+	@helm template hybernate charts/hybernate --set networkPolicy.enabled=true \
+		--set 'doorman.networkPolicy.ingressFrom[0].namespaceSelector.matchLabels.team=checkout' \
+		--show-only templates/networkpolicy.yaml | grep -q 'team: checkout' || { \
+		echo "doorman.networkPolicy.ingressFrom doesn't reach the doorman's NetworkPolicy"; exit 1; }
+	@! helm template hybernate charts/hybernate \
+		--set 'doorman.networkPolicy.ingressFrom[0].namespaceSelector.matchLabels.team=checkout' >/dev/null 2>&1 || { \
+		echo "the chart accepts doorman.networkPolicy.ingressFrom without networkPolicy.enabled, which leaves the doorman open"; exit 1; }
 	helm template hybernate charts/hybernate | go run ./hack/rbaccheck config/rbac/role.yaml
 	helm template hybernate charts/hybernate --set 'watchNamespaces={shop,blog}' | go run ./hack/rbaccheck config/rbac/role.yaml
 
