@@ -78,7 +78,7 @@ func main() {
 	var probeAddr string
 	var prometheusURL string
 	var runDoorman bool
-	var doormanService, doormanNamespace string
+	var doormanService, doormanNamespace, doormanHealthCheckAgents string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var maxConcurrentReconciles int
@@ -100,6 +100,9 @@ func main() {
 		"Name of the doorman's Service. Empty disables waking on request.")
 	flag.StringVar(&doormanNamespace, "doorman-namespace", envOr("POD_NAMESPACE", "hybernate-system"),
 		"Namespace of the doorman's Service.")
+	flag.StringVar(&doormanHealthCheckAgents, "doorman-health-check-user-agents", "",
+		"Comma-separated User-Agent prefixes of health checkers and scrapers whose GET and HEAD requests don't wake "+
+			"a paused workload, besides the built-in ones, such as MyCorpMonitor/.")
 	flag.StringVar(&prometheusURL, "prometheus-url", "",
 		"Base URL of the Prometheus API used for activity queries, e.g. http://prometheus.monitoring.svc:9090.")
 	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 4,
@@ -208,7 +211,10 @@ func main() {
 	c := client.WithFieldOwner(mgr.GetClient(), v1alpha1.FieldManager)
 	readyz := healthz.Ping
 	if runDoorman {
-		server := doorman.NewServer(c, mgr.GetEventRecorder("hybernate-doorman"), doorman.Options{Informers: mgr.GetCache()})
+		server := doorman.NewServer(c, mgr.GetEventRecorder("hybernate-doorman"), doorman.Options{
+			Informers:         mgr.GetCache(),
+			HealthCheckAgents: strings.Split(doormanHealthCheckAgents, ","),
+		})
 		if err := mgr.Add(server); err != nil {
 			setupLog.Error(err, "unable to add doorman")
 			os.Exit(1)

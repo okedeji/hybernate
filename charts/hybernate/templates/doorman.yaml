@@ -43,6 +43,9 @@ spec:
           args:
             - --doorman
             - --health-probe-bind-address=:8081
+            {{- with .Values.doorman.healthCheckUserAgents }}
+            - --doorman-health-check-user-agents={{ join "," . }}
+            {{- end }}
             {{- with .Values.watchNamespaces }}
             - --watch-namespaces={{ join "," . }}
             {{- end }}

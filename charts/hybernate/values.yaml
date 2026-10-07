@@ -95,6 +95,11 @@ defaults:
 doorman:
   enabled: true
   replicaCount: 2
+  # User-Agent prefixes of health checkers and scrapers whose GET and HEAD
+  # requests shouldn't wake a paused workload, besides the ones the doorman
+  # knows (kube-probe, Prometheus, load balancers' checks and others), such
+  # as an in-house uptime monitor's: ["MyCorpMonitor/"].
+  healthCheckUserAgents: []
   # Keeps one doorman serving through node drains, when replicaCount > 1.
   podDisruptionBudget:
     enabled: true

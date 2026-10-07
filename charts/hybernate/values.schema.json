@@ -85,6 +85,10 @@
       "properties": {
         "enabled": {"type": "boolean"},
         "replicaCount": {"type": "integer", "minimum": 1},
+        "healthCheckUserAgents": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "pattern": "^[^,]+$"}
+        },
         "podDisruptionBudget": {
           "type": "object",
           "properties": {
