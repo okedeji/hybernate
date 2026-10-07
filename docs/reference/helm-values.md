@@ -155,6 +155,7 @@ The doorman uses the operator image, the `metrics.*` settings, `logLevel` and `l
 | Value | Default | Description |
 |-------|---------|-------------|
 | `networkPolicy.enabled` | `false` | Create NetworkPolicies for the operator and the doorman |
+| `doorman.networkPolicy.ingressFrom` | `[]` | NetworkPolicy peers allowed to reach paused workloads through the doorman, such as your ingress controller's namespace. Empty leaves the doorman open to every caller. Needs `networkPolicy.enabled` |
 | `doorman.networkPolicy.egress.enabled` | `false` | Create an egress NetworkPolicy allowing the doorman to connect only to `podCIDRs` and the API server |
 | `doorman.networkPolicy.egress.podCIDRs` | `[]` | The cluster's pod CIDRs, in every IP family it uses. Required when enabled |
 | `doorman.networkPolicy.egress.apiServer` | `[]` | CIDRs of the API server's endpoints (`kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes`), not the `kubernetes` Service's ClusterIP. Required when enabled |

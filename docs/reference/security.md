@@ -26,9 +26,9 @@ Nothing leaves the cluster: no telemetry, no usage reporting, no update checks. 
 
 ### The doorman is a way in to paused workloads
 
-Any client that can reach a doorman pod can reach every routed, paused workload, in any namespace, on its Service ports, and a workload's own NetworkPolicy sees the doorman, not the client, as the source. The chart's NetworkPolicy (`networkPolicy.enabled`, off by default) leaves the doorman's routing ports open to every source. Where that's too wide:
+Any client that can reach a doorman pod can reach every routed, paused workload, in any namespace, on its Service ports, and a workload's own NetworkPolicy sees the doorman, not the client, as the source. The chart's NetworkPolicy (`networkPolicy.enabled`, off by default) leaves the doorman's routing ports open to every source unless you restrict them. Where that's too wide:
 
-- Give the doorman pods an ingress NetworkPolicy that admits only the callers your paused workloads really have, such as your ingress controller's namespace and the namespaces whose apps call paused services. There's an example in [Wake on Request](../concepts/wake-on-request.md#restricting-who-can-reach-the-doorman).
+- Admit only the callers your paused workloads really have, such as your ingress controller's namespace and the namespaces whose apps call paused services, with `doorman.networkPolicy.ingressFrom`. See [Wake on Request](../concepts/wake-on-request.md#restricting-who-can-reach-the-doorman).
 - Give them an egress NetworkPolicy allowing only your pod CIDRs and the API server: set `doorman.networkPolicy.egress` (off by default; see [Helm values](helm-values.md#network-policy)). The doorman only dials Pod-backed IP endpoints of EndpointSlices the EndpointSlice controller manages, and refuses loopback, link-local, and cloud metadata addresses (AWS's `fd00:ec2::254` and Alibaba Cloud's `100.100.100.200` included), but anyone who can write EndpointSlices in a namespace can forge those labels, and the policy enforces the same bounds in the network.
 - Its rate limits (see [Limits](../concepts/wake-on-request.md#limits)) slow a port scan through the doorman; they don't stop one.
 

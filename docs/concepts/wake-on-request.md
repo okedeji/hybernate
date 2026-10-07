@@ -187,7 +187,23 @@ Callers reach the doorman on ports 20000-29999, so a default-deny policy on the 
 !!! warning "The doorman is a way in to every paused workload"
     Any client that can reach a doorman pod can reach every routed, paused workload, in any namespace, on its Service ports. The workload's own NetworkPolicy sees the doorman as the source, not the client, so a policy that admits the doorman admits everyone who can reach it. The rate limits slow a port scan through the doorman; they don't stop one.
 
-The chart's NetworkPolicy (`networkPolicy.enabled`, off by default) leaves the routing ports open to every source, since every client of a paused workload's Services is sent to them. Where that's too wide, replace it with a policy of your own that admits only the callers your paused workloads really have, such as your ingress controller's namespace and the namespaces whose apps call paused services:
+The chart's NetworkPolicy (`networkPolicy.enabled`, off by default) leaves the routing ports open to every source unless you say who may use them. List the callers your paused workloads really have, such as your ingress controller's namespace and the namespaces whose apps call paused services, in `doorman.networkPolicy.ingressFrom`:
+
+```yaml
+networkPolicy:
+  enabled: true
+doorman:
+  networkPolicy:
+    ingressFrom:
+      - namespaceSelector:
+          matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+      - namespaceSelector:
+          matchLabels: {team: checkout}
+```
+
+Each entry is a NetworkPolicy peer, so `podSelector` and `ipBlock` work too. Everyone else is refused before reaching the doorman. The chart's policy also keeps the doorman's metrics port open to namespaces labelled `metrics: enabled`. Setting `ingressFrom` without `networkPolicy.enabled` is refused at install, since it would create no policy and leave the doorman open. Don't add a policy of your own beside the chart's: NetworkPolicies add up, so the chart's open routing ports would still admit everyone.
+
+With kustomize, write the policy yourself:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -198,7 +214,6 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/instance: hybernate
       control-plane: doorman
   policyTypes: [Ingress]
   ingress:
@@ -216,7 +231,7 @@ spec:
         - {port: 8443, protocol: TCP}
 ```
 
-The second rule keeps the doorman's metrics port reachable for Prometheus; leave it out if you don't scrape it. Use the release name in `app.kubernetes.io/instance`, and `metrics.port` if you changed it.
+The second rule keeps the doorman's metrics port reachable for Prometheus; leave it out if you don't scrape it.
 
 Limit the doorman's egress too. It only ever dials Pod-backed IP endpoints of EndpointSlices the EndpointSlice controller manages, and never loopback, link-local, or cloud metadata addresses (AWS's `fd00:ec2::254` and Alibaba Cloud's `100.100.100.200` included), but anyone who can write EndpointSlices in a namespace can forge those labels, and an egress policy bounds where that could send it. The chart can create one, allowing only your pod CIDRs and the API server:
 
