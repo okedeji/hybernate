@@ -7,12 +7,9 @@ metadata:
   labels:
     {{- include "hybernate.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [""]
-    resources: [configmaps]
-    verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    verbs: [get, list, watch, create, update, patch, delete]
+    verbs: [get, create, update]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

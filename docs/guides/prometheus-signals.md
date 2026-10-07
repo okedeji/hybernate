@@ -6,8 +6,11 @@ CPU tells Hybernate whether a workload is doing work. A Prometheus query tells i
 
 On every check (about once a minute while the workload is awake), Hybernate runs each query as an instant query against the Prometheus API (`/api/v1/query`), with a 5-second timeout.
 
-- **Result above zero**: activity. The [activity clock](../concepts/idle-detection.md) resets.
-- **Empty result or zero**: no activity from this source. The clock keeps running.
+- **Any series above zero**: activity. The [activity clock](../concepts/idle-detection.md) resets. With a series per pod, one busy pod is enough.
+- **Zero, or an empty result**: no activity from this source. The clock keeps running.
+- **`NaN` or infinite values** are ignored, as no evidence either way: `NaN` is what a ratio of two idle counters gives (0/0). A result with nothing else in it is treated like an empty one: it doesn't confirm activity, and the other sources decide.
+
+The query must return an instant vector or a scalar; a range vector (`metric[5m]` on its own) fails as `QueryFailed`. A response larger than 4 MiB, from a query that returns a series per pod across the cluster, is refused too: aggregate with `sum` or `max`.
 
 Write the query so that it measures activity, not idleness: "how many requests per second", not "are there no requests".
 
@@ -24,17 +27,19 @@ spec:
 
 Queries are combined with the other activity sources: CPU, deploys, and activity annotations. Any one of them is enough to keep the workload awake.
 
+Prometheus queries can't be set with an annotation. On a ManagedWorkload created from the `hybernate.io/managed` label, add them to its `spec.idlePolicy.activity.prometheus`: the opt-in controller keeps them when it updates the rest from the annotations.
+
 ## Prometheus Endpoint
 
 Set the Prometheus URL with the `prometheus.url` Helm value, which passes `--prometheus-url` to the operator:
 
 ```bash
-helm upgrade --install hybernate oci://ghcr.io/okedeji/charts/hybernate \
-  --namespace hybernate-system \
+helm upgrade hybernate oci://ghcr.io/okedeji/charts/hybernate \
+  --namespace hybernate-system --reuse-values \
   --set prometheus.url=http://prometheus.monitoring.svc.cluster.local:9090
 ```
 
-The URL is the base of the Prometheus HTTP API. Hybernate appends `/api/v1/query` and keeps any path prefix, so endpoints like `https://mimir.example.com/prometheus` work as-is.
+The URL is the base of the Prometheus HTTP API, `http` or `https`; the operator refuses to start with any other. Hybernate appends `/api/v1/query` and keeps any path prefix, so endpoints like `https://mimir.example.com/prometheus` work as-is. It sends no credentials or headers, so a Prometheus that needs them must be reached through a proxy that adds them.
 
 ## When a Query Can't Be Evaluated
 
@@ -43,7 +48,7 @@ If a query fails, Hybernate can't see that activity, so it doesn't pause the wor
 | Reason | Meaning |
 |--------|---------|
 | `EndpointNotConfigured` | Queries are configured but the operator has no `--prometheus-url` |
-| `QueryFailed` | Prometheus returned an error or couldn't be reached. The condition message has the details |
+| `QueryFailed` | Prometheus returned an error, couldn't be reached within 5 seconds, or returned a range vector or an oversized result. The condition message has the details |
 
 ```bash
 kubectl get managedworkload my-api -n staging \

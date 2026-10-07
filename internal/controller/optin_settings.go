@@ -39,100 +39,151 @@ type OptInDefaults struct {
 // DefaultOptInDefaults match a ManagedWorkload written with no settings.
 var DefaultOptInDefaults = OptInDefaults{IdleAfter: defaultIdleAfter, CPUThreshold: defaultCPUThreshold}
 
-// settingProblem is an annotation that couldn't be used, so its setting
-// fell back to what it would be without it.
+// settingProblem is an annotation value that couldn't be read, so the
+// setting came from further down the order of precedence.
 type settingProblem struct {
 	annotation string
 	value      string
-	reason     string
+	// on is where the annotation is: the workload or its namespace.
+	on      string
+	reason  string
+	outcome string
 }
 
 func (p settingProblem) String() string {
-	return fmt.Sprintf("%s=%q %s", p.annotation, p.value, p.reason)
+	return fmt.Sprintf("%s=%q on the %s %s, so %s", p.annotation, p.value, p.on, p.reason, p.outcome)
 }
 
-// settings reads the opt-in annotations of a workload and its namespace;
-// the workload's own wins.
+// settings reads the opt-in annotations of a workload and its namespace.
+// Each setting is the first value that can be read: the workload's, then
+// its namespace's, then the fallback. A value that can't be read is
+// reported and skipped, never replaced by the fallback, so a typo on a
+// workload doesn't undo its namespace's setting.
 type settings struct {
 	workload, namespace map[string]string
 	problems            []settingProblem
 }
 
-func (s *settings) lookup(key string) (string, bool) {
-	if v, ok := s.workload[key]; ok {
-		return v, true
+// resolve offers each value of key, in order of precedence, to read until
+// read accepts one, and reports each one it rejects along with where the
+// setting came from instead. read is told where the value is.
+func (s *settings) resolve(key, invalid string, read func(value, on string) bool) {
+	start := len(s.problems)
+	outcome := "the default is used"
+	for _, level := range []struct {
+		on          string
+		annotations map[string]string
+	}{{"workload", s.workload}, {"namespace", s.namespace}} {
+		v, ok := level.annotations[key]
+		if !ok {
+			continue
+		}
+		if read(v, level.on) {
+			outcome = "the " + level.on + "'s value is used"
+			break
+		}
+		s.problems = append(s.problems, settingProblem{annotation: key, value: v, on: level.on, reason: invalid})
 	}
-	v, ok := s.namespace[key]
-	return v, ok
+	for i := start; i < len(s.problems); i++ {
+		if s.problems[i].outcome == "" {
+			s.problems[i].outcome = outcome
+		}
+	}
 }
 
-func (s *settings) problem(key, value, reason string) {
-	s.problems = append(s.problems, settingProblem{annotation: key, value: value, reason: reason})
-}
-
-// boolean reads "true" or "false". Without the annotation, or with any
-// other value, the setting is fallback.
+// boolean accepts exactly "true" or "false", the spellings kubectl
+// hybernate and the docs use, so every reader of the annotation agrees on
+// what it says.
 func (s *settings) boolean(key string, fallback bool) bool {
-	v, ok := s.lookup(key)
-	if !ok {
-		return fallback
-	}
-	switch v {
-	case v1alpha1.True:
+	b := fallback
+	s.resolve(key, `isn't "true" or "false"`, func(v, _ string) bool {
+		switch v {
+		case v1alpha1.True:
+			b = true
+		case "false":
+			b = false
+		default:
+			return false
+		}
 		return true
-	case "false":
-		return false
-	}
-	s.problem(key, v, `isn't "true" or "false"`)
-	return fallback
+	})
+	return b
 }
 
+// dryRun reads the dry-run annotation as a boolean, except that any value
+// that can't be read along the way turns dry-run on: a typo in the setting
+// meant to stop pauses must never start them.
+func (s *settings) dryRun(fallback bool) bool {
+	start := len(s.problems)
+	on := s.boolean(v1alpha1.AnnotationDryRun, fallback)
+	if len(s.problems) == start {
+		return on
+	}
+	for i := start; i < len(s.problems); i++ {
+		s.problems[i].outcome = "dry-run is on, to be safe"
+	}
+	return true
+}
+
+// duration accepts a Go duration above zero.
 func (s *settings) duration(key string, fallback time.Duration) time.Duration {
-	v, ok := s.lookup(key)
-	if !ok {
-		return fallback
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		s.problem(key, v, `isn't a duration like "90m" or "2h"`)
-		return fallback
-	}
+	d := fallback
+	s.resolve(key, `isn't a duration above zero, like "90m" or "2h"`, func(v, _ string) bool {
+		parsed, err := time.ParseDuration(v)
+		if err != nil || parsed <= 0 {
+			return false
+		}
+		d = parsed
+		return true
+	})
 	return d
 }
 
+// percent accepts a whole number from 1 to 100.
 func (s *settings) percent(key string, fallback int) int {
-	v, ok := s.lookup(key)
-	if !ok {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 || n > 100 {
-		s.problem(key, v, "isn't a whole number from 1 to 100")
-		return fallback
-	}
+	n := fallback
+	s.resolve(key, "isn't a whole number from 1 to 100", func(v, _ string) bool {
+		parsed, err := strconv.Atoi(v)
+		if err != nil || parsed < 1 || parsed > 100 {
+			return false
+		}
+		n = parsed
+		return true
+	})
 	return n
 }
 
 // dependencies reads a comma-separated list of "kind/name" or
-// "namespace/kind/name", dropping any entry it can't read.
+// "namespace/kind/name". An entry that can't be read is reported and
+// skipped while the others apply; only a value with no readable entry at
+// all falls through to the namespace's. An empty value declares none, so a
+// workload can drop its namespace's.
 func (s *settings) dependencies(key string) []v1alpha1.DependencyRef {
-	v, ok := s.lookup(key)
-	if !ok {
-		return nil
-	}
+	const invalid = `isn't "kind/name" or "namespace/kind/name", with kind deployment or statefulset`
 	var deps []v1alpha1.DependencyRef
-	for entry := range strings.SplitSeq(v, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
+	s.resolve(key, invalid, func(v, on string) bool {
+		deps = nil
+		var bad []string
+		for entry := range strings.SplitSeq(v, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			if dep, ok := parseDependency(entry); ok {
+				deps = append(deps, dep)
+			} else {
+				bad = append(bad, entry)
+			}
 		}
-		dep, ok := parseDependency(entry)
-		if !ok {
-			s.problem(key, entry, `isn't "kind/name" or "namespace/kind/name", with kind deployment or statefulset`)
-			continue
+		if len(deps) == 0 && len(bad) > 0 {
+			return false
 		}
-		deps = append(deps, dep)
-	}
+		for _, entry := range bad {
+			s.problems = append(s.problems, settingProblem{annotation: key, value: entry, on: on, reason: invalid,
+				outcome: "the entry is skipped"})
+		}
+		return true
+	})
 	return deps
 }
 
@@ -158,15 +209,19 @@ func parseDependency(entry string) (v1alpha1.DependencyRef, bool) {
 	return dep, dep.Name != "" && (len(parts) == 2 || dep.Namespace != "")
 }
 
-// optInSpec is the ManagedWorkload spec for an opted-in workload: its
-// annotations, then its namespace's, then the cluster defaults, then what a
-// ManagedWorkload written with no settings would get.
+// optInSpec is the ManagedWorkload spec for an opted-in workload: for each
+// setting its annotation, then its namespace's, then the cluster default,
+// then what a ManagedWorkload written with no settings would get.
+//
+// The annotations control dryRun, idlePolicy (idleAfter, the CPU threshold
+// and autoResume), which dependencies dependsOn lists, and wake. The rest
+// is the user's to set on the ManagedWorkload; see keepUserSettings.
 func optInSpec(target v1alpha1.WorkloadRef, workload, namespace map[string]string, d OptInDefaults) (
 	v1alpha1.ManagedWorkloadSpec, []settingProblem) {
 	s := &settings{workload: workload, namespace: namespace}
 	spec := v1alpha1.ManagedWorkloadSpec{
 		Target: target,
-		DryRun: s.boolean(v1alpha1.AnnotationDryRun, d.DryRun),
+		DryRun: s.dryRun(d.DryRun),
 		IdlePolicy: &v1alpha1.IdlePolicySpec{
 			IdleAfter:  &metav1.Duration{Duration: s.duration(v1alpha1.AnnotationIdleAfter, d.IdleAfter)},
 			Activity:   &v1alpha1.ActivitySpec{CPUThreshold: s.percent(v1alpha1.AnnotationCPUThreshold, d.CPUThreshold)},
@@ -180,7 +235,30 @@ func optInSpec(target v1alpha1.WorkloadRef, workload, namespace map[string]strin
 		},
 		// Every field the API server would default is set here, so the spec
 		// written matches the one stored and rewriting it changes nothing.
-		Prediction: v1alpha1.PredictionSpec{Confidence: 85},
+		Prediction: v1alpha1.PredictionSpec{Confidence: 75},
 	}
 	return spec, s.problems
+}
+
+// keepUserSettings carries over, from a label-created ManagedWorkload's
+// current spec, everything no annotation sets, so an edit made to it, such
+// as setting costTracking rates with kubectl patch, isn't undone. Those are
+// prediction, costTracking, the Prometheus activity queries, and
+// waitForReady on a dependency the annotation still lists. The target is
+// never changed once the ManagedWorkload exists.
+func keepUserSettings(spec *v1alpha1.ManagedWorkloadSpec, current *v1alpha1.ManagedWorkloadSpec) {
+	spec.Target = current.Target
+	spec.Prediction = current.Prediction
+	spec.CostTracking = current.CostTracking
+	if current.IdlePolicy != nil && current.IdlePolicy.Activity != nil {
+		spec.IdlePolicy.Activity.Prometheus = current.IdlePolicy.Activity.Prometheus
+	}
+	for i := range spec.DependsOn {
+		dep := &spec.DependsOn[i]
+		for _, have := range current.DependsOn {
+			if have.Namespace == dep.Namespace && have.Kind == dep.Kind && have.Name == dep.Name {
+				dep.WaitForReady = have.WaitForReady
+			}
+		}
+	}
 }

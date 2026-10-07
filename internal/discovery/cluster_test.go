@@ -18,6 +18,7 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -54,7 +55,7 @@ func deploymentWithRollout(name, namespace string, replicas int32, age time.Dura
 	d := makeDeployment(name, namespace, replicas, "100m", "128Mi", nil)
 	d.UID = types.UID(namespace + "-" + name)
 	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
-		Name: name + "-abc", Namespace: namespace,
+		Name: name + "-7d9f8c6b5", Namespace: namespace,
 		CreationTimestamp: metav1.NewTime(scanTime.Add(-age)),
 		OwnerReferences:   []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: name, UID: d.UID, Controller: ptr.To(true)}},
 	}}
@@ -86,8 +87,8 @@ func TestScanCluster_JudgesEachWorkload(t *testing.T) {
 
 	got := byName(scanWorkloads(t, objs...))
 
-	assert.Equal(t, StateIdle, got["idle-api"].State, "5m of 2×100m is 2.5%")
-	assert.Equal(t, 2, *got["idle-api"].CPUPercent)
+	assert.Equal(t, StateIdle, got["idle-api"].State, "5m of the one measured pod's 100m is 5%")
+	assert.Equal(t, 5, *got["idle-api"].CPUPercent)
 	assert.Equal(t, StateActive, got["busy-api"].State)
 	assert.Equal(t, StateUnknown, got["starting"].State, "no metrics yet isn't the same as idle")
 	assert.Equal(t, "no metrics yet", got["starting"].Unmeasured)
@@ -203,6 +204,24 @@ func TestNamespaces(t *testing.T) {
 	got, err = Namespaces(context.Background(), c, []string{"kube-system"}, SystemNamespaces)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"kube-system"}, got, "named namespaces are scanned as asked")
+
+	got, err = Namespaces(context.Background(), c, []string{"api", "preview-42", "api", ""}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api", "preview-42"}, got, "a namespace named twice is scanned once")
+}
+
+// A namespace named twice is scanned, and counted, once.
+func TestScanCluster_NamespaceNamedTwice(t *testing.T) {
+	objs := idleNow("api")
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+	namespaces, err := Namespaces(context.Background(), c, []string{testNamespace, testNamespace}, nil)
+	require.NoError(t, err)
+
+	report, err := NewScanner(c, c).ScanCluster(context.Background(), scanOptions(namespaces...))
+
+	require.NoError(t, err)
+	assert.Len(t, report.Workloads, 1)
+	assert.Equal(t, 1, report.Totals.Idle)
 }
 
 func TestNamespaces_Forbidden(t *testing.T) {
@@ -360,6 +379,15 @@ func TestMeasured(t *testing.T) {
 				Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseIdle, LastTransitionTime: &idleSince,
 					DryRun: d}}
 		}()},
+		{name: "never more than the time measured", wantHours: 48, mw: func() *v1alpha1.ManagedWorkload {
+			d := summary()
+			d.Resources = &v1alpha1.ResourceSnapshot{Replicas: 1}
+			idleBefore := metav1.NewTime(since.Add(-12 * time.Hour))
+			return &v1alpha1.ManagedWorkload{
+				Spec: v1alpha1.ManagedWorkloadSpec{DryRun: true},
+				Status: v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseIdle, LastTransitionTime: &idleBefore,
+					DryRun: d}}
+		}()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -409,7 +437,7 @@ func TestScanCluster_ManagedBeforeItsClockStarts(t *testing.T) {
 // are summed apart, each for the workloads it applies to.
 func TestScanCluster_SavingsBySource(t *testing.T) {
 	live := managedFor("live", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
-		Cost: &v1alpha1.CostStatus{EstimatedMonthlySavings: "$12.40"}})
+		Cost: &v1alpha1.CostStatus{SavedThisMonth: "$12.40"}})
 	dry := managedFor("dry", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
 		DryRun: &v1alpha1.DryRunStatus{Since: metav1.NewTime(scanTime.Add(-73 * time.Hour)), Pauses: 2,
 			Slept: metav1.Duration{Duration: 10 * time.Hour}}})
@@ -435,6 +463,38 @@ func TestScanCluster_SavingsBySource(t *testing.T) {
 	assert.InDelta(t, 12.40, report.Totals.SavedThisMonth, 0.001)
 	assert.Equal(t, 1, report.Totals.DryRun)
 	assert.InDelta(t, got["dry"].Measured.MonthlyFreed, report.Totals.Measured.MonthlyFreed, 0.001)
+}
+
+// A report's times are in UTC whatever the machine's zone, which the API
+// client reads times into, so reports from different machines compare.
+func TestScanCluster_TimesInUTC(t *testing.T) {
+	local := time.Local
+	time.Local = time.FixedZone("CET", 3600)
+	t.Cleanup(func() { time.Local = local })
+	dry := managedFor("dry", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
+		DryRun: &v1alpha1.DryRunStatus{Since: metav1.NewTime(scanTime.Add(-73 * time.Hour))}})
+	dry.Spec.DryRun = true
+	objs := deploymentWithRollout("dry", testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, dry, makePodMetrics("dry", testNamespace, "1m", "10Mi"))
+
+	got := byName(scanWorkloads(t, objs...))["dry"]
+
+	require.NotNil(t, got.LastDeployed)
+	assert.Equal(t, time.UTC, got.LastDeployed.Location())
+	require.NotNil(t, got.Measured)
+	assert.Equal(t, time.UTC, got.Measured.Since.Location())
+}
+
+// A time a report doesn't have, such as when dry-run measuring began in
+// totals, which sum many, is left out rather than given as year 1.
+func TestClusterReport_LeavesOutTimesItDoesntHave(t *testing.T) {
+	report := ClusterReport{Workloads: []Workload{}, History: &HistorySource{Prometheus: "monitoring/prometheus"}}
+
+	out, err := json.Marshal(report)
+
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "0001-01-01")
+	assert.NotContains(t, string(out), `"since"`)
 }
 
 func TestCPUReason(t *testing.T) {

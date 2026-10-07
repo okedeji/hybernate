@@ -1,0 +1,76 @@
+# promtool tests for config/prometheus/alerts.yaml, whose jobs are the
+# Services config/default creates. Run with make test-alerts.
+rule_files:
+  - kustomize.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: the operator is down while the doorman is up
+    interval: 1m
+    input_series:
+      - series: up{job="hybernate-controller-manager-metrics-service"}
+        values: 0x15
+      - series: up{job="hybernate-doorman"}
+        values: 1x15
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HybernateDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Hybernate operator is down
+              description: No healthy Hybernate operator target has been scraped for 5 minutes, so nothing is paused or woken.
+      - eval_time: 10m
+        alertname: HybernateDoormanDown
+        exp_alerts: []
+
+  - name: the doorman is down while the operator is up
+    interval: 1m
+    input_series:
+      - series: up{job="hybernate-controller-manager-metrics-service"}
+        values: 1x15
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HybernateDoormanDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Hybernate doorman is down
+              description: No healthy doorman target has been scraped for 5 minutes, so requests to paused workloads fail instead of waking them.
+      - eval_time: 10m
+        alertname: HybernateDown
+        exp_alerts: []
+
+  - name: browsers shown the waking page are not failed wakes
+    interval: 1m
+    input_series:
+      - series: hybernate_doorman_wakes_total{namespace="shop", workload="web", result="page"}
+        values: 0+1x40
+      - series: hybernate_doorman_wakes_total{namespace="shop", workload="web", result="success"}
+        values: 0+1x40
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HybernateDoormanWakesFailing
+        exp_alerts: []
+
+  - name: held connections that time out or fail are failed wakes
+    interval: 1m
+    input_series:
+      - series: hybernate_doorman_wakes_total{namespace="shop", workload="web", result="timeout"}
+        values: 0+1x40
+      - series: hybernate_doorman_wakes_total{namespace="shop", workload="web", result="error"}
+        values: 0+1x40
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HybernateDoormanWakesFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: shop
+              workload: web
+            exp_annotations:
+              summary: Doorman wakes failing for web
+              description: Requests to paused workload shop/web are timing out or failing while it wakes. Check its events and the doorman logs.

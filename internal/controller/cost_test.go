@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,216 +47,296 @@ func costWorkload(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
 	}
 }
 
-func costReconciler(now time.Time, m *stubMetrics) *Reconciler {
-	r := &Reconciler{
-		clock: func() time.Time { return now },
-	}
+// costClock is a reconciler on a clock the test moves.
+func costClock(start time.Time, m *stubMetrics) (*Reconciler, *time.Time) {
+	now := start
+	r := &Reconciler{clock: func() time.Time { return now }}
 	if m != nil {
 		r.metrics = m
 	}
+	return r, &now
+}
+
+func costReconciler(now time.Time, m *stubMetrics) *Reconciler {
+	r, _ := costClock(now, m)
 	return r
+}
+
+func accumulatedAt(t time.Time) *v1alpha1.CostStatus {
+	return &v1alpha1.CostStatus{LastAccumulatedAt: &metav1.Time{Time: t}}
+}
+
+func pausedWith(w *v1alpha1.ManagedWorkload, rs v1alpha1.ResourceSnapshot) {
+	w.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: rs.Replicas, Resources: &rs}
+}
+
+func dollars(t *testing.T, s string) float64 {
+	t.Helper()
+	v, err := strconv.ParseFloat(strings.TrimPrefix(s, "$"), 64)
+	require.NoError(t, err, "a dollar figure: %q", s)
+	return v
+}
+
+// flushFor accumulates a workload's cost at every status flush for d.
+func flushFor(r *Reconciler, now *time.Time, w *v1alpha1.ManagedWorkload, d time.Duration) {
+	for end := now.Add(d); now.Before(end); {
+		*now = now.Add(statusFlushInterval)
+		r.accumulateCost(context.Background(), w)
+	}
 }
 
 func TestAccumulateCost_SkipsWhenNoMetrics(t *testing.T) {
 	w := costWorkload(v1alpha1.PhaseRunning)
 
-	r := costReconciler(fixedTime, nil)
-	r.accumulateCost(context.Background(), w)
+	costReconciler(fixedTime, nil).accumulateCost(context.Background(), w)
 
 	assert.Nil(t, w.Status.Cost)
 }
 
-func TestAccumulateCost_InitializesCostStatus(t *testing.T) {
+func TestAccumulateCost_StartsTracking(t *testing.T) {
 	w := costWorkload(v1alpha1.PhaseRunning)
-	m := &stubMetrics{cpuMillis: 2000, memoryBytes: 2 * bytesPerGiB, pvcBytes: 10 * bytesPerGiB}
 
-	r := costReconciler(fixedTime, m)
-	r.accumulateCost(context.Background(), w)
+	costReconciler(fixedTime, &stubMetrics{cpuPerReplica: 1000}).accumulateCost(context.Background(), w)
 
 	require.NotNil(t, w.Status.Cost)
-	assert.NotNil(t, w.Status.Cost.LastAccumulatedAt)
+	assert.True(t, w.Status.Cost.LastAccumulatedAt.Time.Equal(fixedTime))
+	assert.Zero(t, w.Status.Cost.Tracked.Duration)
+	assert.Equal(t, "$0.00", w.Status.Cost.CostThisMonth)
 }
 
-// An injected sidecar's CPU isn't activity, but it is cost.
-func TestAccumulateCost_RunningIncludesSidecars(t *testing.T) {
-	lastMeta := metav1.NewTime(fixedTime.Add(-1 * time.Hour))
+// An awake workload costs what its replicas request, sidecars included,
+// whatever they happen to use.
+func TestAccumulateCost_AwakeIsPricedOnRequests(t *testing.T) {
 	w := costWorkload(v1alpha1.PhaseRunning)
-	w.Status.Cost = &v1alpha1.CostStatus{LastAccumulatedAt: &lastMeta}
-	m := &stubMetrics{cpuMillis: 1000, sidecarCPUMillis: 500}
+	w.Status.Cost = accumulatedAt(fixedTime.Add(-time.Hour))
+	m := &stubMetrics{cpuMillis: 5, cpuPerReplica: 500, memoryPerReplica: 2 * bytesPerGiB, replicas: 3, pvcBytes: 10 * bytesPerGiB}
 
-	r := costReconciler(fixedTime, m)
-	r.accumulateCost(context.Background(), w)
+	costReconciler(fixedTime, m).accumulateCost(context.Background(), w)
 
-	assert.InDelta(t, 1.5, w.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64(), 0.01)
+	c := w.Status.Cost
+	assert.InDelta(t, 1.5, c.AwakeCPUHours.AsApproximateFloat64(), 1e-9, "3 replicas of 500m for an hour")
+	assert.InDelta(t, 6, c.AwakeMemoryHours.AsApproximateFloat64(), 1e-9)
+	assert.InDelta(t, 10, c.StorageHours.AsApproximateFloat64(), 1e-9)
+	assert.Zero(t, c.PausedCPUHours.AsApproximateFloat64())
+	assert.Equal(t, time.Hour, c.Tracked.Duration)
+	require.NotNil(t, c.Running)
+	assert.Equal(t, v1alpha1.ResourceSnapshot{Replicas: 3, CPUMillis: 500, MemoryBytes: 2 * bytesPerGiB,
+		StorageBytes: 10 * bytesPerGiB}, *c.Running)
 }
 
-func TestAccumulateCost_RunningAccumulatesUsage(t *testing.T) {
-	lastAccumulated := fixedTime.Add(-1 * time.Hour)
-	lastMeta := metav1.NewTime(lastAccumulated)
-
-	w := costWorkload(v1alpha1.PhaseRunning)
-	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:  "$0.00",
-		LastAccumulatedAt:        &lastMeta,
-	}
-
-	m := &stubMetrics{
-		cpuMillis:   2000,
-		memoryBytes: 4 * bytesPerGiB,
-		pvcBytes:    10 * bytesPerGiB,
-	}
-
-	r := costReconciler(fixedTime, m)
-	r.accumulateCost(context.Background(), w)
-
-	cpuHours := w.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64()
-	memHours := w.Status.Cost.CurrentMonthMemoryHours.AsApproximateFloat64()
-	storageHours := w.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64()
-
-	assert.InDelta(t, 2.0, cpuHours, 0.01, "2000m = 2 cores × 1h = 2 cpu-hours")
-	assert.InDelta(t, 4.0, memHours, 0.01, "4 GiB × 1h = 4 mem-hours")
-	assert.InDelta(t, 10.0, storageHours, 0.01, "10 GiB × 1h = 10 storage-hours")
-}
-
-func TestAccumulateCost_PausedAccumulatesStorageAndSavings(t *testing.T) {
-	lastAccumulated := fixedTime.Add(-1 * time.Hour)
-	lastMeta := metav1.NewTime(lastAccumulated)
-
+func TestAccumulateCost_PausedSavesComputeButNotStorage(t *testing.T) {
 	w := costWorkload(v1alpha1.PhasePaused)
-	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:  "$0.00",
-		LastAccumulatedAt:        &lastMeta,
-	}
-	w.Status.Pause = &v1alpha1.PauseStatus{
-		PreviousReplicas: 3,
-		Resources: &v1alpha1.ResourceSnapshot{
-			Replicas:     3,
-			CPUMillis:    500,
-			MemoryBytes:  2 * bytesPerGiB,
-			StorageBytes: 20 * bytesPerGiB,
-		},
-	}
+	w.Status.Cost = accumulatedAt(fixedTime.Add(-time.Hour))
+	pausedWith(w, v1alpha1.ResourceSnapshot{Replicas: 3, CPUMillis: 500, MemoryBytes: 2 * bytesPerGiB,
+		StorageBytes: 20 * bytesPerGiB})
 
-	r := costReconciler(fixedTime, &stubMetrics{})
-	r.accumulateCost(context.Background(), w)
+	costReconciler(fixedTime, &stubMetrics{}).accumulateCost(context.Background(), w)
 
-	cpuHours := w.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64()
-	storageHours := w.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64()
-
-	assert.InDelta(t, 0.0, cpuHours, 0.001, "paused workload has no compute")
-	assert.InDelta(t, 20.0, storageHours, 0.01, "PVCs still cost while paused")
-
-	savings := parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
-	assert.Greater(t, savings, 0.0, "should show savings from paused compute")
+	c := w.Status.Cost
+	assert.Zero(t, c.AwakeCPUHours.AsApproximateFloat64(), "a paused workload runs nothing")
+	assert.InDelta(t, 1.5, c.PausedCPUHours.AsApproximateFloat64(), 1e-9)
+	assert.InDelta(t, 6, c.PausedMemoryHours.AsApproximateFloat64(), 1e-9)
+	assert.InDelta(t, 20, c.StorageHours.AsApproximateFloat64(), 1e-9, "its claims still cost while it's paused")
+	assert.Equal(t, cost.FormatDollars(1.5*0.031+6*0.004), c.SavedThisMonth)
+	require.NotNil(t, c.ResourceReduction)
+	assert.Equal(t, int64(1500), c.ResourceReduction.CPUMillis)
 }
 
-func TestAccumulateCost_MonthlyReset(t *testing.T) {
-	lastMonth := time.Date(2026, 2, 28, 23, 0, 0, 0, time.UTC)
-	lastMeta := metav1.NewTime(lastMonth)
+// Totals are kept to a billionth of an hour, so they add up to what the
+// workload ran however small it is: rounding each five-minute flush to the
+// cent, or to a milli-unit, used to drop them to nothing.
+func TestAccumulateCost_FullPrecisionOverADayOfFlushes(t *testing.T) {
+	const tolerance = 0.001
+	tests := []struct {
+		name      string
+		phase     v1alpha1.WorkloadPhase
+		cpuMillis int64
+		memBytes  int64
+	}{
+		{name: "1 vCPU and 2 GiB paused", phase: v1alpha1.PhasePaused, cpuMillis: 1000, memBytes: 2 * bytesPerGiB},
+		{name: "10m and 64Mi paused", phase: v1alpha1.PhasePaused, cpuMillis: 10, memBytes: 64 << 20},
+		{name: "10m and 64Mi running", phase: v1alpha1.PhaseRunning, cpuMillis: 10, memBytes: 64 << 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := costWorkload(tt.phase)
+			w.Status.Cost = accumulatedAt(fixedTime)
+			pausedWith(w, v1alpha1.ResourceSnapshot{Replicas: 1, CPUMillis: tt.cpuMillis, MemoryBytes: tt.memBytes})
+			r, now := costClock(fixedTime, &stubMetrics{cpuPerReplica: float64(tt.cpuMillis),
+				memoryPerReplica: float64(tt.memBytes), replicas: 1})
 
+			flushFor(r, now, w, 24*time.Hour)
+
+			c := w.Status.Cost
+			wantCPU := float64(tt.cpuMillis) / 1000 * 24
+			wantMem := float64(tt.memBytes) / bytesPerGiB * 24
+			cpu, mem := c.PausedCPUHours, c.PausedMemoryHours
+			if tt.phase != v1alpha1.PhasePaused {
+				cpu, mem = c.AwakeCPUHours, c.AwakeMemoryHours
+			}
+			assert.InEpsilon(t, wantCPU, cpu.AsApproximateFloat64(), tolerance)
+			assert.InEpsilon(t, wantMem, mem.AsApproximateFloat64(), tolerance)
+			assert.Equal(t, 24*time.Hour, c.Tracked.Duration)
+			if tt.phase == v1alpha1.PhasePaused {
+				want := cost.ComputeHourly(float64(tt.cpuMillis)/1000, float64(tt.memBytes)/bytesPerGiB, cost.DefaultRates) * 24
+				assert.Equal(t, cost.FormatDollars(want), c.SavedThisMonth)
+			}
+		})
+	}
+}
+
+// Cost and savings are on the same basis, requests, over the same time, so
+// they add up to what the workload would have cost without Hybernate.
+func TestAccumulateCost_CostAndSavingsAddUp(t *testing.T) {
 	w := costWorkload(v1alpha1.PhaseRunning)
-	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:     *resource.NewMilliQuantity(50000, resource.DecimalSI),
-		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(30000, resource.DecimalSI),
-		CurrentMonthStorageHours: *resource.NewMilliQuantity(10000, resource.DecimalSI),
-		EstimatedMonthlySavings:  "$42.00",
-		LastAccumulatedAt:        &lastMeta,
-	}
+	w.Status.Cost = accumulatedAt(fixedTime)
+	snapshot := v1alpha1.ResourceSnapshot{Replicas: 2, CPUMillis: 1000, MemoryBytes: 4 * bytesPerGiB}
+	r, now := costClock(fixedTime, &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: 4 * bytesPerGiB, replicas: 2})
 
-	r := costReconciler(fixedTime, &stubMetrics{cpuMillis: 1000})
-	r.accumulateCost(context.Background(), w)
+	flushFor(r, now, w, 8*time.Hour)
+	w.Status.Phase = v1alpha1.PhasePaused
+	pausedWith(w, snapshot)
+	flushFor(r, now, w, 16*time.Hour)
 
-	cpuHours := w.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64()
-	assert.Less(t, cpuHours, 1.0, "should have reset, not 50+ hours")
+	c := w.Status.Cost
+	hourly := cost.ComputeHourly(2, 8, cost.DefaultRates)
+	assert.Equal(t, cost.FormatDollars(8*hourly), c.CostThisMonth)
+	assert.Equal(t, cost.FormatDollars(16*hourly), c.SavedThisMonth)
+	assert.Equal(t, cost.FormatDollars(24*hourly), c.CostWithoutHybernateThisMonth)
+	assert.InDelta(t, dollars(t, c.CostThisMonth)+dollars(t, c.SavedThisMonth),
+		dollars(t, c.CostWithoutHybernateThisMonth), 0.01)
 }
 
-func TestAccumulateCost_EstimatedCostPendingDay1(t *testing.T) {
-	day1 := time.Date(2026, 3, 1, 2, 0, 0, 0, time.UTC)
-
+// A workload created late in the month is projected from the time it has
+// been tracked, at the rate it has run, not from the day of the month.
+func TestAccumulateCost_ProjectsFromTheTimeTracked(t *testing.T) {
+	march20 := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
 	w := costWorkload(v1alpha1.PhaseRunning)
-
-	r := costReconciler(day1, &stubMetrics{cpuMillis: 1000})
+	r, now := costClock(march20, &stubMetrics{cpuPerReplica: 1000, replicas: 1})
 	r.accumulateCost(context.Background(), w)
 
-	assert.Equal(t, "pending", w.Status.Cost.EstimatedMonthlyCost)
+	flushFor(r, now, w, 23*time.Hour)
+	assert.Equal(t, "pending", w.Status.Cost.ProjectedMonthlyCost, "less than a day tracked")
+
+	flushFor(r, now, w, time.Hour)
+	assert.Equal(t, cost.FormatDollars(0.031*24*31), w.Status.Cost.ProjectedMonthlyCost, "a vCPU for all of March")
+	assert.Equal(t, "$0.00", w.Status.Cost.ProjectedMonthlySavings)
 }
 
-func TestAccumulateCost_EstimatedCostWithoutManagement(t *testing.T) {
-	lastAccumulated := fixedTime.Add(-1 * time.Hour)
-	lastMeta := metav1.NewTime(lastAccumulated)
-
+// The interval that spans the start of a month counts toward the new
+// month from its first instant, in UTC.
+func TestAccumulateCost_MonthRolloverKeepsTheNewMonthsShare(t *testing.T) {
 	w := costWorkload(v1alpha1.PhasePaused)
-	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:  "$0.00",
-		LastAccumulatedAt:        &lastMeta,
-	}
-	w.Status.Pause = &v1alpha1.PauseStatus{
-		PreviousReplicas: 2,
-		Resources: &v1alpha1.ResourceSnapshot{
-			Replicas:     2,
-			CPUMillis:    1000,
-			MemoryBytes:  2 * bytesPerGiB,
-			StorageBytes: 10 * bytesPerGiB,
-		},
-	}
+	w.Status.Cost = accumulatedAt(time.Date(2026, 2, 28, 23, 50, 0, 0, time.UTC))
+	w.Status.Cost.PausedCPUHours = resource.MustParse("500")
+	w.Status.Cost.ListRates = recordedRates()
+	pausedWith(w, v1alpha1.ResourceSnapshot{Replicas: 1, CPUMillis: 1000})
 
-	r := costReconciler(fixedTime, &stubMetrics{})
+	costReconciler(time.Date(2026, 3, 1, 0, 5, 0, 0, time.UTC), &stubMetrics{}).accumulateCost(context.Background(), w)
+
+	c := w.Status.Cost
+	assert.InDelta(t, 5.0/60, c.PausedCPUHours.AsApproximateFloat64(), 1e-9, "last month's totals reset, the 5 minutes of March kept")
+	assert.Equal(t, 5*time.Minute, c.Tracked.Duration)
+	assert.NotNil(t, c.ListRates, "where it ran carries over")
+}
+
+// A gap longer than cost.MaxInterval, such as operator downtime, counts as
+// cost.MaxInterval, and so does the time tracked, keeping projections true.
+func TestAccumulateCost_DowntimeCountsAsTheLimit(t *testing.T) {
+	w := costWorkload(v1alpha1.PhasePaused)
+	w.Status.Cost = accumulatedAt(fixedTime.Add(-10 * time.Hour))
+	pausedWith(w, v1alpha1.ResourceSnapshot{Replicas: 1, CPUMillis: 1000})
+
+	costReconciler(fixedTime, &stubMetrics{}).accumulateCost(context.Background(), w)
+
+	assert.InDelta(t, cost.MaxInterval.Hours(), w.Status.Cost.PausedCPUHours.AsApproximateFloat64(), 1e-9)
+	assert.Equal(t, cost.MaxInterval, w.Status.Cost.Tracked.Duration)
+	assert.True(t, w.Status.Cost.LastAccumulatedAt.Time.Equal(fixedTime))
+}
+
+// Cost is brought up to date only when status is due a flush: between
+// flushes it would be dropped unwritten.
+func TestAccumulateCost_WaitsForTheFlush(t *testing.T) {
+	w := costWorkload(v1alpha1.PhaseRunning)
+	w.Status.Cost = accumulatedAt(fixedTime.Add(-time.Minute))
+
+	costReconciler(fixedTime, &stubMetrics{cpuPerReplica: 1000}).accumulateCost(context.Background(), w)
+
+	assert.True(t, w.Status.Cost.LastAccumulatedAt.Time.Equal(fixedTime.Add(-time.Minute)))
+	assert.Zero(t, w.Status.Cost.AwakeCPUHours.AsApproximateFloat64())
+}
+
+// A wake counts the pause as paused right up to the wake, and what follows
+// as awake: the paused gap isn't billed as running.
+func TestTransition_SettlesCostInThePhaseItWasSpentIn(t *testing.T) {
+	w := costWorkload(v1alpha1.PhasePaused)
+	w.Status.Cost = accumulatedAt(fixedTime.Add(-4 * time.Minute))
+	pausedWith(w, v1alpha1.ResourceSnapshot{Replicas: 2, CPUMillis: 1000, MemoryBytes: bytesPerGiB})
+	r := newTestReconciler(t, w, &stubPauser{})
+	now := fixedTime
+	r.clock = func() time.Time { return now }
+	r.metrics = &stubMetrics{cpuPerReplica: 1000, memoryPerReplica: bytesPerGiB, replicas: 2}
+	ctx := context.Background()
+
+	err := r.transition(ctx, w, v1alpha1.PhaseResuming, "ResumeRequested")
+	require.NoError(t, err)
+	w.Status.Pause = nil
+	now = now.Add(time.Minute)
+	err = r.transition(ctx, w, v1alpha1.PhaseRunning, "Resumed")
+	require.NoError(t, err)
+	now = now.Add(statusFlushInterval)
+	r.accumulateCost(ctx, w)
+
+	c := getWorkload(t, r, "api").Status.Cost
+	require.NotNil(t, c, "settled cost is written with the transition")
+	assert.InDelta(t, 2*4.0/60, c.PausedCPUHours.AsApproximateFloat64(), 1e-9, "paused until the wake")
+	assert.InDelta(t, 2*1.0/60, c.AwakeCPUHours.AsApproximateFloat64(), 1e-9, "the minute spent resuming")
+	assert.InDelta(t, 2*6.0/60, w.Status.Cost.AwakeCPUHours.AsApproximateFloat64(), 1e-9, "and running since")
+}
+
+type countingPricer struct {
+	stubPricer
+	calls int
+}
+
+func (p *countingPricer) ListRates(ctx context.Context, w *v1alpha1.ManagedWorkload) (cost.Rates, bool, error) {
+	p.calls++
+	return p.stubPricer.ListRates(ctx, w)
+}
+
+// What a replica requests and its nodes' rates are read from its pods,
+// which aren't cached, hourly and after a deploy rather than every flush.
+func TestAccumulateCost_ReadsPodsHourlyOrAfterADeploy(t *testing.T) {
+	w := costWorkload(v1alpha1.PhaseRunning)
+	w.Status.Activity = &v1alpha1.ActivityStatus{TemplateHash: "v1"}
+	r, now := costClock(fixedTime, &stubMetrics{cpuPerReplica: 1000})
+	pricer := &countingPricer{stubPricer: stubPricer{rates: nodeRates, listed: true}}
+	r.prices = pricer
+
 	r.accumulateCost(context.Background(), w)
+	flushFor(r, now, w, pricingInterval-statusFlushInterval)
+	assert.Equal(t, 1, pricer.calls, "read once in the first hour")
 
-	costWithout := parseDollarAmount(w.Status.Cost.EstimatedCostWithoutManagement)
-	assert.Greater(t, costWithout, 0.0, "should show what it would cost unmanaged")
+	flushFor(r, now, w, statusFlushInterval)
+	assert.Equal(t, 2, pricer.calls, "and again an hour on")
+
+	w.Status.Activity.TemplateHash = "v2"
+	flushFor(r, now, w, statusFlushInterval)
+	assert.Equal(t, 3, pricer.calls, "and after a deploy")
 }
 
 func TestAccumulateCost_CustomRates(t *testing.T) {
-	lastAccumulated := fixedTime.Add(-1 * time.Hour)
-	lastMeta := metav1.NewTime(lastAccumulated)
-
-	w := costWorkload(v1alpha1.PhaseRunning)
+	spent := func(rates *v1alpha1.CostRates) float64 {
+		w := costWorkload(v1alpha1.PhaseRunning)
+		w.Spec.CostTracking.Rates = rates
+		w.Status.Cost = accumulatedAt(fixedTime.Add(-time.Hour))
+		costReconciler(fixedTime, &stubMetrics{cpuPerReplica: 10000}).accumulateCost(context.Background(), w)
+		return dollars(t, w.Status.Cost.CostThisMonth)
+	}
 	cpuRate := resource.MustParse("0.1")
-	w.Spec.CostTracking.Rates = &v1alpha1.CostRates{
-		CPUPerHour: &cpuRate,
-	}
-	w.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:  "$0.00",
-		LastAccumulatedAt:        &lastMeta,
-	}
 
-	m := &stubMetrics{cpuMillis: 1000}
-	r := costReconciler(fixedTime, m)
-	r.accumulateCost(context.Background(), w)
-
-	costWithout := parseDollarAmount(w.Status.Cost.EstimatedCostWithoutManagement)
-	assert.Greater(t, costWithout, 0.0)
-
-	// With default rate ($0.031/cpu-hour) 1 core × 1h = $0.031
-	// With custom rate ($0.1/cpu-hour) 1 core × 1h = $0.10
-	// So custom rate should produce a higher cost.
-	wDefault := costWorkload(v1alpha1.PhaseRunning)
-	wDefault.Status.Cost = &v1alpha1.CostStatus{
-		CurrentMonthCPUHours:     *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthMemoryHours:  *resource.NewMilliQuantity(0, resource.DecimalSI),
-		CurrentMonthStorageHours: *resource.NewMilliQuantity(0, resource.DecimalSI),
-		EstimatedMonthlySavings:  "$0.00",
-		LastAccumulatedAt:        &lastMeta,
-	}
-
-	r2 := costReconciler(fixedTime, m)
-	r2.accumulateCost(context.Background(), wDefault)
-
-	defaultCost := parseDollarAmount(wDefault.Status.Cost.EstimatedCostWithoutManagement)
-	assert.Greater(t, costWithout, defaultCost, "custom rate ($0.10) should cost more than default ($0.031)")
+	assert.InDelta(t, 10*0.031, spent(nil), 0.005, "the default rate")
+	assert.InDelta(t, 10*0.1, spent(&v1alpha1.CostRates{CPUPerHour: &cpuRate}), 0.005, "its own rate")
 }
 
 type zeroReplicaMetrics struct{ stubMetrics }
@@ -269,7 +351,6 @@ func TestCaptureResourceSnapshot_PricesMemoryOnRequest(t *testing.T) {
 	r.metrics = &stubMetrics{
 		cpuPerReplica:    500,
 		memoryPerReplica: 512 << 20,
-		memoryBytes:      96 << 20, // live usage across all pods, deliberately far from the request
 		replicas:         3,
 	}
 
@@ -284,7 +365,7 @@ func TestCaptureResourceSnapshot_PricesMemoryOnRequest(t *testing.T) {
 func TestCaptureResourceSnapshot_ZeroReplicas(t *testing.T) {
 	workload := costWorkload(v1alpha1.PhaseRunning)
 	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, 0)
-	r.metrics = &zeroReplicaMetrics{stubMetrics{cpuPerReplica: 500, memoryPerReplica: 512 << 20, memoryBytes: 64 << 20}}
+	r.metrics = &zeroReplicaMetrics{stubMetrics{cpuPerReplica: 500, memoryPerReplica: 512 << 20}}
 
 	snap := r.captureResourceSnapshot(context.Background(), workload)
 
@@ -351,7 +432,7 @@ func TestAccumulateCost_RecordsListRates(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			w := costWorkload(tt.phase)
 			w.Status.Cost = &v1alpha1.CostStatus{ListRates: tt.before}
-			r := costReconciler(fixedTime, &stubMetrics{cpuMillis: 1000})
+			r := costReconciler(fixedTime, &stubMetrics{cpuPerReplica: 1000})
 			r.prices = tt.pricer
 
 			r.accumulateCost(context.Background(), w)
@@ -371,30 +452,17 @@ func TestAccumulateCost_RecordsListRates(t *testing.T) {
 
 // A paused workload's savings are priced at the nodes it ran on.
 func TestAccumulateCost_PausedSavingsAtListRates(t *testing.T) {
-	saved := func(rates *v1alpha1.CostRates) float64 {
-		last := metav1.NewTime(fixedTime.Add(-time.Hour))
+	saved := func(rates *v1alpha1.CostRates) string {
 		w := costWorkload(v1alpha1.PhasePaused)
-		w.Status.Cost = &v1alpha1.CostStatus{LastAccumulatedAt: &last, ListRates: rates}
-		w.Status.Pause = &v1alpha1.PauseStatus{Resources: &v1alpha1.ResourceSnapshot{
-			Replicas: 1, CPUMillis: 2000, MemoryBytes: 8 * bytesPerGiB}}
+		w.Status.Cost = accumulatedAt(fixedTime.Add(-time.Hour))
+		w.Status.Cost.ListRates = rates
+		pausedWith(w, v1alpha1.ResourceSnapshot{Replicas: 1, CPUMillis: 2000, MemoryBytes: 8 * bytesPerGiB})
 		costReconciler(fixedTime, &stubMetrics{}).accumulateCost(context.Background(), w)
-		return parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings)
+		return w.Status.Cost.SavedThisMonth
 	}
 
-	assert.InDelta(t, 2*0.031+8*0.004, saved(nil), 0.005, "default rates without list rates")
-	assert.InDelta(t, 2*0.05+8*0.006, saved(recordedRates()), 0.005, "the nodes' list rates")
-}
-
-func TestAccumulateCost_MonthlyResetKeepsListRates(t *testing.T) {
-	lastMonth := metav1.NewTime(time.Date(2026, 2, 28, 23, 0, 0, 0, time.UTC))
-	w := costWorkload(v1alpha1.PhasePaused)
-	w.Status.Cost = &v1alpha1.CostStatus{LastAccumulatedAt: &lastMonth, EstimatedMonthlySavings: "$42.00",
-		ListRates: recordedRates()}
-
-	costReconciler(fixedTime, &stubMetrics{}).accumulateCost(context.Background(), w)
-
-	assert.NotNil(t, w.Status.Cost.ListRates)
-	assert.Less(t, parseDollarAmount(w.Status.Cost.EstimatedMonthlySavings), 42.0, "the month's totals reset")
+	assert.Equal(t, cost.FormatDollars(2*0.031+8*0.004), saved(nil), "default rates without list rates")
+	assert.Equal(t, cost.FormatDollars(2*0.05+8*0.006), saved(recordedRates()), "the nodes' list rates")
 }
 
 // Rates a workload sets win over its nodes' list rates, part by part.

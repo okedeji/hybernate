@@ -48,7 +48,9 @@ This covers dev and preview namespaces, and third-party charts that don't let yo
 | `hybernate.io/wake-max-wait` | duration | `2m` | How long a request is held while the workload wakes |
 | `hybernate.io/wake-page` | `"true"`, `"false"` | `"true"` | Show browsers a waking-up page |
 
-Leaving an annotation out means its default. A value that can't be read, such as `idle-after: "soon"`, is reported in a warning event on the workload, and that setting falls back to its default; the others still apply.
+Leaving an annotation out means its default. A value that can't be read, such as `idle-after: "soon"` or `dry-run: "True"`, is reported in an `InvalidSetting` warning event on the workload and skipped, as if it weren't there: the setting comes from the next place in [Which setting wins](#which-setting-wins), and the others still apply. Booleans are exactly `"true"` or `"false"`; durations must be above zero. In `depends-on`, an entry that can't be read is skipped and the rest apply.
+
+`dry-run` is the exception: a value that can't be read turns dry-run on, whatever comes after it, since a typo in the setting meant to stop pauses must never start them.
 
 ```yaml
 hybernate.io/depends-on: "statefulset/postgres, messaging/statefulset/nats"
@@ -74,9 +76,9 @@ kubectl hybernate enable checkout-api -n preview-42
 kubectl hybernate enable --all -n preview-42     # every workload in the namespace
 ```
 
-`enable` removes the dry-run annotation, or, when the dry-run comes from the namespace, sets the workload's own to `"false"`. Removing the annotation and setting `"false"` mean the same.
+`enable` sets the workload's own `hybernate.io/dry-run` annotation to `"false"`, which wins over its namespace's annotation and the cluster default, wherever the dry-run came from. `enable --all` sets the namespace's annotation to `"false"` instead, and drops the workloads' own.
 
-If Argo CD or Flux applies the workload, `enable` doesn't change the cluster, since the tool would put the annotation back. It names the tool and prints the change to make in Git instead.
+If Argo CD or Flux applies the workload or namespace, `enable` doesn't change the cluster, since the tool would put the annotation back. It names the tool, prints the change to make in Git, and exits non-zero; `--force` changes the cluster anyway.
 
 ## Protected namespaces
 
@@ -118,8 +120,8 @@ Argo CD and Flux do notice the replica count of a paused workload changing, and 
 
 ## What Hybernate does with the label
 
-- **Labelled:** creates a ManagedWorkload named after the workload, owned by it, marked with `hybernate.io/from-label: "true"`, and announces it with a `Managed` event on the workload.
-- **Annotations changed:** updates the ManagedWorkload within seconds. Edits made directly to that ManagedWorkload are overwritten: the annotations are the source of truth.
+- **Labelled:** creates a ManagedWorkload named after the workload, owned by it, marked with `hybernate.io/from-label: "true"`, and announces it with a `Managed` event on the workload. If that name is taken, for example by a StatefulSet's of the same name as a Deployment, it's named after the workload and its kind instead, such as `api-statefulset`.
+- **Annotations changed:** updates the ManagedWorkload within seconds. The annotations are the source of truth for what they set: `dryRun`, `idlePolicy` (`idleAfter`, `activity.cpuThreshold`, `autoResume`), which workloads `dependsOn` lists, and `wake`. Direct edits to those are overwritten. Everything else is yours to set on the ManagedWorkload and is kept: `prediction`, `costTracking`, `idlePolicy.activity.prometheus`, and `waitForReady` on a dependency the annotation lists. The target never changes.
 - **Label removed, or `hybernate.io/ignore` added:** deletes the ManagedWorkload. If the workload is paused, it's first scaled back to the replicas it had.
 - **Workload deleted:** its ManagedWorkload goes with it.
 - **A ManagedWorkload you wrote for the workload exists:** yours wins, and the label does nothing.

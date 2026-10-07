@@ -16,15 +16,17 @@ CPU from the workload's own pods counts as activity whatever the HPA does, so a 
 
 ## KEDA
 
-KEDA scales its workloads itself, and would scale a paused one straight back up to its `minReplicaCount`, or as soon as a trigger fired. So for a workload a ScaledObject scales, Hybernate pauses through KEDA: it sets `autoscaling.keda.sh/paused-replicas: "0"` on the ScaledObject, which has KEDA hold the workload at zero and stop scaling it, and records the ScaledObject in `status.pause.scaledObject`.
+KEDA scales its workloads itself, and would scale a paused one straight back up to its `minReplicaCount`, or as soon as a trigger fired. So for a workload a ScaledObject scales, Hybernate pauses through KEDA: it sets `autoscaling.keda.sh/paused-replicas: "0"` on the ScaledObject, which has KEDA hold the workload at zero and stop scaling it, and records the ScaledObject in `status.pause.scaledObject`. If the ScaledObject already had a `paused-replicas` value of your own, it's recorded too, in `status.pause.scaledObjectPausedReplicas`.
 
-On a wake, Hybernate scales the workload back up first, then removes the annotation, so KEDA carries on from there. A ScaledObject with `minReplicaCount: 0` would otherwise leave a woken workload at zero until a trigger fired, and a request the doorman held would wait for nothing.
+On a wake, Hybernate has KEDA hold the workload at the replicas it's restored to until they're all Ready, then puts back your own `paused-replicas` value, or removes the annotation if there was none, so KEDA carries on from there. Released any earlier, a ScaledObject with `minReplicaCount: 0` and no active trigger could take a starting workload straight back to zero, and a request the doorman held would wait for nothing.
+
+When Hybernate lets go of a paused workload, because its ManagedWorkload is deleted, it's labelled `hybernate.io/ignore`, or its namespace is protected, the ScaledObject is released the same way. If the ScaledObject, or KEDA itself, is removed while the workload is paused, there's nothing to release, and the workload is woken as usual.
 
 The annotation isn't in your manifests, so Argo CD and Flux leave it alone.
 
 ### KEDA or Hybernate?
 
-KEDA already scales a workload to zero when its triggers say there's no work, such as an empty queue. Hybernate adds what KEDA doesn't do: waking on the first HTTP request, holding dependencies awake, the forecast, and pausing by activity it can see without a trigger. A workload KEDA already takes to zero gains little; a KEDA workload with a `minReplicaCount` above zero, such as one that should stay warm during working hours, is where pausing it saves.
+KEDA already scales a workload to zero when its triggers say there's no work, such as an empty queue. Hybernate leaves a workload KEDA has taken to zero to KEDA: it doesn't pause it, which would stop KEDA's triggers from starting it, and doesn't route its Services to the doorman; see [Workloads Already at Zero](pause.md#workloads-already-at-zero). Hybernate adds what KEDA doesn't do: waking on the first HTTP request, holding dependencies awake, the forecast, and pausing by activity it can see without a trigger. A workload KEDA already takes to zero gains little; a KEDA workload with a `minReplicaCount` above zero, such as one that should stay warm during working hours, is where pausing it saves.
 
 ## Permissions
 

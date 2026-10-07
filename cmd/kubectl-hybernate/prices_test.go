@@ -62,7 +62,11 @@ func TestPricesSentence_NodePrices(t *testing.T) {
 				"$0.050 per vCPU-hour."},
 		{name: "none listed", prices: assumed, nodes: discovery.Prices{NodeTypes: []discovery.NodeTypePrice{unlabelled}},
 			want: "Assumed list prices: $0.031 per vCPU-hour and $0.004 per GiB-hour of memory, from AWS on-demand in " +
-				"us-east-1. None of the nodes' instance types has a list price."},
+				"us-east-1. None of the nodes has a list price: 1 node without an instance type."},
+		{name: "nodes without a region", prices: assumed, nodes: discovery.Prices{NodeTypes: []discovery.NodeTypePrice{
+			{InstanceType: "m6i.large", Nodes: 2}}},
+			want: "Assumed list prices: $0.031 per vCPU-hour and $0.004 per GiB-hour of memory, from AWS on-demand in " +
+				"us-east-1. None of the nodes has a list price: 2 nodes without a region label (m6i.large)."},
 		{name: "nodes not read", prices: assumed,
 			nodes: discovery.Prices{NodesUnread: "your access doesn't allow listing nodes"},
 			want: "Assumed list prices: $0.031 per vCPU-hour and $0.004 per GiB-hour of memory, from AWS on-demand in " +

@@ -16,113 +16,123 @@ limitations under the License.
 
 package forecast
 
-import "math"
+import (
+	"math"
+	"math/bits"
+)
 
 const (
 	zScoreThreshold       = 3.0
 	regimeChangeThreshold = 3
 	anomalyWindow         = 24
+	anomalyWindowMask     = 1<<anomalyWindow - 1
+
+	// anomalyMemory is how many hours the error statistics effectively
+	// remember: a week, so that a weekday/weekend pattern's errors are all
+	// part of what is normal.
+	anomalyMemory = WeeklySeason
 )
 
-// AnomalyDetector identifies regime changes by tracking z-score anomalies
-// in a rolling window. When anomalies cluster (3+ in 24 hours), the model's
-// learned patterns are no longer valid.
+// AnomalyDetector flags forecast errors that are far outside the errors
+// seen recently, and declares a regime change when they cluster: 3 or more
+// in the last 24 observations.
+//
+// The error is signed (actual - forecast) and the z-score two-sided,
+// |error - mean| / stddev, so a sudden surge and a sudden disappearance of
+// demand both count. The mean and variance are exponentially weighted, so
+// the detector follows the model as it improves, and each error is clipped
+// to 3 standard deviations before it updates them, so one spike doesn't
+// widen what counts as normal for a week.
+//
+// An error beyond 3 standard deviations in the same direction as the last
+// one in the same hour of the week is not an outlier but a weekly pattern
+// the model hasn't learned yet, such as a Tuesday night batch job. It isn't
+// flagged, and the model learns it in full.
+//
+// For the first day after it starts or resets nothing is flagged or
+// clipped, so the errors of a new regime are learned in full.
 type AnomalyDetector struct {
-	errors []float64
-	pos    int
-	full   bool
 	mean   float64
-	m2     float64
+	vari   float64
 	count  int
-	recent []bool
-	rPos   int
-	rFull  bool
+	recent uint32
+
+	// above and below are the hours of the week whose last error was beyond
+	// 3 standard deviations above or below the mean.
+	above, below weekSlots
 }
 
-func NewAnomalyDetector() *AnomalyDetector {
-	return &AnomalyDetector{
-		errors: make([]float64, anomalyWindow),
-		recent: make([]bool, anomalyWindow),
-	}
-}
-
-// Record checks whether the error between forecast and actual is anomalous.
-// Uses Welford's online algorithm for running mean and variance.
-func (a *AnomalyDetector) Record(forecast, actual float64) bool {
+// Record scores the forecast error of one observation in the hour of the
+// week slot. It reports whether the error is anomalous, and returns the
+// error the model should learn from: an anomaly clipped to 3 standard
+// deviations, so one outlier doesn't distort the model for weeks, and any
+// other error as it is. floor is the smallest standard deviation errors are
+// judged against, so a workload whose forecast has been exact (zero demand,
+// forecast zero) isn't alarmed by a single millicore.
+func (a *AnomalyDetector) Record(forecast, actual, floor float64, slot int) (anomaly bool, learn float64) {
 	err := actual - forecast
+	stddev := math.Max(math.Sqrt(a.vari), floor)
 
-	a.count++
-	delta := err - a.mean
-	a.mean += delta / float64(a.count)
-	delta2 := err - a.mean
-	a.m2 += delta * delta2
-
-	anomaly := false
-	if a.count > anomalyWindow {
-		stddev := math.Sqrt(a.m2 / float64(a.count-1))
-		if stddev > 0 {
-			z := math.Abs(err-a.mean) / stddev
-			anomaly = z > zScoreThreshold
-		}
+	clipped := err
+	var high, low bool
+	if a.count >= anomalyWindow {
+		limit := zScoreThreshold * stddev
+		clipped = math.Max(a.mean-limit, math.Min(a.mean+limit, err))
+		high, low = stddev > 0 && err > a.mean+limit, stddev > 0 && err < a.mean-limit
 	}
+	recurring := high && a.above.has(slot) || low && a.below.has(slot)
+	anomaly = (high || low) && !recurring
+	a.above.set(slot, high)
+	a.below.set(slot, low)
 
-	a.recent[a.rPos] = anomaly
-	a.rPos = (a.rPos + 1) % anomalyWindow
-	if a.rPos == 0 {
-		a.rFull = true
+	a.count = min(a.count+1, anomalyMemory)
+	weight := 1 / float64(a.count)
+	delta := clipped - a.mean
+	a.mean = clampMagnitude(a.mean + weight*delta)
+	a.vari = math.Min(maxMagnitude*maxMagnitude, (1-weight)*(a.vari+weight*delta*delta))
+
+	a.recent = (a.recent << 1) & anomalyWindowMask
+	if anomaly {
+		a.recent |= 1
+		return true, clipped
 	}
-
-	return anomaly
+	return false, err
 }
 
-// RegimeChange returns true when anomalies cluster, indicating the model's
+// Pending reports whether any anomaly is in the window.
+func (a *AnomalyDetector) Pending() bool {
+	return a.recent != 0
+}
+
+// RegimeChange reports whether anomalies have clustered, meaning the
 // learned patterns no longer match reality.
 func (a *AnomalyDetector) RegimeChange() bool {
-	if !a.rFull {
-		return false
-	}
-
-	count := 0
-	for _, v := range a.recent {
-		if v {
-			count++
-		}
-	}
-	return count >= regimeChangeThreshold
+	return bits.OnesCount32(a.recent) >= regimeChangeThreshold
 }
 
-func (a *AnomalyDetector) export() AnomalyState {
-	errs := make([]float64, len(a.errors))
-	copy(errs, a.errors)
-	recent := make([]bool, len(a.recent))
-	copy(recent, a.recent)
-	return AnomalyState{
-		Errors: errs,
-		Pos:    a.pos,
-		Full:   a.full,
-		Mean:   a.mean,
-		M2:     a.m2,
-		Count:  a.count,
-		Recent: recent,
-		RPos:   a.rPos,
-		RFull:  a.rFull,
+// Reset forgets the error statistics and the recent anomalies, so the
+// errors of a new regime become the new normal rather than one long string
+// of anomalies.
+func (a *AnomalyDetector) Reset() {
+	*a = AnomalyDetector{}
+}
+
+// weekSlots is a set of hours of the week.
+type weekSlots [3]uint64
+
+func (w *weekSlots) has(slot int) bool {
+	return w[slot/64]&(1<<(slot%64)) != 0
+}
+
+func (w *weekSlots) set(slot int, on bool) {
+	if on {
+		w[slot/64] |= 1 << (slot % 64)
+	} else {
+		w[slot/64] &^= 1 << (slot % 64)
 	}
 }
 
-func importAnomalyDetector(st AnomalyState) *AnomalyDetector {
-	errs := make([]float64, len(st.Errors))
-	copy(errs, st.Errors)
-	recent := make([]bool, len(st.Recent))
-	copy(recent, st.Recent)
-	return &AnomalyDetector{
-		errors: errs,
-		pos:    st.Pos,
-		full:   st.Full,
-		mean:   st.Mean,
-		m2:     st.M2,
-		count:  st.Count,
-		recent: recent,
-		rPos:   st.RPos,
-		rFull:  st.RFull,
-	}
+// valid reports whether every slot is an hour of the week.
+func (w weekSlots) valid() bool {
+	return w[2]>>(WeeklySeason-128) == 0
 }

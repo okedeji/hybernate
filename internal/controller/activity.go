@@ -54,6 +54,8 @@ const (
 
 	defaultIdleAfter    = 1 * time.Hour
 	defaultCPUThreshold = 10
+
+	conditionIdleVetoed = "IdleVetoed"
 )
 
 // activityMemo keeps each workload's latest clock between status writes.
@@ -147,7 +149,7 @@ func (r *Reconciler) resetActivity(workload *v1alpha1.ManagedWorkload, source v1
 // observeActivity reads every activity source and advances the clock in
 // workload.Status.Activity. Any single source is enough to keep the workload
 // awake, so sources are combined by taking the latest time.
-func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) activityObservation {
+func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object, usage float64) activityObservation {
 	now := r.now()
 	if workload.Status.Activity == nil {
 		r.resetActivity(workload, v1alpha1.ActivitySourceCreated)
@@ -189,7 +191,7 @@ func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.Man
 		}
 	}
 
-	active, err := r.cpuActive(ctx, workload)
+	active, err := r.cpuActive(ctx, workload, usage)
 	if err != nil {
 		obs.cpuErr = err
 	} else if active {
@@ -243,30 +245,65 @@ func (r *Reconciler) activityAnnotations(ctx context.Context, obj client.Object,
 }
 
 // wakeSource is what to record as the activity that woke a paused workload:
-// a request the doorman stamped after the pause, or any other wake. It must
-// be read before the resume completes, which clears the pause.
+// a request the doorman stamped since the pause began, or any other wake. It
+// must be read before the resume completes, which clears the pause.
 func wakeSource(workload *v1alpha1.ManagedWorkload) v1alpha1.ActivitySource {
-	if workload.Status.Pause == nil || workload.Status.Pause.PausedAt == nil {
+	pause := workload.Status.Pause
+	if pause == nil {
 		return v1alpha1.ActivitySourceWoke
 	}
 	raw, ok := workload.Annotations[v1alpha1.AnnotationLastRequest]
 	if !ok {
 		return v1alpha1.ActivitySourceWoke
 	}
+	if pause.WakeAnnotations != nil && raw != pause.WakeAnnotations.Workload[v1alpha1.AnnotationLastRequest] {
+		return v1alpha1.ActivitySourceRequest
+	}
 	requested, err := time.Parse(time.RFC3339, raw)
-	if err != nil || !requested.After(workload.Status.Pause.PausedAt.Time) {
+	if err != nil || pause.PausedAt == nil || requested.Before(pause.PausedAt.Time) {
 		return v1alpha1.ActivitySourceWoke
 	}
 	return v1alpha1.ActivitySourceRequest
 }
 
+// activityAnnotations are the annotations that wake a paused workload.
+var activityAnnotations = []string{
+	v1alpha1.AnnotationLastActivity,
+	v1alpha1.AnnotationLastRequest,
+	v1alpha1.AnnotationActiveUntil,
+}
+
+// activityAnnotationValues is what obj's activity annotations are set to.
+func activityAnnotationValues(obj client.Object) map[string]string {
+	if obj == nil {
+		return nil
+	}
+	var values map[string]string
+	for _, key := range activityAnnotations {
+		if v, ok := obj.GetAnnotations()[key]; ok {
+			if values == nil {
+				values = map[string]string{}
+			}
+			values[key] = v
+		}
+	}
+	return values
+}
+
+// activityAnnotationChanged reports whether any of obj's activity
+// annotations was set to a value other than the one recorded.
+func activityAnnotationChanged(obj client.Object, recorded map[string]string) bool {
+	for _, key := range activityAnnotations {
+		if v := obj.GetAnnotations()[key]; v != "" && v != recorded[key] {
+			return true
+		}
+	}
+	return false
+}
+
 // cpuActive reports whether CPU usage is above the activity threshold, as a
 // percentage of the CPU requested across all replicas.
-func (r *Reconciler) cpuActive(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error) {
-	usage, err := r.observedCPU(ctx, workload)
-	if err != nil {
-		return false, err
-	}
+func (r *Reconciler) cpuActive(ctx context.Context, workload *v1alpha1.ManagedWorkload, usage float64) (bool, error) {
 	if usage == 0 {
 		return false, nil
 	}
@@ -293,7 +330,7 @@ func (r *Reconciler) prometheusActive(ctx context.Context, workload *v1alpha1.Ma
 		return false, nil
 	}
 	for _, q := range p.Activity.Prometheus {
-		res, err := signal.NewPrometheus(r.prometheusURL, q.PromQL).Check(ctx, workload.Namespace, workload.Name)
+		res, err := signal.NewPrometheus(r.prometheusURL, q.PromQL).Check(ctx)
 		if err != nil {
 			return false, fmt.Errorf("evaluating %q: %w", q.PromQL, err)
 		}
@@ -327,11 +364,19 @@ func podTemplateHash(target client.Object) string {
 }
 
 // reconcileIdleClock pauses a workload once it has been inactive for
-// IdleAfter. Phase Idle means the clock has run out: in dry-run the workload
-// stays Idle and reports the pause it would make; otherwise it pauses.
-func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object, engine forecaster) (*ctrl.Result, error) {
+// IdleAfter. Phase Idle means the clock has run out, or a pause was
+// requested: in dry-run the workload stays Idle and reports the pause it
+// would make; otherwise it pauses.
+func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object,
+	engine forecaster, usage float64) (*ctrl.Result, error) {
 	now := r.now()
-	obs := r.observeActivity(ctx, workload, target)
+	vetoed := false
+	defer func() {
+		if !vetoed {
+			r.clearIdleVeto(workload)
+		}
+	}()
+	obs := r.observeActivity(ctx, workload, target, usage)
 	pauseAt := workload.Status.Activity.PauseAt.Time
 
 	if obs.cpuErr != nil {
@@ -340,26 +385,32 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 	r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionTrue, "MetricsReported", "")
 
 	if obs.prometheusErr != nil {
-		return r.reportPrometheusUnavailable(ctx, workload, obs.prometheusErr)
+		return r.reportPrometheusUnavailable(ctx, workload, obs.prometheusErr), nil
 	}
 	if hasPrometheusActivity(workload) {
 		r.setCondition(workload, conditionPrometheusAvailable, metav1.ConditionTrue, "QueriesEvaluated", "")
 	}
 
-	if obs.activeUntil.After(now) || now.Before(pauseAt) {
+	if obs.activeUntil.After(now) || activeSinceClockRanOut(workload, now, pauseAt) {
 		if workload.Status.Phase == v1alpha1.PhaseIdle {
-			r.reportActivityResumed(workload)
-			if _, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ActivityResumed"); err != nil {
+			source := workload.Status.Activity.LastActivitySource
+			slept, freed, measured := r.endWouldBePause(workload)
+			if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ActivityResumed"); err != nil {
 				return nil, err
 			}
+			r.reportActivityResumed(workload, source, slept, freed, measured)
 		}
 		return &ctrl.Result{RequeueAfter: nextCheck(now, pauseAt, obs.activeUntil)}, nil
 	}
 
-	if vetoed, predicted := r.forecastVeto(ctx, workload, engine); vetoed {
-		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleVetoed, actionEvaluateIdle,
-			"idle, but the forecast expects demand within the hour (%.0f%% of requests); not pausing yet", predicted)
-		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+	// The forecast only holds back a pause not yet decided. Idle has decided
+	// it, and in dry-run measures it as under way, as a real one would be.
+	if workload.Status.Phase == v1alpha1.PhaseRunning {
+		var predicted float64
+		var hour time.Time
+		if vetoed, predicted, hour = r.forecastVeto(ctx, workload, engine); vetoed {
+			return r.reportIdleVetoed(ctx, workload, predicted, hour)
+		}
 	}
 
 	if held, err := r.dependencyHold(ctx, workload); held != nil || err != nil {
@@ -369,29 +420,44 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 	idleFor := now.Sub(workload.Status.Activity.LastActivityTime.Time).Round(time.Minute)
 
 	if workload.Status.Phase != v1alpha1.PhaseIdle {
+		if workload.Spec.DryRun {
+			r.beginWouldBePause(ctx, workload)
+		}
+		if err := r.transition(ctx, workload, v1alpha1.PhaseIdle, "IdleDetected"); err != nil {
+			return nil, err
+		}
 		opmetrics.IdleDetections.WithLabelValues(workload.Namespace, workload.Name).Inc()
 		if workload.Spec.DryRun {
 			opmetrics.DryrunActions.WithLabelValues("idle_pause").Inc()
 		}
 		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleDetected, actionEvaluateIdle,
 			"no activity for %s, last seen from %s; pause", idleFor, workload.Status.Activity.LastActivitySource)
-		if workload.Spec.DryRun {
-			r.beginWouldBePause(ctx, workload)
-		}
-		if _, err := r.transition(ctx, workload, v1alpha1.PhaseIdle, "IdleDetected"); err != nil {
-			return nil, err
-		}
 	}
 
 	if workload.Spec.DryRun {
 		return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
 	}
-	return r.handlePause(ctx, workload)
+	if until, held := gitOpsHold(workload, now); held {
+		return &ctrl.Result{RequeueAfter: until.Sub(now)}, nil
+	}
+	return r.handlePause(ctx, workload, target, nil)
 }
 
-func (r *Reconciler) reportActivityResumed(workload *v1alpha1.ManagedWorkload) {
-	source := workload.Status.Activity.LastActivitySource
-	slept, freed, measured := r.endWouldBePause(workload)
+// activeSinceClockRanOut reports whether there has been activity since the
+// workload's clock last ran out. Running, it's within idleAfter. Idle, the
+// pause it's in, or would be in under dry-run, began at the move to Idle,
+// and only activity after that ends it, as only that wakes a paused
+// workload: a pause request runs the clock out early, with the activity seen
+// before it still within idleAfter.
+func activeSinceClockRanOut(workload *v1alpha1.ManagedWorkload, now, pauseAt time.Time) bool {
+	if began := workload.Status.LastTransitionTime; workload.Status.Phase == v1alpha1.PhaseIdle && began != nil {
+		return workload.Status.Activity.LastActivityTime.After(began.Time)
+	}
+	return now.Before(pauseAt)
+}
+
+func (r *Reconciler) reportActivityResumed(workload *v1alpha1.ManagedWorkload, source v1alpha1.ActivitySource,
+	slept time.Duration, freed float64, measured bool) {
 	if !measured {
 		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonActivityResumed, actionEvaluateIdle,
 			"activity resumed (%s), no longer idle", source)
@@ -402,22 +468,66 @@ func (r *Reconciler) reportActivityResumed(workload *v1alpha1.ManagedWorkload) {
 		source, roundedDuration(slept), cost.FormatDollars(freed), dryRunSummary(workload.Status.DryRun))
 }
 
-// forecastVeto defers a pause when a confident forecast expects demand in
-// the next hour above the activity threshold.
-func (r *Reconciler) forecastVeto(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster) (bool, float64) {
-	if engine == nil || engine.GetPhase() < forecast.DailyActive {
-		return false, 0
+// reportIdleVetoed holds back a pause because the forecast expects demand
+// soon. The condition says so for as long as the veto lasts. The event
+// marks it beginning, and is sent once the condition is written, so a
+// failed write doesn't announce it twice.
+func (r *Reconciler) reportIdleVetoed(ctx context.Context, workload *v1alpha1.ManagedWorkload, predicted float64, hour time.Time) (*ctrl.Result, error) {
+	began := !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionIdleVetoed)
+	msg := fmt.Sprintf("idle, but the forecast expects demand at %.0f%% of requests in the hour from %s; not pausing yet",
+		predicted, hour.UTC().Format("15:04 UTC"))
+	r.setCondition(workload, conditionIdleVetoed, metav1.ConditionTrue, "ForecastExpectsDemand", msg)
+	if began {
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return nil, fmt.Errorf("recording the forecast's veto: %w", err)
+		}
+		r.emitEvent(workload, workload.Spec.DryRun, "Normal", ReasonIdleVetoed, actionEvaluateIdle, "%s", msg)
 	}
+	return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+}
+
+func (r *Reconciler) clearIdleVeto(workload *v1alpha1.ManagedWorkload) {
+	r.clearCondition(workload, conditionIdleVetoed, "NotVetoed")
+}
+
+// forecastVeto defers a pause while a confident forecast expects demand
+// above the activity threshold in the hour under way or the next. It
+// covers every hour autoResume would wake the workload for, so a workload
+// is never paused only to be woken straight back. It reports the busiest
+// of the two hours, and when it begins.
+func (r *Reconciler) forecastVeto(ctx context.Context, workload *v1alpha1.ManagedWorkload, engine forecaster) (vetoed bool, predicted float64, hour time.Time) {
+	if engine == nil || engine.GetPhase() < forecast.DailyActive {
+		return false, 0, time.Time{}
+	}
+	requested, err := r.requestedCPU(ctx, workload)
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("not consulting the forecast before pausing: the CPU requested can't be read",
+			"workload", workload.Name, "namespace", workload.Namespace, "error", err.Error())
+		return false, 0, time.Time{}
+	}
+	if requested <= 0 {
+		return false, 0, time.Time{}
+	}
+	now := r.now()
+	hour = r.hourStart(now)
+	predicted = engine.Predict(0, now) / requested * 100
+	if next := engine.Predict(1, now) / requested * 100; next > predicted {
+		predicted, hour = next, hour.Add(time.Hour)
+	}
+	return predicted >= float64(cpuThresholdFor(workload)), predicted, hour
+}
+
+// requestedCPU is the CPU the workload requests across its replicas.
+func (r *Reconciler) requestedCPU(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
 	perReplica, err := r.metrics.CPURequestPerReplica(ctx, workload)
 	if err != nil {
-		return false, 0
+		return 0, fmt.Errorf("reading CPU requests: %w", err)
 	}
 	replicas, err := r.metrics.Replicas(ctx, workload)
-	if err != nil || replicas == 0 {
-		return false, 0
+	if err != nil {
+		return 0, fmt.Errorf("reading replicas: %w", err)
 	}
-	predicted := engine.Predict(1, r.now()) / (perReplica * float64(replicas)) * 100
-	return predicted >= float64(cpuThresholdFor(workload)), predicted
+	return perReplica * float64(replicas), nil
 }
 
 // nextCheck is when the clock next needs evaluating: at the next CPU poll,
@@ -433,29 +543,23 @@ func nextCheck(now, pauseAt, activeUntil time.Time) time.Duration {
 }
 
 // wokenByActivity reports whether a paused workload's annotations ask for it
-// to wake: a last-activity newer than the pause, or an active-until hold that
-// hasn't ended.
-func (r *Reconciler) wokenByActivity(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) bool {
-	now := r.now()
-	var pausedAt time.Time
-	if workload.Status.Pause != nil && workload.Status.Pause.PausedAt != nil {
-		pausedAt = workload.Status.Pause.PausedAt.Time
+// to wake. Annotations are stamped to the second, and from clocks other than
+// the operator's, such as a laptop's, so a change since the pause began
+// counts whatever time it states, and only a change counts: a last-activity
+// set before a requested pause, which ran the clock out early, doesn't undo
+// it.
+func (r *Reconciler) wokenByActivity(workload *v1alpha1.ManagedWorkload, target client.Object) bool {
+	var recorded v1alpha1.WakeAnnotations
+	if pause := workload.Status.Pause; pause != nil && pause.WakeAnnotations != nil {
+		recorded = *pause.WakeAnnotations
 	}
-	for _, obj := range []client.Object{workload, target} {
-		if obj == nil {
-			continue
-		}
-		lastActivity, activeUntil := r.activityAnnotations(ctx, obj, now)
-		if lastActivity.After(pausedAt) || activeUntil.After(now) {
-			return true
-		}
-	}
-	return false
+	return activityAnnotationChanged(workload, recorded.Workload) ||
+		target != nil && activityAnnotationChanged(target, recorded.Target)
 }
 
 // reportPrometheusUnavailable surfaces a Prometheus activity source that can't
 // be evaluated. The clock can't see that activity, so it doesn't act.
-func (r *Reconciler) reportPrometheusUnavailable(ctx context.Context, workload *v1alpha1.ManagedWorkload, err error) (*ctrl.Result, error) {
+func (r *Reconciler) reportPrometheusUnavailable(ctx context.Context, workload *v1alpha1.ManagedWorkload, err error) *ctrl.Result {
 	reason := "QueryFailed"
 	msg := fmt.Sprintf("a Prometheus activity query failed, so idle detection is paused: %v", err)
 	if errors.Is(err, signal.ErrEndpointNotConfigured) {
@@ -470,5 +574,5 @@ func (r *Reconciler) reportPrometheusUnavailable(ctx context.Context, workload *
 	}
 	log.FromContext(ctx).V(1).Info("Prometheus activity unavailable",
 		"workload", workload.Name, "namespace", workload.Namespace, "reason", reason, "error", err.Error())
-	return &ctrl.Result{RequeueAfter: activityCheckInterval}, nil
+	return &ctrl.Result{RequeueAfter: activityCheckInterval}
 }

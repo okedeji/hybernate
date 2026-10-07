@@ -21,7 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -37,15 +40,13 @@ import (
 	"github.com/okedeji/hybernate/internal/discovery"
 )
 
-const hubURL = "https://okedeji.io/hybernate/hub"
-
 // defaultCPUThreshold matches the activity clock's default, so the scan
 // calls idle what Hybernate would pause.
 const defaultCPUThreshold = 10
 
 type scanOptions struct {
-	context      string
-	namespaces   []string
+	kube         *kubeFlags
+	namespaces   namespaceFlags
 	exclude      []string
 	output       string
 	limit        int
@@ -59,9 +60,19 @@ type scanOptions struct {
 	window         string
 	idleAfter      time.Duration
 	timeout        time.Duration
-	promURL        string
 	html           string
 	open           bool
+	prometheus     prometheusOptions
+}
+
+// prometheusOptions say where to read history from and how to reach it.
+type prometheusOptions struct {
+	url                string
+	selector           string
+	headers            []string
+	bearerTokenFile    string
+	caFile             string
+	insecureSkipVerify bool
 }
 
 // scanResult is a scan of one cluster, with the rules and prices it was
@@ -86,8 +97,9 @@ type settings struct {
 	Window       string `json:"window"`
 }
 
-func scanCmd() *cobra.Command {
+func scanCmd(kube *kubeFlags) *cobra.Command {
 	opts := scanOptions{
+		kube:         kube,
 		cpuThreshold: defaultCPUThreshold,
 		cpuPrice:     cost.DefaultRates.CPUPerHour,
 		memoryPrice:  cost.DefaultRates.MemoryPerHour,
@@ -121,8 +133,13 @@ Examples:
   # One namespace, as JSON
   kubectl hybernate scan -n preview-42 -o json
 
-  # A month of history from a Prometheus outside the cluster
-  kubectl hybernate scan --window 30d --prometheus-url https://thanos.example.com
+  # A month of history from a Thanos that holds many clusters
+  kubectl hybernate scan --window 30d --prometheus-url https://thanos.example.com \
+    --prometheus-selector 'cluster="staging"'
+
+  # History from Grafana Mimir, for one tenant
+  kubectl hybernate scan --prometheus-url https://mimir.example.com/prometheus \
+    --prometheus-header 'X-Scope-OrgID: team-a'
 
   # Save the report to send around
   kubectl hybernate scan --html workload-scan.html
@@ -138,42 +155,48 @@ Examples:
 			if err != nil {
 				return err
 			}
+			if opts.cpuThreshold < 1 || opts.cpuThreshold > 100 {
+				return errors.New("--cpu-threshold must be a percentage from 1 to 100")
+			}
 			if opts.idleAfter <= 0 {
 				return errors.New("--idle-after must be more than zero")
 			}
 			if opts.timeout <= 0 {
 				return errors.New("--timeout must be more than zero")
 			}
-			opts.ownCPUPrice, opts.ownMemoryPrice = ownPrices(cmd)
-			ctx, cancel := context.WithTimeout(cmd.Context(), opts.timeout)
-			defer cancel()
-			result, err := scanCluster(ctx, window, opts)
-			if errors.Is(err, context.DeadlineExceeded) {
-				return fmt.Errorf("the scan didn't finish within --timeout %s: the cluster's API server answered too "+
-					"slowly; scan fewer namespaces with -n, or pass a longer --timeout", opts.timeout)
-			}
+			prom, err := prometheusFrom(opts.prometheus)
 			if err != nil {
 				return err
 			}
+			opts.ownCPUPrice, opts.ownMemoryPrice = ownPrices(cmd)
+			ctx, cancel := context.WithTimeout(cmd.Context(), opts.timeout)
+			defer cancel()
+			result, err := scanCluster(ctx, window, prom, opts)
+			if err != nil {
+				return scanFailed(ctx, err, opts.timeout)
+			}
 			result.ScannedAt = time.Now().UTC().Truncate(time.Second)
-			result.Settings = settings{CPUThreshold: opts.cpuThreshold, IdleAfter: opts.idleAfter.String(), Window: opts.window}
+			result.Settings = settings{CPUThreshold: opts.cpuThreshold, IdleAfter: roundedDuration(opts.idleAfter),
+				Window: opts.window}
 			result.Prices = pricesFor(opts)
 			if err := writeScan(cmd.OutOrStdout(), result, opts); err != nil {
 				return err
 			}
-			return writeReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), result, opts)
+			if err := writeReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), result, opts); err != nil {
+				return err
+			}
+			return incompleteError(result)
 		},
 	}
-	cmd.Flags().StringVar(&opts.context, "context", "",
-		"Kubeconfig context of the cluster to scan (defaults to the current one)")
-	cmd.Flags().StringSliceVarP(&opts.namespaces, "namespace", "n", nil,
+	addNamespaceFlags(cmd, &opts.namespaces,
 		"Namespace to scan; repeat for several (defaults to all you can read)")
 	cmd.Flags().StringSliceVar(&opts.exclude, "exclude-namespaces", discovery.SystemNamespaces, "Namespaces to skip")
 	addOutputFlag(cmd, &opts.output)
 	cmd.Flags().IntVar(&opts.limit, "limit", 25,
-		"Workloads to list in the table, most savings first (0 for all)")
+		"Workloads to list in the table, idle first, then by what pausing could save (0 for all)")
 	cmd.Flags().IntVar(&opts.cpuThreshold, "cpu-threshold", defaultCPUThreshold,
-		"CPU use, as a percentage of requests, at which a workload counts as active; managed workloads use their own")
+		"CPU use, as a percentage of requests from 1 to 100, at which a workload counts as active; managed workloads "+
+			"use their own")
 	cmd.Flags().Float64Var(&opts.cpuPrice, "cpu-price", opts.cpuPrice, "Your price per vCPU-hour, in dollars")
 	cmd.Flags().Float64Var(&opts.memoryPrice, "memory-price", opts.memoryPrice,
 		"Your price per GiB-hour of memory, in dollars")
@@ -183,13 +206,156 @@ Examples:
 		"How long without activity makes a workload idle, as Hybernate's idleAfter; managed workloads use their own")
 	cmd.Flags().DurationVar(&opts.timeout, "timeout", opts.timeout,
 		"How long the scan may take before it gives up")
-	cmd.Flags().StringVar(&opts.promURL, "prometheus-url", "",
-		"Prometheus API to read history from, such as Thanos or Mimir (defaults to one found in the cluster)")
+	addPrometheusFlags(cmd, &opts.prometheus)
 	cmd.Flags().StringVar(&opts.html, "html", "",
 		"Save the HTML report to this file, to share (defaults to a temporary file when it opens in a browser)")
 	cmd.Flags().BoolVar(&opts.open, "open", opts.open,
 		"Open the HTML report in your browser, when the table is shown in a terminal")
 	return cmd
+}
+
+func addPrometheusFlags(cmd *cobra.Command, o *prometheusOptions) {
+	cmd.Flags().StringVar(&o.url, "prometheus-url", "",
+		"Prometheus API to read history from, such as Thanos or Mimir (defaults to one found in the cluster). "+
+			"Amazon and Google Managed Prometheus need requests signed with SigV4 or OAuth, which the scan "+
+			"doesn't do; point this at a signing proxy in front of them")
+	cmd.Flags().StringVar(&o.selector, "prometheus-selector", "",
+		`Label matchers added to every history query, such as 'cluster="prod"', for a Prometheus that holds `+
+			`more than one cluster`)
+	cmd.Flags().StringArrayVar(&o.headers, "prometheus-header", nil,
+		`Header to send to --prometheus-url, as "Name: value", such as "X-Scope-OrgID: tenant" for Mimir; repeat for several`)
+	cmd.Flags().StringVar(&o.bearerTokenFile, "prometheus-bearer-token-file", "",
+		"File holding a bearer token to send to --prometheus-url")
+	cmd.Flags().StringVar(&o.caFile, "prometheus-ca-file", "",
+		"PEM file of CA certificates to trust for --prometheus-url, besides the system's")
+	cmd.Flags().BoolVar(&o.insecureSkipVerify, "prometheus-insecure-skip-verify", false,
+		"Don't verify --prometheus-url's certificate")
+}
+
+// prometheusSetup is how the scan reaches Prometheus, checked before the
+// scan starts so a mistyped flag fails at once.
+type prometheusSetup struct {
+	url      string
+	selector discovery.Selector
+	client   *http.Client
+	header   http.Header
+}
+
+func prometheusFrom(o prometheusOptions) (prometheusSetup, error) {
+	selector, err := discovery.ParseSelector(o.selector)
+	if err != nil {
+		return prometheusSetup{}, fmt.Errorf("--prometheus-selector: %w", err)
+	}
+	setup := prometheusSetup{url: o.url, selector: selector}
+	if o.url == "" {
+		if len(o.headers) > 0 || o.bearerTokenFile != "" || o.caFile != "" || o.insecureSkipVerify {
+			return prometheusSetup{}, errors.New("--prometheus-header, --prometheus-bearer-token-file, " +
+				"--prometheus-ca-file and --prometheus-insecure-skip-verify are for --prometheus-url; a Prometheus " +
+				"found in the cluster is reached through the API server with your kubeconfig")
+		}
+		return setup, nil
+	}
+	setup.header, err = parseHeaders(o.headers)
+	if err != nil {
+		return prometheusSetup{}, err
+	}
+	if o.bearerTokenFile != "" {
+		if setup.header.Get("Authorization") != "" {
+			return prometheusSetup{}, errors.New("--prometheus-bearer-token-file and an Authorization " +
+				"--prometheus-header can't both be given")
+		}
+		token, err := os.ReadFile(o.bearerTokenFile)
+		if err != nil {
+			return prometheusSetup{}, fmt.Errorf("--prometheus-bearer-token-file: %w", err)
+		}
+		setup.header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+	}
+	setup.client, err = discovery.NewHTTPClient(discovery.HTTPOptions{CAFile: o.caFile,
+		InsecureSkipVerify: o.insecureSkipVerify})
+	if err != nil {
+		return prometheusSetup{}, fmt.Errorf("--prometheus-ca-file: %w", err)
+	}
+	return setup, nil
+}
+
+// parseHeaders reads "Name: value" headers.
+func parseHeaders(raw []string) (http.Header, error) {
+	header := http.Header{}
+	for _, h := range raw {
+		name, value, ok := strings.Cut(h, ":")
+		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
+		if !ok || !validHeaderName(name) || strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf(`--prometheus-header %q isn't "Name: value"`, h)
+		}
+		header.Add(name, value)
+	}
+	return header, nil
+}
+
+// validHeaderName says name is an HTTP token, as a header name must be.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		alphanumeric := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if !alphanumeric && !strings.ContainsRune("!#$%&'*+-.^_`|~", r) {
+			return false
+		}
+	}
+	return true
+}
+
+// historyError is a scan that failed reading history from Prometheus.
+type historyError struct{ err error }
+
+func (e *historyError) Error() string { return e.err.Error() }
+func (e *historyError) Unwrap() error { return e.err }
+
+// scanFailed says a scan ran out of --timeout, and which step was slow,
+// rather than the bare "context deadline exceeded". A deadline of one call
+// of its own, such as a Prometheus query's, isn't --timeout's, and is left
+// to say what it was.
+func scanFailed(ctx context.Context, err error, timeout time.Duration) error {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	var history *historyError
+	if errors.As(err, &history) {
+		return fmt.Errorf("the scan didn't finish within --timeout %s: Prometheus answered too slowly; pass a "+
+			"longer --timeout, or --window 0 to judge from CPU right now", timeout)
+	}
+	return fmt.Errorf("the scan didn't finish within --timeout %s: the cluster's API server answered too "+
+		"slowly; scan fewer namespaces with -n, or pass a longer --timeout", timeout)
+}
+
+// incompleteError fails a scan that couldn't read all it should have, once
+// its report is written, so a script sees the exit code and a person still
+// gets what it did read. The advice is for why each namespace wasn't read.
+func incompleteError(result scanResult) error {
+	if result.ClusterReport == nil || result.Incomplete == nil {
+		return nil
+	}
+	in := result.Incomplete
+	var why []string
+	if len(in.Missing) > 0 {
+		exist := "don't exist"
+		if len(in.Missing) == 1 {
+			exist = "doesn't exist"
+		}
+		why = append(why, fmt.Sprintf("%s named with -n %s: %s; check the names",
+			plural(len(in.Missing), "namespace", "namespaces"), exist, strings.Join(in.Missing, ", ")))
+	}
+	if len(in.Denied) > 0 {
+		why = append(why, fmt.Sprintf("your access doesn't allow reading workloads in %s; ask an admin for list on "+
+			"Deployments and StatefulSets there, or leave %s out of -n", strings.Join(in.Denied, ", "),
+			pronounObject(len(in.Denied))))
+	}
+	if len(in.Failed) > 0 {
+		why = append(why, fmt.Sprintf("%s couldn't be read in full, as the notes say; run it again, scan fewer "+
+			"namespaces with -n, or pass a longer --timeout", plural(len(in.Failed), "namespace", "namespaces")))
+	}
+	return fmt.Errorf("the scan of %s is incomplete: %s", result.Cluster, strings.Join(why, "; "))
 }
 
 // parseWindow reads a duration that may be in days, which
@@ -209,19 +375,24 @@ func parseWindow(s string) (time.Duration, error) {
 	return d, nil
 }
 
-func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (scanResult, error) {
-	config, _, current, err := kubeConfigFor(opts.context)
+func scanCluster(ctx context.Context, window time.Duration, prom prometheusSetup, opts scanOptions) (
+	scanResult, error) {
+	config, at, err := opts.kube.restConfig(ctx)
 	if err != nil {
 		return scanResult{}, err
 	}
-	scan := scanResult{Context: current, Cluster: clusterName(current)}
-	config.Timeout = apiRequestTimeout
-	config.Wrap(cancelWith(ctx))
-	c, err := client.New(config, client.Options{Scheme: scheme})
+	scan := scanResult{Context: at.context, Cluster: clusterName(at.context)}
+	c, err := opts.kube.newClient(config)
 	if err != nil {
 		return scanResult{}, fmt.Errorf("creating client: %w", err)
 	}
-	namespaces, err := discovery.Namespaces(ctx, c, opts.namespaces, opts.exclude)
+	namespaces, err := discovery.Namespaces(ctx, c, opts.namespaces.list(), opts.exclude)
+	var namespaceNote string
+	if errors.Is(err, discovery.ErrCantListNamespaces) && !opts.namespaces.all {
+		namespaces, err = []string{at.namespace}, nil
+		namespaceNote = fmt.Sprintf("your access doesn't allow listing namespaces, so only %s, the context's "+
+			"namespace, was scanned; name others with -n", at.namespace)
+	}
 	if errors.Is(err, discovery.ErrCantListNamespaces) {
 		return scanResult{}, fmt.Errorf("can't scan %s: to find its workloads, the scan first lists the cluster's "+
 			"namespaces, and your access there doesn't allow that; name the namespaces to scan with -n, or ask an "+
@@ -234,7 +405,13 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	var historyNote string
 	if window > 0 {
 		var err error
-		history, err = historySource(ctx, c, config, namespaces, opts.promURL)
+		history, err = historySource(ctx, c, config, namespaces, prom)
+		if prom.url != "" && err != nil {
+			return scanResult{}, &historyError{fmt.Errorf("reading history from --prometheus-url: %w", err)}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return scanResult{}, &historyError{fmt.Errorf("looking for Prometheus: %w", ctxErr)}
+		}
 		var forbidden *discovery.ProxyForbiddenError
 		if errors.As(err, &forbidden) {
 			scan.HistoryAccess = historyAccess(ctx, c, forbidden)
@@ -249,12 +426,13 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 		CPUThreshold: opts.cpuThreshold,
 		Rates: cost.Rates{CPUPerHour: opts.cpuPrice, MemoryPerHour: opts.memoryPrice,
 			StoragePerMonth: cost.DefaultRates.StoragePerMonth},
-		OwnCPUPrice:    opts.ownCPUPrice,
-		OwnMemoryPrice: opts.ownMemoryPrice,
-		Now:            time.Now,
-		History:        history,
-		Window:         window,
-		IdleAfter:      opts.idleAfter,
+		OwnCPUPrice:     opts.ownCPUPrice,
+		OwnMemoryPrice:  opts.ownMemoryPrice,
+		Now:             time.Now,
+		History:         history,
+		Window:          window,
+		IdleAfter:       opts.idleAfter,
+		NamedNamespaces: len(opts.namespaces.list()) > 0,
 	})
 	if err != nil {
 		return scanResult{}, fmt.Errorf("scanning %s: %w", scan.Cluster, err)
@@ -262,8 +440,8 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	if historyNote != "" {
 		report.Notes = append([]string{historyNote}, report.Notes...)
 	}
-	if len(namespaces) > 0 {
-		report.Notes = append(discovery.AccessNotes(ctx, c, namespaces[0]), report.Notes...)
+	if namespaceNote != "" {
+		report.Notes = append([]string{namespaceNote}, report.Notes...)
 	}
 	// The scan carries on past calls that fail, noting what it couldn't
 	// read; once the deadline passes they all fail, and what it has isn't
@@ -275,35 +453,17 @@ func scanCluster(ctx context.Context, window time.Duration, opts scanOptions) (s
 	return scan, nil
 }
 
-// cancelWith ends every request to the API server when ctx ends. The
-// client's API discovery doesn't take a context, so without it a scan past
-// its deadline still waits out each discovery request in turn.
-func cancelWith(ctx context.Context) func(http.RoundTripper) http.RoundTripper {
-	return func(rt http.RoundTripper) http.RoundTripper {
-		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			reqCtx, cancel := context.WithCancelCause(r.Context())
-			context.AfterFunc(ctx, func() { cancel(context.Cause(ctx)) })
-			return rt.RoundTrip(r.WithContext(reqCtx))
-		})
-	}
-}
-
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-// apiRequestTimeout bounds each request to the API server. A scan makes many
-// small ones, so one that takes this long means the server isn't answering.
-const apiRequestTimeout = 30 * time.Second
-
 // historySource finds the Prometheus to replay history from, or says why
 // there's none to use.
-func historySource(ctx context.Context, c client.Client, config *rest.Config, namespaces []string, promURL string) (
-	*discovery.Prometheus, error) {
+func historySource(ctx context.Context, c client.Client, config *rest.Config, namespaces []string,
+	setup prometheusSetup) (*discovery.Prometheus, error) {
 	var prom *discovery.Prometheus
-	if promURL != "" {
-		p, err := discovery.NewPrometheusURL(promURL, &http.Client{})
+	if setup.url != "" {
+		p, err := discovery.NewPrometheusURL(setup.url, setup.client, setup.header)
 		if err != nil {
+			return nil, err
+		}
+		if err := p.Check(ctx); err != nil {
 			return nil, err
 		}
 		prom = p
@@ -318,13 +478,11 @@ func historySource(ctx context.Context, c client.Client, config *rest.Config, na
 				"pass --prometheus-url for one elsewhere")
 		}
 		if err != nil {
-			return nil, fmt.Errorf("can't look for Prometheus: %w", err)
+			return nil, err
 		}
 		prom = p
 	}
-	if err := prom.Check(ctx); err != nil {
-		return nil, err
-	}
+	prom.Selector = setup.selector
 	return prom, nil
 }
 
@@ -340,8 +498,8 @@ func historyAccess(ctx context.Context, c client.Client, f *discovery.ProxyForbi
 	}
 	const role = "hybernate-scan"
 	return []string{
-		fmt.Sprintf("kubectl create role %s -n %s --verb=get --resource=services/proxy --resource-name=%s:%s",
-			role, f.Namespace, f.Service, f.Port),
+		fmt.Sprintf("kubectl create role %s -n %s --verb=get --resource=services/proxy --resource-name=%s",
+			role, f.Namespace, f.ResourceName()),
 		fmt.Sprintf("kubectl create rolebinding %s -n %s --role=%s %s", role, f.Namespace, role, subject),
 	}
 }
@@ -361,14 +519,15 @@ func writeScan(w io.Writer, result scanResult, opts scanOptions) error {
 
 func writeTable(w io.Writer, result scanResult, limit int) error {
 	p := &printer{w: w}
-	namespaces := map[string]bool{}
-	for _, wl := range result.Workloads {
-		namespaces[wl.Namespace] = true
-	}
 	p.line("%s: %s in %s", result.Cluster, countOf(result.Totals.Workloads, "workload"),
-		countOf(len(namespaces), "namespace"))
+		countOf(result.Namespaces, "namespace"))
 	p.line("")
-	writeHeadline(p, result.Totals, replayedOver(result.History))
+	if result.Totals.Workloads == 0 {
+		p.line("  %s", emptySentence(result))
+		p.line("")
+	} else {
+		writeHeadline(p, result.Totals, replayedOver(result.History))
+	}
 	judged, unjudged := splitJudged(result.Workloads)
 	if len(judged) > 0 {
 		writeWorkloads(p, judged, limit, result.Mode == discovery.ModeHistory)
@@ -401,8 +560,6 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 		p.line("")
 	}
 	writeNextSteps(p, result)
-	p.line("See every cluster together, with savings checked against your cloud bill and kept as history:")
-	p.line("Hybernate Hub, free for up to 2 clusters: %s", hubURL)
 	return p.err
 }
 
@@ -485,10 +642,24 @@ func splitJudged(workloads []Workload) (judged, unjudged []Workload) {
 	return judged, unjudged
 }
 
+// emptySentence says why a scan found no workloads.
+func emptySentence(result scanResult) string {
+	if result.Namespaces == 0 {
+		return "There were no namespaces to scan."
+	}
+	if len(result.Notes) > 0 {
+		return "No Deployments or StatefulSets were found that the scan could read; the notes say what it couldn't."
+	}
+	return "No Deployments or StatefulSets were found."
+}
+
 var unmeasuredExplained = map[string]string{
-	"no CPU requests": "set no CPU requests, so their use can't be measured",
-	"no metrics yet":  "have no metrics yet, usually because their pods just started",
-	"no Metrics API":  "couldn't be measured without the Metrics API",
+	"no CPU requests":         "set no CPU requests, so their use can't be measured",
+	"no metrics yet":          "have no metrics yet, usually because their pods just started",
+	"no Metrics API":          "couldn't be measured without the Metrics API",
+	"pod metrics not allowed": "couldn't be measured, as your access doesn't allow reading pod metrics",
+	"pod metrics unreadable":  "couldn't be measured, as reading pod metrics failed",
+	"invalid selector":        "have a pod selector the scan couldn't read, so their pods weren't found",
 }
 
 func unjudgedNotes(unjudged []Workload) []string {
@@ -574,9 +745,6 @@ func writeWorkloads(p *printer, workloads []Workload, limit int, history bool) {
 	p.line("")
 }
 
-// savingColumns says which money columns a table needs: what Hybernate has
-// saved, for live workloads, and what pausing could save, for those it
-// doesn't pause yet, when the scan knows either for any of them.
 // sleptColumn says whether the scan knows how long Hybernate has had any
 // live workload paused.
 func sleptColumn(workloads []Workload) bool {
@@ -598,6 +766,9 @@ func sleptCells(wl Workload) (slept, wakes, since string, sleptSort float64) {
 	return hours(s.Hours), strconv.Itoa(s.Wakes), "since " + s.Since.Format("Jan 2"), s.Hours
 }
 
+// savingColumns says which money columns a table needs: what Hybernate has
+// saved, for live workloads, and what pausing could save, for those it
+// doesn't pause yet, when the scan knows either for any of them.
 func savingColumns(workloads []Workload) (saving, couldSave bool) {
 	for _, wl := range workloads {
 		saving = saving || (wl.Managed && !wl.DryRun)
@@ -617,54 +788,84 @@ func savedCell(wl Workload) string {
 // couldSaveCell is what pausing a workload Hybernate doesn't pause yet
 // would free a month, from what dry-run measured or history shows.
 func couldSaveCell(wl Workload) string {
-	if wl.Measured == nil && (wl.Managed || wl.History == nil) {
+	if wl.ScaledByHand || (wl.Measured == nil && (wl.Managed || wl.Protected || wl.History == nil)) {
 		return "-"
 	}
 	return dollars(discovery.CouldSave(wl))
 }
 
-func writeNextSteps(p *printer, result scanResult) {
-	var idle, measuring *Workload
-	installed := false
-	for i := range result.Workloads {
-		wl := &result.Workloads[i]
-		installed = installed || wl.Managed
-		if idle == nil && result.Totals.Idle > 0 && wl.State == discovery.StateIdle && !wl.Managed && !wl.Protected {
+// nextStepTargets are the workloads next steps are about: the first idle
+// one Hybernate could manage, to measure, and the first already measuring
+// in dry-run, to go live. Workloads come sorted most savings first, so each
+// is the best example. Protected workloads are left out, as Hybernate won't
+// manage them.
+func nextStepTargets(workloads []Workload) (idle, measuring *Workload) {
+	for i := range workloads {
+		wl := &workloads[i]
+		if wl.Protected {
+			continue
+		}
+		if idle == nil && wl.State == discovery.StateIdle && !wl.Managed {
 			idle = wl
 		}
 		if measuring == nil && wl.Measured != nil {
 			measuring = wl
 		}
 	}
+	return idle, measuring
+}
+
+// nextStepCommands are the commands that measure the idle workload and then
+// take a workload live, which both the table and the report show.
+func nextStepCommands(idle, measuring *Workload) (measure []string, enable string) {
+	if idle != nil {
+		kind := strings.ToLower(string(idle.Kind))
+		measure = []string{
+			fmt.Sprintf("kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace),
+			fmt.Sprintf("kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, idle.Name, idle.Namespace),
+		}
+	}
+	if measuring == nil {
+		measuring = idle
+	}
+	if measuring != nil {
+		enable = fmt.Sprintf("kubectl hybernate enable %s/%s -n %s",
+			strings.ToLower(string(measuring.Kind)), measuring.Name, measuring.Namespace)
+	}
+	return measure, enable
+}
+
+func writeNextSteps(p *printer, result scanResult) {
+	idle, measuring := nextStepTargets(result.Workloads)
 	if idle == nil && measuring == nil {
 		return
 	}
+	installed := slices.ContainsFunc(result.Workloads, func(wl Workload) bool { return wl.Managed })
+	measure, enable := nextStepCommands(idle, measuring)
 	p.line("Next steps:")
 	step := 0
 	next := func(title string) {
 		step++
 		p.line("  %d. %s", step, title)
 	}
-	if idle != nil {
+	if len(measure) > 0 {
 		// Managed workloads show Hybernate is installed; without any, it
 		// may or may not be, so the install step is shown.
 		if !installed {
 			next("Install Hybernate in the cluster:")
 			p.line("       helm install hybernate oci://ghcr.io/okedeji/charts/hybernate -n hybernate-system --create-namespace")
 		}
-		kind := strings.ToLower(string(idle.Kind))
 		next("Measure a workload first; nothing is paused in dry-run:")
-		p.line("       kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace)
-		p.line("       kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, idle.Name, idle.Namespace)
+		for _, command := range measure {
+			p.line("       %s", command)
+		}
 	}
 	if measuring != nil {
 		next("When you're happy with what dry-run measured, start pausing:")
 	} else {
 		next("When you're happy with what it measures, start pausing it while idle:")
-		measuring = idle
 	}
-	p.line("       kubectl hybernate enable %s/%s -n %s",
-		strings.ToLower(string(measuring.Kind)), measuring.Name, measuring.Namespace)
+	p.line("       %s", enable)
 	p.line("")
 }
 
@@ -916,12 +1117,19 @@ func cents(amount float64) string {
 	return fmt.Sprintf("$%.2f", amount)
 }
 
-// dollars formats whole dollars with thousands separators.
+// dollars formats whole dollars with thousands separators, a negative
+// amount with its sign before the dollar sign.
 func dollars(amount float64) string {
-	n := int64(amount + 0.5)
-	s := fmt.Sprintf("%d", n)
+	sign := ""
+	if amount < 0 {
+		sign, amount = "-", -amount
+	}
+	s := strconv.FormatInt(int64(math.Round(amount)), 10)
 	for i := len(s) - 3; i > 0; i -= 3 {
 		s = s[:i] + "," + s[i:]
 	}
-	return "$" + s
+	if s == "0" {
+		sign = ""
+	}
+	return sign + "$" + s
 }

@@ -14,72 +14,103 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Holt-Winters double seasonal smoothing (Taylor's method).
+// Additive Holt-Winters double seasonal smoothing (Taylor's method).
 //
-// All updates follow the same exponential smoothing form:
+// Each update has the exponential smoothing form
 //
 //	new = weight × (fresh evidence) + (1 - weight) × (old belief)
 //
-// Each component strips out the effects of the others before updating:
+// and each component strips out the others before updating:
 //
-//	Level:   L(t) = α × (Y(t) / (D(t) × W(t)))  + (1-α) × (L(t-1) + T(t-1))
-//	Trend:   T(t) = β × (L(t) - L(t-1))          + (1-β) × T(t-1)
-//	Daily:   D(t) = γ₁ × (Y(t) / (L(t) × W(t))) + (1-γ₁) × D(t-s₁)
-//	Weekly:  W(t) = γ₂ × (Y(t) / (L(t) × D(t))) + (1-γ₂) × W(t-s₂)
+//	Level:   L(t) = α × (Y(t) - D(t) - W(t))  + (1-α) × (L(t-k) + k×T(t-k))
+//	Trend:   T(t) = β × (L(t) - L(t-k)) / k   + (1-β) × T(t-k)
+//	Daily:   D(t) = γ₁ × (Y(t) - L(t) - W(t)) + (1-γ₁) × D(t-s₁)
+//	Weekly:  W(t) = γ₂ × (Y(t) - L(t) - D(t)) + (1-γ₂) × W(t-s₂)
 //
-// Forecast h steps ahead:
+// where k is the number of hours since the previous observation, s₁ = 24
+// and s₂ = 168. The forecast h hours after the last observation is
 //
-//	F(t+h) = (L(t) + h × T(t)) × D(t+h) × W(t+h)
+//	F(t+h) = max(0, L(t) + h×T(t) + D(t+h) + W(t+h))
 //
-// Where:
-//   - Y(t) = observed value at time t
-//   - s₁ = 24 (daily season), s₂ = 168 (weekly season)
-//   - α, β, γ₁, γ₂ = smoothing parameters in (0, 1)
+// The additive form is used rather than the multiplicative one because
+// idle workloads spend much of their time at zero demand: a multiplicative
+// model divides by the level and the seasonal factors, which reach zero
+// there, and it diverges. Additive components stay bounded by the demand
+// they were fitted to.
+//
+// The components are kept identifiable by renormalising after each update:
+// the daily components sum to zero, and for every hour of the day the
+// weekly components across the seven days sum to zero. A shift in a mean is
+// moved into the component above it (weekly into daily, daily into the
+// level), which leaves every forecast unchanged. The level is then the mean
+// demand, the daily components the shape of a day, and the weekly
+// components how each weekday departs from that shape, so a level held at
+// zero or above means what it says.
 
 package forecast
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 const (
 	DailySeason  = 24
 	WeeklySeason = 168
+
+	daysPerWeek = WeeklySeason / DailySeason
+
+	// maxTrendSteps bounds how far the trend is extrapolated across a gap in
+	// observations. The trend is fitted to hour-on-hour change; carried
+	// over a long outage it would dominate the forecast.
+	maxTrendSteps = DailySeason
 )
 
-// dailyIndex maps a wall-clock time to the daily season slot (0-23).
+// dailyIndex is the hour of day of t, in t's location.
 func dailyIndex(t time.Time) int {
-	return t.UTC().Hour()
+	return t.Hour()
 }
 
-// weeklyIndex maps a wall-clock time to the weekly season slot (0-167).
-// Each slot represents one hour-of-week: Monday 0:00 = slot 0, Sunday 23:00 = slot 167.
+// weeklyIndex is the hour of week of t, in t's location: Monday 00:00 is 0,
+// Sunday 23:00 is 167.
 func weeklyIndex(t time.Time) int {
-	// time.Weekday: Sunday=0 .. Saturday=6
-	// We want Monday=0 .. Sunday=6
-	wd := (int(t.UTC().Weekday()) + 6) % 7
-	return wd*DailySeason + t.UTC().Hour()
+	monday0 := (int(t.Weekday()) + 6) % 7
+	return monday0*DailySeason + t.Hour()
 }
 
 // Params controls how quickly the model adapts to new data.
 // Higher values = more reactive. Lower values = more stable.
 type Params struct {
-	Alpha  float64 // level smoothing (default 0.1)
-	Beta   float64 // trend smoothing (default 0.01)
-	Gamma1 float64 // daily seasonality smoothing (default 0.05)
-	Gamma2 float64 // weekly seasonality smoothing (default 0.01)
+	Alpha  float64 // level smoothing
+	Beta   float64 // trend smoothing
+	Gamma1 float64 // daily seasonality smoothing, per day
+	Gamma2 float64 // weekly seasonality smoothing, per week
+
+	// Floor is the demand, in the unit observed, below which a difference
+	// doesn't matter. Accuracy and anomalies are judged against at least
+	// this much, so a workload idling at a few millicores isn't scored on
+	// its noise.
+	Floor float64
 }
 
+// DefaultParams suit hourly CPU in millicores, and were chosen by
+// simulating office-hours, always-on, idle, and noisy traces. A weekly slot
+// is updated once a week, so Gamma2 is high enough for a weekday/weekend
+// pattern to be learned in about three weeks. Alpha and Gamma1 are low so
+// that the level stays the mean demand and the daily components the
+// average day, leaving the weekly components to carry how weekdays differ.
 func DefaultParams() Params {
 	return Params{
-		Alpha:  0.1,
-		Beta:   0.01,
-		Gamma1: 0.05,
-		Gamma2: 0.01,
+		Alpha:  0.01,
+		Beta:   0.001,
+		Gamma1: 0.1,
+		Gamma2: 0.5,
+		Floor:  10,
 	}
 }
 
-// Model implements Holt-Winters double seasonal smoothing (Taylor's method).
-// It learns daily (24h) and weekly (168h) patterns from hourly data points
-// and forecasts future demand.
+// Model is an additive Holt-Winters double seasonal model of hourly demand.
+// It learns a daily (24h) and a weekly (168h) pattern.
 type Model struct {
 	params Params
 
@@ -88,125 +119,106 @@ type Model struct {
 	daily  [DailySeason]float64
 	weekly [WeeklySeason]float64
 
-	n int // total data points observed
+	n int
 }
 
 func NewModel(params Params) *Model {
-	m := &Model{params: params}
-
-	// Initialize seasonal factors to 1.0 (no effect until data arrives)
-	for i := range m.daily {
-		m.daily[i] = 1.0
-	}
-	for i := range m.weekly {
-		m.weekly[i] = 1.0
-	}
-
-	return m
+	return &Model{params: params}
 }
 
-// Update feeds a new hourly data point into the model and returns the
-// forecast that was made for this hour (before seeing the actual value).
-// The caller can compare forecast vs actual to score accuracy.
-// Seasonal slot indices are derived from wall-clock time so that slots
-// always align to real hours-of-day and hours-of-week, surviving pause
-// gaps and operator restarts.
-func (m *Model) Update(value float64, now time.Time) float64 {
-	m.n++
+// forecast is the demand expected at t, steps hours after the last
+// observation.
+func (m *Model) forecast(t time.Time, steps int) float64 {
+	steps = min(steps, maxTrendSteps)
+	f := m.level + float64(steps)*m.trend + m.daily[dailyIndex(t)] + m.weekly[weeklyIndex(t)]
+	return math.Min(maxMagnitude, math.Max(0, f))
+}
 
-	if m.n == 1 {
-		m.level = value
-		return value
+// update fits an observation y made at t, steps hours after the previous
+// one.
+func (m *Model) update(y float64, t time.Time, steps int) {
+	if m.n == 0 {
+		m.level = y
+		m.n = 1
+		return
 	}
+	steps = max(1, min(steps, maxTrendSteps))
 
-	di := dailyIndex(now)
-	wi := weeklyIndex(now)
-
-	prevForecast := m.Forecast(0, now)
-
-	ds := m.daily[di]
-	ws := m.weekly[wi]
-
-	seasonProduct := ds * ws
-	if seasonProduct == 0 {
-		seasonProduct = 1.0
-	}
+	di, wi := dailyIndex(t), weeklyIndex(t)
+	d, w := m.daily[di], m.weekly[wi]
+	p := m.params
 
 	prevLevel := m.level
-	prevTrend := m.trend
+	m.level = math.Max(0, p.Alpha*(y-d-w)+(1-p.Alpha)*(prevLevel+float64(steps)*m.trend))
+	m.trend = p.Beta*(m.level-prevLevel)/float64(steps) + (1-p.Beta)*m.trend
 
-	m.level = m.params.Alpha*(value/seasonProduct) +
-		(1-m.params.Alpha)*(prevLevel+prevTrend)
-
-	m.trend = m.params.Beta*(m.level-prevLevel) +
-		(1-m.params.Beta)*prevTrend
-
-	if m.n > DailySeason {
-		levelWeekly := m.level * ws
-		if levelWeekly == 0 {
-			levelWeekly = 1.0
-		}
-		m.daily[di] = m.params.Gamma1*(value/levelWeekly) +
-			(1-m.params.Gamma1)*ds
-	}
-
-	if m.n > WeeklySeason {
-		levelDaily := m.level * ds
-		if levelDaily == 0 {
-			levelDaily = 1.0
-		}
-		m.weekly[wi] = m.params.Gamma2*(value/levelDaily) +
-			(1-m.params.Gamma2)*ws
-	}
-
-	return prevForecast
+	newD := p.Gamma1*(y-m.level-w) + (1-p.Gamma1)*d
+	newW := p.Gamma2*(y-m.level-newD) + (1-p.Gamma2)*w
+	m.setDaily(di, newD)
+	m.setWeekly(wi, newW)
+	m.bound()
+	m.n++
 }
 
-// Forecast predicts demand h hours ahead based on current state.
-// The target slot is derived from now + h hours using wall-clock time.
-func (m *Model) Forecast(h int, now time.Time) float64 {
-	target := now.Add(time.Duration(h) * time.Hour)
-	di := dailyIndex(target)
-	wi := weeklyIndex(target)
-
-	f := (m.level + float64(h)*m.trend) * m.daily[di] * m.weekly[wi]
-	if f < 0 {
-		return 0
+// bound holds every component within what persisted state may hold. Only a
+// model restored from state at those limits comes near them, but one that
+// learned its way past them couldn't be restored again.
+func (m *Model) bound() {
+	m.level = math.Min(m.level, maxMagnitude)
+	m.trend = clampMagnitude(m.trend)
+	for i := range m.daily {
+		m.daily[i] = clampMagnitude(m.daily[i])
 	}
-	return f
+	for i := range m.weekly {
+		m.weekly[i] = clampMagnitude(m.weekly[i])
+	}
 }
 
-// DataPoints returns the total number of data points the model has observed.
+func clampMagnitude(v float64) float64 {
+	return math.Max(-maxMagnitude, math.Min(maxMagnitude, v))
+}
+
+func (m *Model) setDaily(i int, v float64) {
+	shift := (v - m.daily[i]) / DailySeason
+	m.daily[i] = v
+	for j := range m.daily {
+		m.daily[j] -= shift
+	}
+	m.level = math.Max(0, m.level+shift)
+}
+
+func (m *Model) setWeekly(i int, v float64) {
+	hour := i % DailySeason
+	shift := (v - m.weekly[i]) / daysPerWeek
+	m.weekly[i] = v
+	for day := range daysPerWeek {
+		m.weekly[day*DailySeason+hour] -= shift
+	}
+	m.setDaily(hour, m.daily[hour]+shift)
+}
+
+// DataPoints is the number of observations the model has fitted.
 func (m *Model) DataPoints() int {
 	return m.n
 }
 
-func (m *Model) export() ModelState {
-	return ModelState{
-		Alpha:  m.params.Alpha,
-		Beta:   m.params.Beta,
-		Gamma1: m.params.Gamma1,
-		Gamma2: m.params.Gamma2,
-		Level:  m.level,
-		Trend:  m.trend,
-		Daily:  m.daily,
-		Weekly: m.weekly,
-		N:      m.n,
+func (m *Model) finite() bool {
+	if !isFinite(m.level) || !isFinite(m.trend) {
+		return false
 	}
+	for _, v := range m.daily {
+		if !isFinite(v) {
+			return false
+		}
+	}
+	for _, v := range m.weekly {
+		if !isFinite(v) {
+			return false
+		}
+	}
+	return true
 }
 
-func importModel(s ModelState) *Model {
-	return &Model{
-		params: Params{
-			Alpha:  s.Alpha,
-			Beta:   s.Beta,
-			Gamma1: s.Gamma1,
-			Gamma2: s.Gamma2,
-		},
-		level:  s.Level,
-		trend:  s.Trend,
-		daily:  s.Daily,
-		weekly: s.Weekly,
-		n:      s.N,
-	}
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }

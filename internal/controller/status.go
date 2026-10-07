@@ -37,7 +37,7 @@ const statusFlushInterval = 5 * time.Minute
 // flush. observed is the status as it was when the reconcile began.
 func (r *Reconciler) persistStatus(ctx context.Context, workload *v1alpha1.ManagedWorkload, observed *v1alpha1.ManagedWorkloadStatus) error {
 	if equality.Semantic.DeepEqual(withoutVolatile(observed), withoutVolatile(&workload.Status)) &&
-		!flushDue(observed, r.now()) {
+		!flushDue(observed, r.now()) && !activityUnwritten(observed, &workload.Status, idleAfterFor(workload)) {
 		return nil
 	}
 	if err := r.Status().Update(ctx, workload); err != nil {
@@ -56,6 +56,22 @@ func withoutVolatile(status *v1alpha1.ManagedWorkloadStatus) *v1alpha1.ManagedWo
 		s.Activity = &v1alpha1.ActivityStatus{TemplateHash: s.Activity.TemplateHash}
 	}
 	return s
+}
+
+// activityUnwritten reports whether the written status is further behind on
+// the latest activity than a restart could afford: after one, what's written
+// is all the operator knows, and a workload would pause up to that much
+// early. The allowance is a small share of idleAfter, so a short idleAfter
+// is written on every activity and a long one at the flush interval.
+func activityUnwritten(observed, current *v1alpha1.ManagedWorkloadStatus, idleAfter time.Duration) bool {
+	if current.Activity == nil {
+		return false
+	}
+	if observed.Activity == nil {
+		return true
+	}
+	behind := current.Activity.LastActivityTime.Sub(observed.Activity.LastActivityTime.Time)
+	return behind > min(statusFlushInterval, idleAfter/10)
 }
 
 // flushDue reports whether the volatile values were last written at least

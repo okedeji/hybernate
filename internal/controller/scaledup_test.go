@@ -28,10 +28,12 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/autoscaler"
@@ -123,9 +125,9 @@ func conflicted(scaledUp time.Time) *v1alpha1.ManagedWorkload {
 	return w
 }
 
-// After a GitOps tool undoes a pause, Hybernate waits before pausing again,
-// so it doesn't restart the workload in a loop with the tool.
-func TestHandlePause_WaitsAfterAGitOpsConflict(t *testing.T) {
+// After a GitOps tool undoes a pause, the idle clock waits before pausing
+// again, so it doesn't restart the workload in a loop with the tool.
+func TestIdleClock_WaitsAfterAGitOpsConflict(t *testing.T) {
 	tests := []struct {
 		name      string
 		scaledUp  time.Duration
@@ -136,16 +138,21 @@ func TestHandlePause_WaitsAfterAGitOpsConflict(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			workload := conflicted(fixedTime.Add(-tt.scaledUp))
+			workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
+			workload.Status.LastTransitionTime = ptr.To(metav1.NewTime(fixedTime.Add(-time.Minute)))
+			workload.Status.Activity = &v1alpha1.ActivityStatus{
+				LastActivityTime:  metav1.NewTime(fixedTime.Add(-2 * time.Hour)),
+				LastEvaluatedTime: ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second))),
+			}
 			pauser := &stubPauser{}
-			r := newTestReconcilerWithReplicas(t, conflicted(fixedTime.Add(-tt.scaledUp)), pauser, 3)
-			w := getWorkload(t, r, "api")
+			r := newTestReconcilerWithReplicas(t, workload, pauser, 3)
 
-			result, err := r.handlePause(context.Background(), w)
+			result, err := r.Reconcile(context.Background(), reconcileFor("api"))
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantPause, pauser.pauseCalls > 0)
 			if !tt.wantPause {
-				require.NotNil(t, result)
 				assert.Equal(t, 50*time.Minute, result.RequeueAfter, "until an hour after the conflict")
 				assert.Equal(t, v1alpha1.PhaseIdle, getWorkload(t, r, "api").Status.Phase)
 			}
@@ -188,7 +195,7 @@ func TestGitOpsConflict_ClearsWhenAPauseHolds(t *testing.T) {
 		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{resumeDone: true}, 0)
 		w := getWorkload(t, r, "api")
 
-		_, err := r.handleResume(context.Background(), w)
+		_, err := r.handleResume(context.Background(), w, nil)
 		require.NoError(t, err)
 
 		assert.Nil(t, meta.FindStatusCondition(getWorkload(t, r, "api").Status.Conditions, conditionGitOpsConflict))
@@ -231,4 +238,190 @@ func TestReportAutoscaler(t *testing.T) {
 			assert.Contains(t, cond.Message, tt.want)
 		})
 	}
+}
+
+func pausedScaledObject(t *testing.T, r *Reconciler) (string, bool) {
+	t.Helper()
+	so := &unstructured.Unstructured{}
+	so.SetGroupVersionKind(kedaScaledObject)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "api-scaler"}, so))
+	v, ok := so.GetAnnotations()[autoscaler.PausedReplicasAnnotation]
+	return v, ok
+}
+
+// Someone scaling up a paused KEDA workload wakes it, and KEDA must be let
+// go too, or it holds the workload at zero again and never scales it.
+func TestWakeOnScaleUp_ReleasesTheKEDAHold(t *testing.T) {
+	so := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+		"scaleTargetRef": map[string]any{"name": "api"}}}}
+	so.SetGroupVersionKind(kedaScaledObject)
+	so.SetNamespace("default")
+	so.SetName("api-scaler")
+	so.SetAnnotations(map[string]string{autoscaler.PausedReplicasAnnotation: "0"})
+	workload := pausedWorkload(v1alpha1.PhasePaused)
+	workload.Status.Pause.ScaledObject = "api-scaler"
+	r := lifecycleReconciler(t, workload, 2, interceptor.Funcs{}, so)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	assert.Equal(t, v1alpha1.PhaseRunning, getWorkload(t, r, "api").Status.Phase)
+	_, held := pausedScaledObject(t, r)
+	assert.False(t, held, "KEDA scales it again")
+	assert.Equal(t, int32(2), targetReplicas(t, r), "left as they set it")
+}
+
+// Right after a pause the cache can still show the replicas from before it.
+// That is not a scale-up, and mustn't end the pause.
+func TestWakeOnScaleUp_StaleCacheIsNotAScaleUp(t *testing.T) {
+	workload := pausedWorkload(v1alpha1.PhasePaused)
+	stale := interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if d, ok := obj.(*appsv1.Deployment); ok {
+			d.Spec.Replicas = ptr.To(int32(3))
+		}
+		return nil
+	}}
+	r := lifecycleReconciler(t, workload, 0, stale)
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	got := getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhasePaused, got.Status.Phase)
+	require.NotNil(t, got.Status.Pause)
+	assert.Equal(t, int32(3), got.Status.Pause.PreviousReplicas)
+	assert.Nil(t, got.Status.LastScaledUp)
+}
+
+// A workload scaled to zero outside Hybernate is meant to be off. Hybernate
+// neither pauses it, which would record zero replicas to restore, nor ever
+// starts it: not on idle, not on a pause request, not on a later wake.
+func TestScaledToZero_IsLeftOff(t *testing.T) {
+	idleLongAgo := &v1alpha1.ActivityStatus{LastActivityTime: metav1.NewTime(fixedTime.Add(-2 * time.Hour)),
+		LastEvaluatedTime: ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second)))}
+	idlePolicy := &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
+	tests := []struct {
+		name      string
+		phase     v1alpha1.WorkloadPhase
+		requested bool
+	}{
+		{name: "idle for longer than idleAfter", phase: v1alpha1.PhaseRunning},
+		{name: "already found idle", phase: v1alpha1.PhaseIdle},
+		{name: "pause requested", phase: v1alpha1.PhaseRunning, requested: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := lifecycleWorkload("api", tt.phase)
+			if tt.requested {
+				withPauseRequested(workload)
+			}
+			workload.Spec.IdlePolicy = idlePolicy
+			workload.Status.Activity = idleLongAgo.DeepCopy()
+			r := lifecycleReconciler(t, workload, 0, interceptor.Funcs{})
+
+			reconcileUntilSettled(t, r)
+
+			got := getWorkload(t, r, "api")
+			assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+			assert.Nil(t, got.Status.Pause, "nothing to pause")
+			assert.Equal(t, int32(0), targetReplicas(t, r))
+			assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionScaledToZero))
+			events := drainEvents(t, r)
+			assert.Equal(t, 1, strings.Count(events, "scaled to zero outside Hybernate; left off"), events)
+			assert.NotContains(t, events, ReasonPaused)
+		})
+	}
+}
+
+// A cache that still shows the replicas a target had before someone scaled
+// it to zero mustn't make Hybernate pause it with zero to restore.
+func TestScaledToZero_StaleCacheDoesntPause(t *testing.T) {
+	stale := interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if d, ok := obj.(*appsv1.Deployment); ok {
+			d.Spec.Replicas = ptr.To(int32(3))
+		}
+		return nil
+	}}
+	workload := withPauseRequested(lifecycleWorkload("api", v1alpha1.PhaseRunning))
+	r := lifecycleReconciler(t, workload, 0, stale)
+
+	reconcileUntilSettled(t, r)
+
+	got := getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+	assert.Nil(t, got.Status.Pause)
+}
+
+// Scaled back up, the workload is managed again, starting with a fresh
+// idle clock rather than one that ran out while it was off.
+func TestScaledToZero_BackUpIsActivity(t *testing.T) {
+	workload := lifecycleWorkload("api", v1alpha1.PhaseRunning)
+	workload.Spec.IdlePolicy = &v1alpha1.IdlePolicySpec{IdleAfter: &metav1.Duration{Duration: time.Hour}}
+	workload.Status.Activity = &v1alpha1.ActivityStatus{LastActivityTime: metav1.NewTime(fixedTime.Add(-2 * time.Hour)),
+		LastEvaluatedTime: ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second)))}
+	meta.SetStatusCondition(&workload.Status.Conditions, metav1.Condition{Type: conditionScaledToZero,
+		Status: metav1.ConditionTrue, Reason: "ScaledToZero"})
+	r := lifecycleReconciler(t, workload, 2, interceptor.Funcs{})
+
+	reconcileUntilSettled(t, r)
+
+	got := getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+	assert.Equal(t, int32(2), targetReplicas(t, r))
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionScaledToZero))
+	assert.Equal(t, v1alpha1.ActivitySourceScaledUp, got.Status.Activity.LastActivitySource)
+}
+
+// A pause recorded with zero replicas, as an earlier version made of a
+// workload already at zero, is handed back at zero, and the event says so.
+func TestHandBack_KeepsAWorkloadThatWasAtZero(t *testing.T) {
+	tests := []struct {
+		previous  int32
+		want      int32
+		wantEvent string
+	}{
+		{previous: 0, want: 0, wantEvent: "released at zero replicas: no longer managed"},
+		{previous: 3, want: 3, wantEvent: "restored to 3 replicas: no longer managed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.wantEvent, func(t *testing.T) {
+			workload := pausedWorkload(v1alpha1.PhasePaused)
+			workload.Finalizers = []string{finalizerName}
+			workload.Status.Pause.PreviousReplicas = tt.previous
+			r := realPauserReconciler(t, workload)
+			require.NoError(t, r.Delete(context.Background(), getWorkload(t, r, "api")))
+
+			_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, targetReplicas(t, r))
+			assert.Contains(t, drainEvents(t, r), tt.wantEvent)
+		})
+	}
+}
+
+// A resume of Hybernate's own scales the workload up too. The cache can
+// still hold the workload as Paused once that has begun, which mustn't be
+// taken for someone else waking it: that would release KEDA, which could
+// scale the workload back down while it starts.
+func TestWakeOnScaleUp_StaleCacheDuringAResume(t *testing.T) {
+	pauser := &stubPauser{}
+	r := newTestReconcilerWithReplicas(t, pausedWorkload(v1alpha1.PhaseResuming), pauser, 3)
+	stale := getWorkload(t, r, "api")
+	stale.Status.Phase = v1alpha1.PhasePaused
+
+	require.NoError(t, r.wakeOnScaleUp(context.Background(), stale, scaledBy("hybernate", 3)))
+
+	assert.Zero(t, pauser.restoreCalls, "KEDA is still held")
+	got := getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhaseResuming, got.Status.Phase)
+	assert.Nil(t, got.Status.LastScaledUp)
 }

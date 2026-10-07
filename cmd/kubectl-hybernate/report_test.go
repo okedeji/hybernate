@@ -76,8 +76,8 @@ func historyResult() scanResult {
 					Unmeasured: "no CPU requests"},
 			},
 			Notes: []string{"the history replay sees CPU and rollouts only"},
-			Totals: discovery.Totals{Workloads: 5, MonthlyCost: 446, Paused: 1, PausedHourlyCost: 0.07, Idle: 2,
-				IdleCPUMillis:   2500,
+			Totals: discovery.Totals{Workloads: 5, MonthlyCost: 446, SavingsBasis: 446, Paused: 1, PausedHourlyCost: 0.07,
+				Idle: 2, IdleCPUMillis: 2500,
 				IdleMemoryBytes: 6 << 30, IdleHourlyCost: 0.32, IdleMonthlyCost: 236,
 				Replayed: discovery.ReplayTotals{Workloads: 2, Sleepers: 1, SleepHours: 167, Freed: 32, MonthlyFreed: 139},
 				Measured: discovery.Measured{Pauses: 4, SleptHours: 41, Freed: 5.33, MonthlyFreed: 40}, DryRun: 1,
@@ -103,11 +103,11 @@ func TestWriteHTML_History(t *testing.T) {
 	assert.Contains(t, got, `<div class="figure"><b>$4</b><span>saved by Hybernate this month</span>`+
 		`<small>so far, pausing 1 live workload</small></div>`)
 	assert.Contains(t, got, `<div class="figure"><b>$179</b><span>could be saved a month</span>`+
-		`<small>40% of what these workloads cost</small></div>`,
+		`<small>40% of what these workloads cost over the same time</small></div>`,
 		"what history shows for unmanaged workloads, plus what dry-run measured, against what they cost")
 	assert.NotContains(t, got, "Had Hybernate been pausing them", "the figures and facts say it")
 	assert.Contains(t, got, "It&#39;s idle once it has had no activity for 1h")
-	assert.Contains(t, got, "Try Hybernate Hub")
+	assert.NotContains(t, got, "Hybernate Hub", "it has no page to send anyone to yet")
 	tip := "Hours Hybernate would have had it paused, measured since dry-run started for a dry-run workload, or " +
 		"from history over the last 7 days for an unmanaged one. Under it, how many times activity would have " +
 		"woken it, each a wait for someone."
@@ -118,9 +118,6 @@ func TestWriteHTML_History(t *testing.T) {
 	assert.Contains(t, got, "<div>1 of 2<span>unmanaged workloads would have slept over the last 7 days</span></div>")
 	assert.NotContains(t, got, "wakes over", "wakes are per workload, in the table")
 	assert.Contains(t, got, "<div>2 of 5<span>managed by Hybernate: 1 live, 1 in dry-run</span></div>")
-	assert.Contains(t, got, "This report covers one cluster, at list prices, from one scan. Hybernate Hub shows "+
-		"every cluster together")
-	assert.Contains(t, got, "Every cluster together, with verified savings")
 	assert.Contains(t, got, `data-filter="namespaces"`, "namespaces can be filtered like workloads")
 	assert.Contains(t, got, `<td class="ref">statefulset/postgres<span class="sub">preview-42</span></td>`,
 		"the namespace under the workload, not a column of its own")
@@ -148,8 +145,9 @@ func TestWriteHTML_History(t *testing.T) {
 	assert.NotContains(t, got, "postgres-0.postgres-hl", "addresses stay out of a report that gets forwarded")
 	assert.NotContains(t, got, "nats://", "addresses stay out of a report that gets forwarded")
 	assert.Contains(t, got, "after its idle-after with no activity (1h, or a managed workload&#39;s own)")
-	assert.Contains(t, got, "<p>Every Deployment and StatefulSet in the cluster: what each is doing right now, "+
-		"what Hybernate saves pausing the live ones, and what pausing the rest could save.</p>")
+	assert.Contains(t, got, "<p>Every Deployment and StatefulSet scanned, except 1 it couldn't judge, which the "+
+		"notes list: what each is doing right now, what Hybernate saves pausing the live ones, and what pausing the "+
+		"rest could save.</p>", "the table leaves out what the scan couldn't judge, and -n limits it")
 	assert.Contains(t, got, "with their own CPU threshold and idle-after", "the details are in the method section")
 	assert.Contains(t, got, `<span class="line"><span class="sh-cmd">kubectl</span> label statefulset postgres `+
 		`<span class="sh-flag">-n</span> preview-42 <span class="sh-key">hybernate.io/managed</span>=`+
@@ -158,6 +156,20 @@ func TestWriteHTML_History(t *testing.T) {
 		"enable the one dry-run measured")
 	assert.NotContains(t, got, "<script src", "nothing loads from elsewhere")
 	assert.NotContains(t, got, "<link", "nothing loads from elsewhere")
+}
+
+// A workload that ran four pods all week and runs one now could save more
+// a month than it costs now. The share is of what it cost over the same
+// history, so it's never over 100%.
+func TestHeadlineFor_SavingsShareIsOfTheirOwnCost(t *testing.T) {
+	totals := discovery.Totals{Workloads: 1, MonthlyCost: 36.5, SavingsBasis: 146,
+		Replayed: discovery.ReplayTotals{Workloads: 1, Sleepers: 1, MonthlyFreed: 145}}
+
+	h, _ := headlineFor(totals, "the last 7 days")
+
+	require.Len(t, h.Figures, 2)
+	assert.Equal(t, "$145", h.Figures[1].Value)
+	assert.Equal(t, "99% of what these workloads cost over the same time", h.Figures[1].Detail)
 }
 
 func TestWriteHTML_ByNamespace(t *testing.T) {
@@ -237,12 +249,65 @@ func TestWriteHTML_Snapshot(t *testing.T) {
 func TestWriteHTMLFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.html")
 
-	require.NoError(t, writeHTMLFile(path, historyResult(), time.Hour))
+	written, err := writeHTMLFile(path, historyResult(), time.Hour)
 
+	require.NoError(t, err)
+	assert.Equal(t, path, written)
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "Workload scan")
-	assert.Error(t, writeHTMLFile(filepath.Join(t.TempDir(), "missing", "report.html"), historyResult(), time.Hour))
+	_, err = writeHTMLFile(filepath.Join(t.TempDir(), "missing", "report.html"), historyResult(), time.Hour)
+	assert.Error(t, err)
+}
+
+// The report names the cluster's workloads, so a temporary one is a new
+// file only the user can read, never one someone else made or linked.
+func TestWriteHTMLFile_Temporary(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	predictable := filepath.Join(dir, "hybernate-scan-20261003-090000.html")
+	target := filepath.Join(dir, "elsewhere")
+	require.NoError(t, os.Symlink(target, predictable))
+
+	first, err := writeHTMLFile("", historyResult(), time.Hour)
+	require.NoError(t, err)
+	second, err := writeHTMLFile("", historyResult(), time.Hour)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, first, second, "each scan its own file")
+	assert.NotEqual(t, predictable, first)
+	assert.NoFileExists(t, target, "a planted link isn't followed")
+	info, err := os.Stat(first)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	assert.Regexp(t, `^hybernate-scan-\d+\.html$`, filepath.Base(first))
+}
+
+// The report opens where the user sits: not on a Mac or Windows machine
+// they've reached over SSH, nor on Linux without a display, which X
+// forwarding gives an SSH session.
+func TestCanBrowseOn(t *testing.T) {
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		want bool
+	}{
+		{name: "a Mac", goos: "darwin", want: true},
+		{name: "a Mac over SSH", goos: "darwin", env: map[string]string{"SSH_CONNECTION": "10.0.0.2 51234 10.0.0.9 22"}},
+		{name: "Windows over SSH", goos: "windows", env: map[string]string{"SSH_TTY": "/dev/pts/0"}},
+		{name: "Windows", goos: "windows", want: true},
+		{name: "Linux without a display", goos: "linux"},
+		{name: "a Linux desktop", goos: "linux", env: map[string]string{"WAYLAND_DISPLAY": "wayland-0"}, want: true},
+		{name: "Linux over SSH with X forwarding", goos: "linux",
+			env: map[string]string{"SSH_TTY": "/dev/pts/0", "DISPLAY": "localhost:10.0"}, want: true},
+		{name: "another OS", goos: "plan9"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, canBrowseOn(tt.goos, func(k string) string { return tt.env[k] }))
+		})
+	}
 }
 
 func TestWriteReport(t *testing.T) {
@@ -300,7 +365,7 @@ func TestWriteReport(t *testing.T) {
 			assert.Contains(t, stderr.String(), files[0])
 			if tt.wantOpened {
 				assert.Equal(t, files[0], opened)
-				assert.Equal(t, "hybernate-scan-20261003-090000.html", filepath.Base(files[0]))
+				assert.Regexp(t, `^hybernate-scan-\d+\.html$`, filepath.Base(files[0]))
 			} else {
 				assert.Empty(t, opened)
 			}
@@ -322,4 +387,24 @@ func TestWriteHTML_SleptThisMonth(t *testing.T) {
 	assert.Contains(t, got, "Slept this month")
 	assert.Contains(t, got, `61h<span class="sub">3 wakes<br>since Oct 1</span>`)
 	assert.Contains(t, got, "<dt>Slept</dt>")
+}
+
+func TestRoundedDuration(t *testing.T) {
+	tests := map[time.Duration]string{
+		0:                                     "0s",
+		10 * time.Second:                      "10s",
+		30 * time.Second:                      "30s",
+		time.Minute + 10*time.Second:          "1m10s",
+		time.Hour:                             "1h",
+		90 * time.Minute:                      "1h30m",
+		2*time.Hour + 5*time.Second:           "2h5s",
+		20 * time.Minute:                      "20m",
+		48 * time.Hour:                        "48h",
+		1500 * time.Millisecond:               "2s",
+		-time.Hour:                            "-1h",
+		time.Hour + time.Minute + time.Second: "1h1m1s",
+	}
+	for in, want := range tests {
+		assert.Equal(t, want, roundedDuration(in), in.String())
+	}
 }

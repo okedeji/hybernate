@@ -96,11 +96,6 @@ var (
 		Help: "Total regime changes detected by the prediction engine.",
 	}, []string{"namespace", "workload"})
 
-	AutomationSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hybernate_automation_skipped_total",
-		Help: "Total times automation was skipped due to manual desiredState override.",
-	}, []string{"namespace", "workload"})
-
 	DryrunActions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_dryrun_actions_total",
 		Help: "Total actions that would have been taken in dry-run mode.",
@@ -115,9 +110,18 @@ var (
 // --- Doorman ---
 
 var (
+	// DoormanWakes counts connections the doorman accepted for a paused
+	// workload, by how each ended: success (passed to a Ready pod), page (a
+	// browser got the waking-up page), timeout (no Ready pod within maxWait),
+	// error (Ready pods couldn't be reached, or the wake couldn't be
+	// stamped), canceled (the caller left, or the doorman shut down, while
+	// it was held), ignored (a health check, a scrape, or a connection that
+	// sent nothing), limited (refused by a cap on held connections or
+	// wakes), and refused (the route is draining and nothing is Ready).
 	DoormanWakes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hybernate_doorman_wakes_total",
-		Help: "Connections the doorman held for a paused workload, by result (success, timeout, error).",
+		Help: "Connections the doorman accepted for a paused workload, by result " +
+			"(success, page, timeout, error, canceled, ignored, limited, refused).",
 	}, []string{"namespace", "workload", "result"})
 
 	DoormanWaitSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -128,7 +132,17 @@ var (
 
 	DoormanHeldConnections = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "hybernate_doorman_held_connections",
-		Help: "Connections the doorman is holding or proxying right now.",
+		Help: "Connections the doorman is holding while their workload wakes.",
+	})
+
+	DoormanProxiedConnections = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_doorman_proxied_connections",
+		Help: "Connections the doorman has passed to a woken workload and is still carrying.",
+	})
+
+	DoormanPortConflicts = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hybernate_doorman_port_conflicts",
+		Help: "Doorman ports claimed by more than one route, which the doorman refuses to serve.",
 	})
 )
 
@@ -151,7 +165,6 @@ func init() {
 		// Tier 3
 		IdleSeconds,
 		PredictionRegimeChanges,
-		AutomationSkipped,
 		DryrunActions,
 		TargetUnavailable,
 
@@ -159,5 +172,34 @@ func init() {
 		DoormanWakes,
 		DoormanWaitSeconds,
 		DoormanHeldConnections,
+		DoormanProxiedConnections,
+		DoormanPortConflicts,
 	)
+}
+
+// perWorkload are the vectors with series for each ManagedWorkload, labelled
+// by its namespace and name.
+var perWorkload = []interface {
+	DeletePartialMatch(labels prometheus.Labels) int
+}{
+	WorkloadPhase,
+	PredictionConfidence,
+	PredictionPhase,
+	PredictionDataPoints,
+	PredictionAnomalies,
+	IdleDetections,
+	IdleSeconds,
+	PredictionRegimeChanges,
+	TargetUnavailable,
+	DoormanWakes,
+}
+
+// DeleteWorkload drops every series of a deleted ManagedWorkload, so its
+// gauges stop reporting it and one recreated under the same name starts
+// afresh.
+func DeleteWorkload(namespace, workload string) {
+	labels := prometheus.Labels{"namespace": namespace, "workload": workload}
+	for _, v := range perWorkload {
+		v.DeletePartialMatch(labels)
+	}
 }

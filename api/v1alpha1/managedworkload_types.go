@@ -24,6 +24,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Saved",type=string,JSONPath=`.status.cost.savedThisMonth`,description="Saved by pausing this month (UTC)"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ManagedWorkload declares a workload whose lifecycle is managed by Hybernate.
@@ -53,24 +54,13 @@ func init() {
 
 // --- Spec ---
 
-// +kubebuilder:validation:Enum=Running;Paused
-type DesiredState string
-
-const (
-	DesiredStateRunning DesiredState = "Running"
-	DesiredStatePaused  DesiredState = "Paused"
-)
-
 // ManagedWorkloadSpec defines the desired lifecycle behavior for a workload.
 type ManagedWorkloadSpec struct {
-	// Target identifies the workload to manage (e.g. a Deployment or StatefulSet).
+	// Target identifies the workload to manage (e.g. a Deployment or
+	// StatefulSet). It can't be changed, since a paused target would be left
+	// at zero: create another ManagedWorkload to manage another workload.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="target is immutable; create another ManagedWorkload to manage another workload"
 	Target WorkloadRef `json:"target"`
-
-	// DesiredState overrides automation and forces the workload into the given
-	// state. When set, the operator stops evaluating the idle policy and
-	// drives the workload to this state instead.
-	// +optional
-	DesiredState *DesiredState `json:"desiredState,omitempty"`
 
 	// IdlePolicy configures automatic pausing: the operator pauses the
 	// workload once it has had no activity for IdlePolicy.IdleAfter.
@@ -171,12 +161,19 @@ type WorkloadRef struct {
 
 // PredictionSpec configures the Holt-Winters forecasting engine.
 type PredictionSpec struct {
-	// Confidence is the minimum accuracy percentage (0-100) required before
-	// the prediction engine transitions from suggesting (shadow mode) to
-	// actively driving decisions.
-	// +kubebuilder:validation:Minimum=0
+	// Confidence is the accuracy percentage (50-100) a season's forecasts
+	// must reach before they drive decisions rather than only being
+	// reported. Accuracy is 1 - WAPE: 75 means the forecast's total error
+	// over the window is 25% of the demand in it. A season that falls 5
+	// points below it stops driving decisions until it earns it again. The
+	// minimum is 50 because below that a forecast that is wrong more than it
+	// is right would wake workloads and hold off pauses. The default of 75
+	// starts acting on a weekday pattern after about a week; a higher bar
+	// takes longer to reach, for little more accuracy, since a wrong forecast
+	// only wakes a workload early or keeps it up an hour longer.
+	// +kubebuilder:validation:Minimum=50
 	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=85
+	// +kubebuilder:default=75
 	Confidence int `json:"confidence"`
 }
 
@@ -206,7 +203,7 @@ type IdlePolicySpec struct {
 type ActivitySpec struct {
 	// CPUThreshold is the CPU utilization, as a percentage of the workload's
 	// CPU requests, above which the workload counts as active.
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=10
 	// +optional
@@ -279,7 +276,8 @@ type ManagedWorkloadStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Pause holds state while the workload is paused.
+	// Pause records what pausing changed, from before the workload is scaled
+	// to zero until it's running again.
 	// +optional
 	Pause *PauseStatus `json:"pause,omitempty"`
 
@@ -319,6 +317,12 @@ type ManagedWorkloadStatus struct {
 	// is true.
 	// +optional
 	DryRun *DryRunStatus `json:"dryRun,omitempty"`
+
+	// LastPauseRequest is the last hybernate.io/pause-requested value
+	// Hybernate acted on, so each request is acted on once, across restarts.
+	// The PauseRequest condition says what came of it.
+	// +optional
+	LastPauseRequest string `json:"lastPauseRequest,omitempty"`
 
 	// LastActedAt is when the operator last mutated the target workload
 	// (pause or resume).
@@ -459,8 +463,15 @@ type DryRunStatus struct {
 	// is Idle, is added when it ends.
 	Slept metav1.Duration `json:"slept"`
 
-	// EstimatedSavings is what the replicas freed during Slept would have
-	// cost, at the workload's cost rates.
+	// FreedCPUHours and FreedMemoryHours are the vCPU-hours and GiB-hours
+	// the replicas requested during Slept: what the would-be pauses would
+	// have freed. They're kept to a billionth of an hour, so short pauses
+	// of small workloads add up.
+	FreedCPUHours    resource.Quantity `json:"freedCPUHours"`
+	FreedMemoryHours resource.Quantity `json:"freedMemoryHours"`
+
+	// EstimatedSavings is the freed hours priced at the workload's cost
+	// rates, to the cent. It's for display: the hours are the record.
 	EstimatedSavings string `json:"estimatedSavings"`
 
 	// Resources is what the workload ran when the current would-be pause
@@ -469,29 +480,33 @@ type DryRunStatus struct {
 	Resources *ResourceSnapshot `json:"resources,omitempty"`
 }
 
-// ResourceSnapshot captures the workload's resource profile at the moment of a
-// lifecycle action so savings can be calculated without querying the target.
+// ResourceSnapshot is what a workload runs, read at one moment, so it can be
+// priced later without reading the target again.
 type ResourceSnapshot struct {
 	// Replicas is the replica count at the time of the snapshot.
 	Replicas int32 `json:"replicas"`
 
-	// CPUMillis is total CPU request in millicores per replica.
-	CPUMillis int64 `json:"cpuMillis"`
-
-	// MemoryBytes is total memory request in bytes per replica.
+	// CPUMillis and MemoryBytes are what one replica's pod requests,
+	// sidecars injected when it was created included.
+	CPUMillis   int64 `json:"cpuMillis"`
 	MemoryBytes int64 `json:"memoryBytes"`
 
-	// StorageBytes is total PVC provisioned capacity in bytes.
+	// StorageBytes is the capacity of the PersistentVolumeClaims the
+	// workload's pods mount, in all.
 	StorageBytes int64 `json:"storageBytes"`
 }
 
-// PauseStatus records state while the workload is paused.
+// PauseStatus records what a pause changed, so it can be undone exactly. It's
+// written before the workload is scaled to zero, so a pause interrupted at
+// any point is finished or undone from it.
 type PauseStatus struct {
 	// PreviousReplicas is the replica count before pausing, used to
 	// restore on resume.
 	PreviousReplicas int32 `json:"previousReplicas"`
 
-	// PausedAt is when the workload was paused.
+	// PausedAt is when the workload was scaled to zero. Unset while the
+	// pause is under way.
+	// +optional
 	PausedAt *metav1.Time `json:"pausedAt,omitempty"`
 
 	// ScaledObject is the KEDA ScaledObject held at zero while the workload
@@ -499,10 +514,31 @@ type PauseStatus struct {
 	// +optional
 	ScaledObject string `json:"scaledObject,omitempty"`
 
+	// ScaledObjectPausedReplicas is the ScaledObject's own
+	// autoscaling.keda.sh/paused-replicas annotation from before the pause,
+	// put back when it's released. Unset when it had none.
+	// +optional
+	ScaledObjectPausedReplicas *string `json:"scaledObjectPausedReplicas,omitempty"`
+
 	// Resources captures the workload's resource profile at pause time
 	// for cost savings calculation.
 	// +optional
 	Resources *ResourceSnapshot `json:"resources,omitempty"`
+
+	// WakeAnnotations are the activity annotations as the pause began. One
+	// that has changed since wakes the workload whatever time it states, so
+	// a clock behind the operator's can't lose a wake.
+	// +optional
+	WakeAnnotations *WakeAnnotations `json:"wakeAnnotations,omitempty"`
+}
+
+// WakeAnnotations are the hybernate.io/last-activity, last-request and
+// active-until annotations, by name, on the ManagedWorkload and its target.
+type WakeAnnotations struct {
+	// +optional
+	Workload map[string]string `json:"workload,omitempty"`
+	// +optional
+	Target map[string]string `json:"target,omitempty"`
 }
 
 // PredictionStatus reflects the current state of the Holt-Winters engine's
@@ -512,40 +548,105 @@ type PredictionStatus struct {
 	// (Observing, Suggesting, or Active).
 	DailyPhase string `json:"dailyPhase"`
 
-	// DailyConfidence is the daily season's prediction accuracy percentage.
+	// DailyConfidence is the forecast's accuracy over the last 24 observed
+	// hours, as a percentage.
 	DailyConfidence int `json:"dailyConfidence"`
 
 	// WeeklyPhase is the weekly season's lifecycle phase
 	// (Observing, Suggesting, or Active).
 	WeeklyPhase string `json:"weeklyPhase"`
 
-	// WeeklyConfidence is the weekly season's prediction accuracy percentage.
+	// WeeklyConfidence is the forecast's accuracy over the last 168
+	// observed hours, a whole week of weekdays and weekend, as a percentage.
 	WeeklyConfidence int `json:"weeklyConfidence"`
+
+	// State is what the forecasting engine has learned, compressed and
+	// encoded, so that it survives an operator restart. It is written with
+	// each hourly observation. State that can't be read is discarded, with a
+	// warning event, and the engine starts learning again.
+	// +optional
+	State string `json:"state,omitempty"`
 }
 
-// CostStatus holds accumulated resource cost data for the current billing period.
+// CostStatus is what the workload has cost, and what pausing it has saved,
+// this calendar month in UTC.
+//
+// Everything is priced on what the workload's pods request, sidecars
+// injected when they were created included, rather than on what they use:
+// requests are what a pod reserves on a node, so they're what the workload
+// costs in capacity, and what a cluster autoscaler can remove once it's
+// paused.
+//
+// The resource-hours are the record, kept to a billionth of an hour. The
+// dollar figures are derived from them at the workload's current rates
+// whenever they're brought up to date, and are rounded to the cent for
+// display, so CostThisMonth plus SavedThisMonth is
+// CostWithoutHybernateThisMonth to within a cent.
 type CostStatus struct {
-	// CurrentMonthCPUHours is total vCPU-hours consumed this month.
-	CurrentMonthCPUHours resource.Quantity `json:"currentMonthCPUHours"`
+	// Tracked is how much of the month the totals cover. It's less than
+	// the time since the month began when the workload was created during
+	// the month, or when the operator wasn't running.
+	Tracked metav1.Duration `json:"tracked"`
 
-	// CurrentMonthMemoryHours is total GiB-hours of memory consumed this month.
-	CurrentMonthMemoryHours resource.Quantity `json:"currentMonthMemoryHours"`
+	// LastAccumulatedAt is when the totals were last brought up to date:
+	// at every phase change, so time counts in the phase it was spent in,
+	// and every few minutes in between. A longer gap, such as while the
+	// operator wasn't running, counts as two hours at most, since what the
+	// workload did meanwhile isn't known.
+	// +optional
+	LastAccumulatedAt *metav1.Time `json:"lastAccumulatedAt,omitempty"`
 
-	// CurrentMonthStorageHours is total GiB-hours of PVC storage provisioned this month.
-	CurrentMonthStorageHours resource.Quantity `json:"currentMonthStorageHours"`
+	// AwakeCPUHours and AwakeMemoryHours are the vCPU-hours and GiB-hours
+	// the workload's replicas requested while it was awake, in any phase
+	// but Paused.
+	AwakeCPUHours    resource.Quantity `json:"awakeCPUHours"`
+	AwakeMemoryHours resource.Quantity `json:"awakeMemoryHours"`
 
-	// EstimatedMonthlyCost is the projected cost for the full month based
-	// on current usage patterns. Set to "pending" on day 1 of the month.
-	EstimatedMonthlyCost string `json:"estimatedMonthlyCost"`
+	// StorageHours is the GiB-hours its claims provisioned, awake or
+	// paused: a pause doesn't free storage.
+	StorageHours resource.Quantity `json:"storageHours"`
 
-	// EstimatedMonthlySavings is the projected dollar amount saved by Hybernate
-	// pauses this month. These savings are only
-	// realized when freed resources lead to node removal by a cluster autoscaler.
-	EstimatedMonthlySavings string `json:"estimatedMonthlySavings"`
+	// PausedCPUHours and PausedMemoryHours are the vCPU-hours and GiB-hours
+	// the replicas Hybernate paused had requested, for as long as they were
+	// paused: what pausing freed.
+	PausedCPUHours    resource.Quantity `json:"pausedCPUHours"`
+	PausedMemoryHours resource.Quantity `json:"pausedMemoryHours"`
 
-	// EstimatedCostWithoutManagement is what this workload would have cost
-	// without Hybernate — the sum of estimated cost and estimated savings.
-	EstimatedCostWithoutManagement string `json:"estimatedCostWithoutManagement"`
+	// CostThisMonth is the awake hours and the storage hours, priced.
+	CostThisMonth string `json:"costThisMonth"`
+
+	// SavedThisMonth is the paused hours, priced. It becomes money only
+	// once a cluster autoscaler removes the capacity a pause frees.
+	SavedThisMonth string `json:"savedThisMonth"`
+
+	// CostWithoutHybernateThisMonth is what the workload would have cost
+	// this month had it never been paused: CostThisMonth plus
+	// SavedThisMonth.
+	CostWithoutHybernateThisMonth string `json:"costWithoutHybernateThisMonth"`
+
+	// ProjectedMonthlyCost and ProjectedMonthlySavings are CostThisMonth
+	// and SavedThisMonth carried from Tracked to the whole month at the
+	// same rate. They're "pending" until a day has been tracked, since a
+	// workload's pattern is daily.
+	ProjectedMonthlyCost    string `json:"projectedMonthlyCost"`
+	ProjectedMonthlySavings string `json:"projectedMonthlySavings"`
+
+	// Running is what the workload ran when the totals were last brought
+	// up to date while it was awake, which its awake time is priced on.
+	// Its replicas and storage are read each time, and what a replica
+	// requests at PricedAt.
+	// +optional
+	Running *ResourceSnapshot `json:"running,omitempty"`
+
+	// PricedAt is when what a replica requests and ListRates were last
+	// read, from the workload's pods and their nodes. They're read again
+	// hourly while it's awake, and when its pod template changes.
+	// +optional
+	PricedAt *metav1.Time `json:"pricedAt,omitempty"`
+
+	// PricedTemplateHash is the pod template's hash at PricedAt.
+	// +optional
+	PricedTemplateHash string `json:"pricedTemplateHash,omitempty"`
 
 	// ListRates are the on-demand list rates of the nodes the workload's
 	// pods last ran on, from their instance type and region, which its cost
@@ -556,15 +657,10 @@ type CostStatus struct {
 	// +optional
 	ListRates *CostRates `json:"listRates,omitempty"`
 
-	// ResourceReduction tracks the concrete resources freed by Hybernate actions.
-	// Unlike cost estimates, these values are always accurate regardless of
-	// whether a cluster autoscaler removes the underlying nodes.
+	// ResourceReduction is what the current pause freed. Unlike the dollar
+	// figures, it doesn't depend on a cluster autoscaler removing nodes.
 	// +optional
 	ResourceReduction *ResourceReduction `json:"resourceReduction,omitempty"`
-
-	// LastAccumulatedAt is when costs were last accumulated.
-	// +optional
-	LastAccumulatedAt *metav1.Time `json:"lastAccumulatedAt,omitempty"`
 }
 
 // ResourceReduction tracks the workload-level resources freed by Hybernate

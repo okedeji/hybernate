@@ -35,6 +35,11 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: doorman
+        env:
+        - name: MEMORY_LIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
@@ -56,15 +61,49 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            memory: 256Mi
           requests:
             cpu: 10m
-            memory: 32Mi
+            memory: 64Mi
       serviceAccountName: doorman
       terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            control-plane: doorman
+            app.kubernetes.io/name: hybernate
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            control-plane: doorman
+            app.kubernetes.io/name: hybernate
+---
+# Keeps one doorman serving through node drains.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: doorman
+  namespace: system
+  labels:
+    control-plane: doorman
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      control-plane: doorman
+      app.kubernetes.io/name: hybernate
 ---
 # The operator finds the Ready doorman pods through this Service's
-# EndpointSlices, and points paused workloads' Services at them.
+# EndpointSlices, and points paused workloads' Services at them. On a
+# dual-stack cluster it needs both families, or it can't route the other
+# family's Services.
 apiVersion: v1
 kind: Service
 metadata:
@@ -75,11 +114,12 @@ metadata:
     app.kubernetes.io/name: hybernate
     app.kubernetes.io/managed-by: kustomize
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     control-plane: doorman
     app.kubernetes.io/name: hybernate
   ports:
-  - name: metrics
+  - name: https
     port: 8443
     protocol: TCP
     targetPort: 8443

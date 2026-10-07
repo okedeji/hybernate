@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -31,8 +32,9 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
 
-func depsCmd() *cobra.Command {
+func depsCmd(kube *kubeFlags) *cobra.Command {
 	var namespace string
+	timeout := time.Minute
 	cmd := &cobra.Command{
 		Use:   "deps NAME",
 		Short: "Show what a workload depends on, and what depends on it",
@@ -42,26 +44,34 @@ on it. Each says where the link comes from, a dependsOn or what Hybernate
 learned from the workload's environment, and what the other workload is
 doing now.
 
+NAME is the workload, as status shows it, such as api or statefulset/postgres,
+or its ManagedWorkload's name.
+
 Examples:
   # What postgres is kept awake for, and what api needs
   kubectl hybernate deps postgres -n preview-42
   kubectl hybernate deps api -n preview-42`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			k8s, defaultNamespace, err := buildClient()
+			if err := checkPositive("timeout", timeout); err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+			defer cancel()
+			k8s, at, err := kube.client(ctx)
 			if err != nil {
 				return fmt.Errorf("building kubernetes client: %w", err)
 			}
 			if namespace == "" {
-				namespace = defaultNamespace
+				namespace = at.namespace
 			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
-			defer cancel()
-			return deps(ctx, k8s, client.ObjectKey{Namespace: namespace, Name: args[0]}, cmd.OutOrStdout())
+			err = deps(ctx, k8s, client.ObjectKey{Namespace: namespace, Name: args[0]}, cmd.OutOrStdout())
+			return timedOut(ctx, err, timeout)
 		},
 	}
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "",
-		"Namespace of the ManagedWorkload (defaults to the kubeconfig context's)")
+		"Namespace of the workload (defaults to the kubeconfig context's)")
+	addTimeoutFlag(cmd, &timeout, "How long to wait for the cluster before giving up")
 	return cmd
 }
 
@@ -116,13 +126,14 @@ func targetOf(w *v1alpha1.ManagedWorkload) depRef {
 	return depRef{w.Namespace, w.Spec.Target.Kind, w.Spec.Target.Name}
 }
 
-// deps prints what a ManagedWorkload depends on and what depends on it.
-// Dependents can be in any namespace, so every ManagedWorkload is read;
-// without access to them all, only the workload's own namespace is.
+// deps prints what a workload depends on and what depends on it. key names
+// the workload or its ManagedWorkload. Dependents can be in any namespace,
+// so every ManagedWorkload is read; without access to them all, only the
+// workload's own namespace is.
 func deps(ctx context.Context, c client.Client, key client.ObjectKey, out io.Writer) error {
-	var w v1alpha1.ManagedWorkload
-	if err := c.Get(ctx, key, &w); err != nil {
-		return fmt.Errorf("getting ManagedWorkload %s: %w", key, err)
+	w, err := findManaged(ctx, c, key.Namespace, key.Name)
+	if err != nil {
+		return err
 	}
 	var all v1alpha1.ManagedWorkloadList
 	partial := false
@@ -150,11 +161,11 @@ func deps(ctx context.Context, c client.Client, key client.ObjectKey, out io.Wri
 	}
 	anyLearned := false
 
-	self := targetOf(&w)
+	self := targetOf(w)
 	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintf(tw, "%s (%s, %s)\n", self, self.kind, phase(self))
+	_, _ = fmt.Fprintf(tw, "%s (%s, %s)\n", self, self.kind, cmp.Or(string(w.Status.Phase), "-"))
 	_, _ = fmt.Fprintln(tw, "Depends on:")
-	needs := links(&w)
+	needs := links(w)
 	if len(needs) == 0 {
 		_, _ = fmt.Fprintln(tw, "  nothing")
 	}

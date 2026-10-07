@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,8 +29,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
@@ -83,7 +87,7 @@ func TestLearnDependencies(t *testing.T) {
 		wantAddress string
 	}{
 		{name: "an address in a variable", target: apiWith(nil, databaseURL),
-			want: []string{"default/postgres DATABASE_URL"}, wantAddress: "postgres://app:***@postgres:5432/app"},
+			want: []string{"default/postgres DATABASE_URL"}, wantAddress: "postgres://***@postgres:5432/app"},
 		{name: "a headless address from a ConfigMap", target: func() *appsv1.Deployment {
 			d := apiWith(nil)
 			d.Spec.Template.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{
@@ -144,6 +148,45 @@ func TestLearnDependencies_WhenToRelearn(t *testing.T) {
 	assert.True(t, api.Status.LearnedDependencies.At.After(relearnedAt.Time), "an hour on")
 }
 
+// What's learned is announced once it's recorded, so a write that fails
+// and is retried doesn't announce it twice.
+func TestLearnDependencies_AnnouncedOnceRecorded(t *testing.T) {
+	target := apiWith(nil, corev1.EnvVar{Name: "DATABASE_URL", Value: "postgres:5432"})
+	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
+	r := depReconciler(t, &stubPauser{}, append(databases(), api, target)...)
+	fail := true
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if fail {
+				return errors.New("conflict")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		}})
+	recorder := r.Recorder.(*events.FakeRecorder)
+	learnedEvents := func() int {
+		n := 0
+		for len(recorder.Events) > 0 {
+			if strings.Contains(<-recorder.Events, ReasonDependenciesLearned) {
+				n++
+			}
+		}
+		return n
+	}
+
+	require.Error(t, r.learnDependencies(context.Background(), api.DeepCopy(), target))
+	assert.Zero(t, learnedEvents(), "not announced before it's recorded")
+
+	fail = false
+	require.NoError(t, r.learnDependencies(context.Background(), api, target))
+	assert.Equal(t, 1, learnedEvents())
+	assert.Equal(t, []string{"default/postgres DATABASE_URL"}, learnedNames(fetch(t, r, "api")), "and recorded")
+
+	r.clock = func() time.Time { return fixedTime.Add(2 * time.Hour) }
+	require.NoError(t, r.learnDependencies(context.Background(), api, target))
+	assert.Zero(t, learnedEvents(), "learning the same again says nothing")
+}
+
 func TestDependencyRefs(t *testing.T) {
 	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning,
 		v1alpha1.DependencyRef{Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres", WaitForReady: true})
@@ -184,7 +227,7 @@ func TestLearnedDependencies_HoldAndWake(t *testing.T) {
 		postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
 		r := depReconciler(t, &stubPauser{resumeDone: true}, api, postgres, postgresTarget(1, 1))
 
-		_, err := r.handleResume(context.Background(), api)
+		_, err := r.handleResume(context.Background(), api, nil)
 		require.NoError(t, err)
 
 		assert.Equal(t, fixedTime.UTC().Format(time.RFC3339),
@@ -316,4 +359,44 @@ func TestLearnFromWake_WatchedNamespaces(t *testing.T) {
 	require.NoError(t, r.learnFromWake(context.Background(), postgres))
 
 	assert.Equal(t, []string{"default/postgres "}, learnedNames(fetch(t, r, "api")))
+}
+
+// The first dependency a workload learns may come from a wake, before it
+// has learned any from its environment. What's written then must pass the
+// CRD's validation, which the fake client doesn't check.
+func TestLearnFromWake_FirstLearnedIsValid(t *testing.T) {
+	cfg := startEnvtest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	scheme := testScheme(t)
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+
+	labels := map[string]string{"app": "api"}
+	container := corev1.Container{Name: "app", Image: "api:v1"}
+	require.NoError(t, c.Create(ctx, &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{container}}}},
+	}))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-x2", Namespace: "default", Labels: labels},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{container}}}
+	require.NoError(t, c.Create(ctx, pod))
+	pod.Status.PodIP = senderIP
+	pod.Status.PodIPs = []corev1.PodIP{{IP: senderIP}}
+	require.NoError(t, c.Status().Update(ctx, pod))
+	api := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85}},
+	}
+	require.NoError(t, c.Create(ctx, api))
+
+	r := &Reconciler{Client: c, PodReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(20),
+		clock: func() time.Time { return fixedTime }}
+	require.NoError(t, r.learnFromWake(ctx, wokenPostgres()))
+
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(api), api))
+	assert.Equal(t, []string{"default/postgres "}, learnedNames(api))
 }

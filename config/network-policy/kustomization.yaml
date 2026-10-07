@@ -1,2 +1,6 @@
+# Applied on its own, after config/default, with
+# kubectl apply -k config/network-policy.
+namespace: hybernate-system
+
 resources:
 - allow-metrics-traffic.yaml

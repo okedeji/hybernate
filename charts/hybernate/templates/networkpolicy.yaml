@@ -1,4 +1,13 @@
+{{- if and .Values.doorman.networkPolicy.ingressFrom (not .Values.networkPolicy.enabled) }}
+{{- fail "doorman.networkPolicy.ingressFrom needs networkPolicy.enabled: true; without it no policy is created and the doorman stays open to everyone" }}
+{{- end }}
 {{- if .Values.networkPolicy.enabled }}
+{{- /*
+Only pods in namespaces labelled metrics=enabled may scrape the operator
+and the doorman. The doorman's routing ports are open to the callers in
+doorman.networkPolicy.ingressFrom, or to everyone when it's empty, since
+every client of a paused workload's Services is sent to them.
+*/}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -20,4 +29,36 @@ spec:
       ports:
         - port: {{ .Values.metrics.port }}
           protocol: TCP
+{{- if .Values.doorman.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "hybernate.doormanSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              metrics: enabled
+      ports:
+        - port: {{ .Values.metrics.port }}
+          protocol: TCP
+    - ports:
+        - port: 20000
+          endPort: 29999
+          protocol: TCP
+      {{- with .Values.doorman.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
 {{- end }}

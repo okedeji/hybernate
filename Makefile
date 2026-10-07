@@ -44,8 +44,7 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	@# The Helm chart ships its own copy of the CRDs; keep it identical.
-	cp config/crd/bases/*.yaml charts/hybernate/crds/
+	./hack/chart-crds.sh config/crd/bases charts/hybernate/templates/crds
 
 .PHONY: prices
 prices: ## Regenerate the on-demand list prices nodes are priced at, before each release
@@ -67,11 +66,10 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
+# The e2e setup assumes Kind is installed, and builds and loads the manager
+# image itself. KIND_NODE_IMAGE picks the Kubernetes version.
 KIND_CLUSTER ?= hybernate-test-e2e
+KIND_NODE_IMAGE ?=
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -84,7 +82,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+			$(KIND) create cluster --name $(KIND_CLUSTER) $(if $(KIND_NODE_IMAGE),--image $(KIND_NODE_IMAGE)) ;; \
 	esac
 
 E2E_IMAGES ?= curlimages/curl:8.7.1 registry.k8s.io/pause:3.10 registry.k8s.io/metrics-server/metrics-server:v0.7.2 \
@@ -115,12 +113,58 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	@# parallel against the one cluster, through the Ginkgo CLI, which go
 	@# test can't do.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go run github.com/onsi/ginkgo/v2/ginkgo -p --procs=$(E2E_PROCS) \
-		--tags=e2e --timeout=40m -v ./test/e2e/
+		--tags=e2e --timeout=60m -v ./test/e2e/
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-helm-smoke
-test-helm-smoke: ## Install the Helm chart with watchNamespaces into Kind and check it works with only namespaced Roles
+test-helm-smoke: ## Install the Helm chart with watchNamespaces into Kind, and pause and wake a workload through the doorman
 	KIND=$(KIND) ./hack/helm-smoke.sh
+
+PROMETHEUS_IMAGE ?= prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+
+.PHONY: test-alerts
+test-alerts: ## Unit-test the chart's and config/prometheus's alert rules with promtool
+	@dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; \
+	cp tests/prometheus/*_test.yaml "$$dir"; \
+	go run ./hack/promrules < config/prometheus/alerts.yaml > "$$dir/kustomize.rules.yaml"; \
+	helm template hybernate charts/hybernate --set metrics.prometheusRule.enabled=true \
+		--show-only templates/prometheusrule.yaml | go run ./hack/promrules > "$$dir/chart.rules.yaml"; \
+	$(CONTAINER_TOOL) run --rm --user "$$(id -u):$$(id -g)" -v "$$dir:/rules" -w /rules --entrypoint promtool $(PROMETHEUS_IMAGE) \
+		test rules $$(cd "$$dir" && ls *_test.yaml)
+
+.PHONY: check-chart
+check-chart: ## Lint the Helm chart, render it for each provider's Kubernetes versions, and check its RBAC matches config/rbac
+	helm lint charts/hybernate --strict
+	@for v in v1.30.0 v1.30.2-eks-1552ad0 v1.31.1-gke.1678000 v1.32.5 v1.34.1; do \
+		echo "rendering for Kubernetes $$v"; \
+		helm template hybernate charts/hybernate --kube-version $$v >/dev/null || exit 1; \
+	done
+	@! helm template hybernate charts/hybernate --kube-version v1.29.9 >/dev/null 2>&1 || { \
+		echo "the chart installs on Kubernetes 1.29, below the 1.30 it supports"; exit 1; }
+	@for d in 0s 0.0m 0h0m0s; do \
+		! helm template hybernate charts/hybernate --set defaults.idleAfter=$$d >/dev/null 2>&1 || { \
+			echo "the chart accepts defaults.idleAfter=$$d, which the operator refuses to start with"; exit 1; }; \
+	done
+	@for d in 1h30m 0.5s 0h5m; do \
+		helm template hybernate charts/hybernate --set defaults.idleAfter=$$d >/dev/null || exit 1; \
+	done
+	@helm template hybernate charts/hybernate --set networkPolicy.enabled=true \
+		--set 'doorman.networkPolicy.ingressFrom[0].namespaceSelector.matchLabels.team=checkout' \
+		--show-only templates/networkpolicy.yaml | grep -q 'team: checkout' || { \
+		echo "doorman.networkPolicy.ingressFrom doesn't reach the doorman's NetworkPolicy"; exit 1; }
+	@! helm template hybernate charts/hybernate \
+		--set 'doorman.networkPolicy.ingressFrom[0].namespaceSelector.matchLabels.team=checkout' >/dev/null 2>&1 || { \
+		echo "the chart accepts doorman.networkPolicy.ingressFrom without networkPolicy.enabled, which leaves the doorman open"; exit 1; }
+	helm template hybernate charts/hybernate | go run ./hack/rbaccheck config/rbac/role.yaml
+	helm template hybernate charts/hybernate --set 'watchNamespaces={shop,blog}' | go run ./hack/rbaccheck config/rbac/role.yaml
+
+.PHONY: verify-generated
+verify-generated: manifests generate ## Fail if generated code or manifests, or go.mod, aren't up to date
+	@git diff --exit-code -- api config charts || { \
+		echo "Generated files are out of date; run make manifests generate and commit the result."; exit 1; }
+	@test -z "$$(git status --porcelain -- api config charts)" || { \
+		git status --porcelain -- api config charts; echo "Generated files are untracked; commit them."; exit 1; }
+	go mod tidy -diff
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
@@ -146,19 +190,33 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 ##@ Versioning
 
+# The docs that name the current release, for installing or verifying it.
+# docs/operations/upgrading.md isn't one: its versions are history.
+VERSIONED_DOCS = README.md docs/getting-started/installation.md docs/reference/helm-values.md docs/reference/security.md
+
 .PHONY: bump
-bump: ## Bump version across Chart.yaml, Krew manifest, and docs. Usage: make bump VERSION=0.1.2
+bump: ## Bump the version in the chart, the kustomize image, and docs. Usage: make bump VERSION=0.1.2
 	@if [ -z "$(VERSION)" ]; then echo "VERSION is required. Usage: make bump VERSION=0.1.2"; exit 1; fi
+	@old=$$(awk '/^version:/ {print $$2}' charts/hybernate/Chart.yaml); \
+	OLD="$$old" NEW="$(VERSION)" perl -pi -e 's/(?<![\d.])\Q$$ENV{OLD}\E(?!\.?[\w-])/$$ENV{NEW}/g' $(VERSIONED_DOCS)
 	@perl -pi -e 's/^version:.*/version: $(VERSION)/' charts/hybernate/Chart.yaml
-	@perl -pi -e 's/^appVersion:.*/appVersion: "$(VERSION)"/' charts/hybernate/Chart.yaml
-	@perl -pi -e 's|version: v[\d]+\.[\d]+\.[\d]+|version: v$(VERSION)|' plugins/hybernate.yaml
-	@perl -pi -e 's|/download/v[\d]+\.[\d]+\.[\d]+/|/download/v$(VERSION)/|g' plugins/hybernate.yaml
-	@perl -pi -e 's|--version v[\d]+\.[\d]+\.[\d]+|--version v$(VERSION)|g' README.md docs/getting-started/installation.md docs/reference/helm-values.md
+	@perl -pi -e 's/^appVersion:.*/appVersion: "v$(VERSION)"/' charts/hybernate/Chart.yaml
+	@perl -pi -e 's/^  newTag:.*/  newTag: v$(VERSION)/' config/manager/kustomization.yaml
 	@echo "Bumped to $(VERSION)"
+
+.PHONY: verify-version
+verify-version: ## Fail unless the chart, the kustomize image, and the docs name VERSION. Usage: make verify-version VERSION=0.1.2
+	@if [ -z "$(VERSION)" ]; then echo "VERSION is required. Usage: make verify-version VERSION=0.1.2"; exit 1; fi
+	@grep -qx 'version: $(VERSION)' charts/hybernate/Chart.yaml || { echo "Chart.yaml's version isn't $(VERSION)"; exit 1; }
+	@grep -qx 'appVersion: "v$(VERSION)"' charts/hybernate/Chart.yaml || { echo "Chart.yaml's appVersion isn't v$(VERSION)"; exit 1; }
+	@grep -qx '  newTag: v$(VERSION)' config/manager/kustomization.yaml || { echo "config/manager's image isn't v$(VERSION)"; exit 1; }
+	@for f in $(VERSIONED_DOCS); do \
+		grep -qF -- '$(VERSION)' "$$f" || { echo "$$f doesn't name $(VERSION); run make bump VERSION=$(VERSION)"; exit 1; }; \
+	done
 
 .PHONY: release
 release: bump ## Bump version, commit, and tag. Usage: make release VERSION=0.1.2
-	@git add charts/hybernate/Chart.yaml plugins/hybernate.yaml README.md docs/getting-started/installation.md docs/reference/helm-values.md
+	@git add charts/hybernate/Chart.yaml config/manager/kustomization.yaml $(VERSIONED_DOCS)
 	@git commit -m "chore(release): bump version to v$(VERSION)"
 	@git tag -a v$(VERSION) -m "v$(VERSION)"
 	@echo "Tagged v$(VERSION). Run 'git push origin main v$(VERSION)' to release."

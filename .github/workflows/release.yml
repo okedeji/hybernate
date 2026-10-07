@@ -13,41 +13,59 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # The chart's version and appVersion, the kustomize image, and the docs'
+  # install and verify commands are committed with the release (make release
+  # does it), so installing from the tagged source gets the image the tag
+  # publishes.
+  versions:
+    name: Versions match the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - env:
+          TAG: ${{ github.ref_name }}
+        run: make verify-version VERSION="${TAG#v}"
+
+  # make release commits the version bump and tags it without a pull
+  # request, so the tag gets every check a pull request does.
   test:
     name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
-      - run: make test
-      - run: make vulncheck
+    needs: [versions]
+    uses: ./.github/workflows/test.yml
+
+  lint:
+    name: Lint
+    needs: [versions]
+    uses: ./.github/workflows/lint.yml
 
   # Scanned before anything is pushed: once the release job pushes, the
-  # version's tag and latest already point at the image.
-  scan:
-    name: Image vulnerabilities
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - run: docker build -t hybernate:scan .
-      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: hybernate:scan
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
+  # version's tag already points at the image.
+  security:
+    name: Security
+    needs: [versions]
+    uses: ./.github/workflows/security.yml
+
+  e2e:
+    name: E2E
+    needs: [versions]
+    uses: ./.github/workflows/test-e2e.yml
+
+  helm-smoke:
+    name: Helm smoke
+    needs: [versions]
+    uses: ./.github/workflows/helm-smoke.yml
 
   release:
     name: Build and Release
-    needs: [test, scan]
+    needs: [test, lint, security, e2e, helm-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write # the GitHub release
       packages: write # the image and chart in GHCR
       id-token: write # keyless signing
       attestations: write # build provenance
+    env:
+      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -65,9 +83,24 @@ jobs:
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Extract version
-        id: version
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      # A pre-release, such as v0.3.0-rc.1, has a hyphen. It isn't tagged
+      # latest, so it's installed only by asking for it.
+      - name: Pick the image's tags
+        id: tags
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}"
+          {
+            echo "list<<EOF"
+            echo "${image}:${TAG}"
+            if [[ "$TAG" != *-* ]]; then echo "${image}:latest"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push multi-arch image
         id: build
@@ -76,12 +109,10 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.tags.outputs.list }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.version.outputs.tag }}
+            org.opencontainers.image.version=${{ env.TAG }}
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Attest the image's build provenance
@@ -101,75 +132,63 @@ jobs:
         uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
       - name: Generate SBOM
         run: |
-          syft ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }} -o spdx-json=sbom.spdx.json
+          syft ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }} -o spdx-json=sbom.spdx.json
 
       - name: Attach SBOM to image
         run: |
           cosign attest --yes --predicate sbom.spdx.json --type spdxjson ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
 
+      # Static, so the Linux binaries run on Alpine and Amazon Linux as well
+      # as glibc distributions, and krew-index requires the LICENSE in each.
       - name: Build kubectl-hybernate plugin binaries
         run: |
-          for os in linux darwin; do
-            for arch in amd64 arm64; do
-              GOOS=$os GOARCH=$arch go build -o kubectl-hybernate-${os}-${arch} ./cmd/kubectl-hybernate
-              tar czf kubectl-hybernate-${os}-${arch}.tar.gz kubectl-hybernate-${os}-${arch}
-            done
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os=${platform%/*}
+            arch=${platform#*/}
+            ext=""
+            if [ "$os" = windows ]; then ext=.exe; fi
+            bin=kubectl-hybernate-${os}-${arch}${ext}
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=${TAG}" \
+              -o "$bin" ./cmd/kubectl-hybernate
+            tar czf "kubectl-hybernate-${os}-${arch}.tar.gz" "$bin" LICENSE
           done
 
-      - name: Generate Krew manifest with checksums
+      - name: Generate and validate the Krew manifest
         run: |
-          TAG=${{ steps.version.outputs.tag }}
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
-
-          cat > krew-hybernate.yaml <<EOF
-          apiVersion: krew.googlecontainertools.github.com/v1alpha2
-          kind: Plugin
-          metadata:
-            name: hybernate
-          spec:
-            version: ${TAG}
-            homepage: https://github.com/${{ github.repository }}
-            shortDescription: Find idle workloads, and wake paused ones
-            description: |
-              Hybernate pauses idle Kubernetes workloads and wakes them when
-              they're used. The plugin scans your clusters for idle Deployments
-              and StatefulSets and what they cost, wakes paused workloads, and
-              ends dry-run for workloads Hybernate is measuring.
-            platforms:
-          EOF
-
-          for os in linux darwin; do
-            for arch in amd64 arm64; do
-              sha=$(sha256sum kubectl-hybernate-${os}-${arch}.tar.gz | cut -d' ' -f1)
-              cat >> krew-hybernate.yaml <<PLATFORM
-              - selector:
-                  matchLabels:
-                    os: ${os}
-                    arch: ${arch}
-                uri: ${BASE_URL}/kubectl-hybernate-${os}-${arch}.tar.gz
-                sha256: "${sha}"
-                bin: kubectl-hybernate-${os}-${arch}
-          PLATFORM
-            done
-          done
+          mkdir -p krew
+          ./hack/krew-manifest.sh "$TAG" "${{ github.repository }}" > krew/hybernate.yaml
+          # The release's archives aren't uploaded yet, so installing from
+          # the manifest's URIs is left to krew-index's own checks.
+          GOBIN="$PWD/krew" go install sigs.k8s.io/krew/cmd/validate-krew-manifest@v0.5.0
+          ./krew/validate-krew-manifest -manifest krew/hybernate.yaml -skip-install
+          cp krew/hybernate.yaml krew-hybernate.yaml
 
       - name: Generate install manifest
         run: |
-          make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
+          make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
 
+      # The chart's version is the tag without its v, as Chart.yaml has it.
       - name: Package, push, and sign Helm chart
         run: |
-          helm package charts/hybernate --version ${{ steps.version.outputs.tag }} --app-version ${{ steps.version.outputs.tag }}
+          helm package charts/hybernate --version "${TAG#v}" --app-version "${TAG}"
           helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts 2>&1 | tee helm-push.log
           digest=$(awk '/^Digest:/ {print $2}' helm-push.log)
           test -n "$digest"
           cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/hybernate@${digest}
 
-      - name: Sign the release files' checksums
+      # The release uploads each file under its base name, so they're hashed
+      # from one directory: checksums.txt then names them as users download
+      # them, and sha256sum --check finds each one beside it.
+      - name: Collect the release files
         run: |
-          sha256sum dist/install.yaml hybernate-*.tgz kubectl-hybernate-*.tar.gz krew-hybernate.yaml sbom.spdx.json \
-            > checksums.txt
-          cosign sign-blob --yes --bundle checksums.txt.sigstore.json checksums.txt
+          mkdir release
+          cp dist/install.yaml hybernate-*.tgz kubectl-hybernate-*.tar.gz krew-hybernate.yaml sbom.spdx.json release/
+
+      - name: Sign the release files' checksums
+        working-directory: release
+        run: |
+          sha256sum -- * > ../checksums.txt
+          cosign sign-blob --yes --bundle ../checksums.txt.sigstore.json ../checksums.txt
 
       - name: Attest the release files' build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
@@ -184,23 +203,26 @@ jobs:
           output: vulnerabilities.txt
 
       - name: Extract changelog for release
-        id: changelog
         run: |
-          TAG=${{ steps.version.outputs.tag }}
           VERSION="${TAG#v}"
-          # Extract the section for this version from CHANGELOG.md
           awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found" CHANGELOG.md > release-notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           body_path: release-notes.md
+          prerelease: ${{ steps.tags.outputs.prerelease }}
           files: |
-            dist/install.yaml
-            hybernate-*.tgz
-            kubectl-hybernate-*.tar.gz
-            krew-hybernate.yaml
-            sbom.spdx.json
+            release/*
             checksums.txt
             checksums.txt.sigstore.json
             vulnerabilities.txt
+
+  docs:
+    name: Docs
+    needs: [release]
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/docs.yml

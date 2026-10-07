@@ -32,6 +32,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/autoscaler"
@@ -85,36 +86,69 @@ func apiWorkload() *v1alpha1.ManagedWorkload {
 }
 
 // A workload KEDA scales is held at zero by KEDA while it's paused, so KEDA
-// doesn't scale it straight back up, and released when it resumes.
+// doesn't scale it straight back up. Resuming, KEDA holds it at the restored
+// replicas until they're Ready, so a ScaledObject that may scale to zero
+// can't take it back down as it starts, then gets back whatever
+// paused-replicas the user had set.
 func TestPauseAndResume_KEDA(t *testing.T) {
-	c := kedaClient(t, readyDeployment(3), scaledObjectFor(1))
-	scaler := &fakeScaler{replicas: 3}
-	p := newTestPauser(c, scaler)
-	workload := apiWorkload()
+	tests := []struct {
+		name     string
+		previous *string
+	}{
+		{name: "no paused-replicas of its own"},
+		{name: "the user's own paused-replicas", previous: ptr.To("2")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			so := scaledObjectFor(0)
+			if tt.previous != nil {
+				so.SetAnnotations(map[string]string{autoscaler.PausedReplicasAnnotation: *tt.previous})
+			}
+			dep := readyDeployment(3)
+			c := kedaClient(t, dep, so)
+			scaler := &fakeScaler{replicas: 3}
+			p := newTestPauser(c, scaler)
+			workload := apiWorkload()
 
-	done, err := p.Pause(context.Background(), workload)
-	require.NoError(t, err)
-	require.True(t, done)
+			require.NoError(t, p.Prepare(context.Background(), workload))
+			done, err := p.Pause(context.Background(), workload)
+			require.NoError(t, err)
+			require.True(t, done)
 
-	assert.Equal(t, "api-scaler", workload.Status.Pause.ScaledObject)
-	v, held := pausedAnnotation(t, c)
-	assert.True(t, held)
-	assert.Equal(t, "0", v)
-	assert.Equal(t, int32(0), scaler.replicas)
+			assert.Equal(t, "api-scaler", workload.Status.Pause.ScaledObject)
+			assert.Equal(t, tt.previous, workload.Status.Pause.ScaledObjectPausedReplicas)
+			v, held := pausedAnnotation(t, c)
+			assert.True(t, held)
+			assert.Equal(t, "0", v)
+			assert.Equal(t, int32(0), scaler.replicas)
 
-	done, err = p.Resume(context.Background(), workload)
-	require.NoError(t, err)
-	require.True(t, done)
+			dep.Status.ReadyReplicas = 0
+			require.NoError(t, c.Status().Update(context.Background(), dep))
+			done, err = p.Resume(context.Background(), workload)
+			require.NoError(t, err)
+			require.False(t, done)
+			v, _ = pausedAnnotation(t, c)
+			assert.Equal(t, "3", v, "held at the restored replicas while they start")
 
-	_, held = pausedAnnotation(t, c)
-	assert.False(t, held, "KEDA scales it again")
-	assert.Equal(t, int32(3), scaler.replicas)
-	assert.Nil(t, workload.Status.Pause)
+			dep.Status.ReadyReplicas = 3
+			require.NoError(t, c.Status().Update(context.Background(), dep))
+			done, err = p.Resume(context.Background(), workload)
+			require.NoError(t, err)
+			require.True(t, done)
+
+			v, held = pausedAnnotation(t, c)
+			assert.Equal(t, tt.previous != nil, held)
+			if tt.previous != nil {
+				assert.Equal(t, *tt.previous, v, "the user's own value is put back")
+			}
+			assert.Equal(t, int32(3), scaler.replicas)
+		})
+	}
 }
 
-// What a workload resumes to stays within its autoscaler's range, and is
-// at least one: a ScaledObject that may go to zero would otherwise leave a
-// woken workload at zero until a trigger fired.
+// What a workload resumes to stays within its autoscaler's range. One that
+// was at zero before its pause, such as one KEDA had scaled to zero, goes
+// back to zero, and KEDA's triggers start it as they would have.
 func TestResume_WithinTheAutoscalersRange(t *testing.T) {
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
@@ -129,7 +163,9 @@ func TestResume_WithinTheAutoscalersRange(t *testing.T) {
 	}{
 		{name: "below an HPA's minimum", objs: []client.Object{hpa}, previous: 2, want: 4},
 		{name: "above its maximum", objs: []client.Object{hpa}, previous: 12, want: 8},
-		{name: "KEDA down to zero", objs: []client.Object{scaledObjectFor(0)}, previous: 0, want: 1},
+		{name: "KEDA that may go to zero", objs: []client.Object{scaledObjectFor(0)}, previous: 1, want: 1},
+		{name: "at zero before the pause", objs: []client.Object{scaledObjectFor(0)}, previous: 0, want: 0},
+		{name: "at zero before the pause, below an HPA's minimum", objs: []client.Object{hpa}, previous: 0, want: 0},
 		{name: "no autoscaler", previous: 5, want: 5},
 	}
 	for _, tt := range tests {
@@ -139,9 +175,10 @@ func TestResume_WithinTheAutoscalersRange(t *testing.T) {
 			workload := apiWorkload()
 			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: tt.previous}
 
-			_, err := newTestPauser(c, scaler).Resume(context.Background(), workload)
+			done, err := newTestPauser(c, scaler).Resume(context.Background(), workload)
 
 			require.NoError(t, err)
+			assert.True(t, done)
 			assert.Equal(t, tt.want, scaler.replicas)
 		})
 	}
@@ -157,9 +194,38 @@ func TestPause_HPAIsntHeld(t *testing.T) {
 	c := kedaClient(t, readyDeployment(3), hpa)
 	workload := apiWorkload()
 
-	done, err := newTestPauser(c, &fakeScaler{replicas: 3}).Pause(context.Background(), workload)
+	p := newTestPauser(c, &fakeScaler{replicas: 3})
+	require.NoError(t, p.Prepare(context.Background(), workload))
+	done, err := p.Pause(context.Background(), workload)
 
 	require.NoError(t, err)
 	require.True(t, done)
 	assert.Empty(t, workload.Status.Pause.ScaledObject)
+}
+
+// A resume retried while its pods start doesn't annotate a ScaledObject
+// that already holds the replicas it's resuming to.
+func TestResume_HoldsKEDAOnce(t *testing.T) {
+	dep := readyDeployment(0)
+	dep.Status.ReadyReplicas = 0
+	patches := 0
+	c := interceptor.NewClient(kedaClient(t, dep, scaledObjectFor(0)).(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			patches++
+			return c.Patch(ctx, obj, patch, opts...)
+		}})
+	workload := apiWorkload()
+	workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3, ScaledObject: "api-scaler"}
+	p := newTestPauser(c, &fakeScaler{})
+
+	for range 3 {
+		done, err := p.Resume(context.Background(), workload)
+		require.NoError(t, err)
+		require.False(t, done)
+	}
+
+	assert.Equal(t, 1, patches)
+	v, _ := pausedAnnotation(t, c)
+	assert.Equal(t, "3", v)
 }

@@ -39,11 +39,12 @@ spec:
             - --health-probe-bind-address=:8081
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
-            {{- if .Values.metrics.secure }}
-            - --metrics-secure
-            {{- end }}
+            - --metrics-secure={{ .Values.metrics.secure }}
             {{- end }}
             - --zap-log-level={{ .Values.logLevel }}
+            - --zap-encoder={{ .Values.logEncoder }}
+            - --max-concurrent-reconciles={{ .Values.maxConcurrentReconciles }}
+            - --timezone={{ .Values.timezone }}
             {{- with .Values.watchNamespaces }}
             - --watch-namespaces={{ join "," . }}
             {{- end }}
@@ -62,12 +63,19 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: MEMORY_LIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
           ports:
             {{- if .Values.metrics.enabled }}
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
             {{- end }}
+            - name: probes
+              containerPort: 8081
+              protocol: TCP
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -76,13 +84,13 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8081
+              port: probes
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8081
+              port: probes
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:

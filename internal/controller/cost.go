@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -33,115 +34,205 @@ import (
 
 const bytesPerGiB = 1024 * 1024 * 1024
 
+// pricingInterval is how long what a replica requests, and the list rates
+// of the nodes it runs on, are kept before they're read from its pods
+// again. Requests change with a deploy, which changes the pod template and
+// prompts a read of its own, so this mostly catches pods moving to another
+// node type.
+const pricingInterval = time.Hour
+
+// accumulateCost brings the workload's cost up to date once status is due a
+// flush. Doing it on every check would read the target and its claims each
+// minute only for the totals to be dropped unwritten.
 func (r *Reconciler) accumulateCost(ctx context.Context, workload *v1alpha1.ManagedWorkload) {
+	if c := workload.Status.Cost; c != nil && c.LastAccumulatedAt != nil &&
+		r.now().Sub(c.LastAccumulatedAt.Time) < statusFlushInterval {
+		return
+	}
+	r.settleCost(ctx, workload)
+}
+
+// settleCost counts the time since cost was last brought up to date in the
+// workload's current phase. A transition settles before it changes the
+// phase, so a pause is counted as paused right up to the wake.
+func (r *Reconciler) settleCost(ctx context.Context, workload *v1alpha1.ManagedWorkload) {
 	if r.metrics == nil {
 		return
 	}
-
-	logger := log.FromContext(ctx)
 	now := r.now()
-
 	if workload.Status.Cost == nil {
 		workload.Status.Cost = &v1alpha1.CostStatus{}
 	}
+	c := workload.Status.Cost
+	startMonth(c, now)
 
-	// Monthly reset. Compare year+month so a cross-year or backwards clock
-	// jump still rolls the bucket over instead of silently appending to the
-	// previous month's totals.
-	if last := workload.Status.Cost.LastAccumulatedAt; last != nil {
-		if last.Year() != now.Year() || last.Month() != now.Month() {
-			workload.Status.Cost = &v1alpha1.CostStatus{ListRates: workload.Status.Cost.ListRates}
-		}
+	from := now
+	if c.LastAccumulatedAt != nil {
+		from = c.LastAccumulatedAt.Time
+	}
+	elapsed := cost.Counted(now.Sub(from))
+
+	if workload.Status.Phase == v1alpha1.PhasePaused {
+		accruePaused(c, workload.Status.Pause, elapsed)
+	} else if err := r.accrueAwake(ctx, workload, elapsed, now); err != nil {
+		log.FromContext(ctx).V(1).Info("not accumulating cost", "workload", workload.Name,
+			"namespace", workload.Namespace, "error", err.Error())
+		return
 	}
 
-	phase := workload.Status.Phase
-	if phase != v1alpha1.PhasePaused {
-		r.recordListRates(ctx, workload)
-	}
-	rates := resolveCostRates(workload)
+	c.Tracked.Duration += elapsed
+	c.LastAccumulatedAt = &metav1.Time{Time: now}
+	priceCost(c, resolveCostRates(workload), now)
 
-	elapsed := time.Duration(0)
-	if workload.Status.Cost.LastAccumulatedAt != nil {
-		elapsed = now.Sub(workload.Status.Cost.LastAccumulatedAt.Time)
-	}
-
-	snap := cost.Snapshot{
-		CPUHours:           workload.Status.Cost.CurrentMonthCPUHours.AsApproximateFloat64(),
-		MemoryHours:        workload.Status.Cost.CurrentMonthMemoryHours.AsApproximateFloat64(),
-		StorageHours:       workload.Status.Cost.CurrentMonthStorageHours.AsApproximateFloat64(),
-		EstimatedSavedCost: parseDollarAmount(workload.Status.Cost.EstimatedMonthlySavings),
-	}
-
-	switch phase {
-	case v1alpha1.PhasePaused:
-		// No compute usage, but PVCs still cost.
-		storageGiB := float64(0)
-		if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
-			storageGiB = float64(workload.Status.Pause.Resources.StorageBytes) / bytesPerGiB
-		}
-		snap = cost.Accumulate(snap, 0, 0, storageGiB, elapsed)
-
-		// Savings: what compute would have cost if still running.
-		if workload.Status.Pause != nil && workload.Status.Pause.Resources != nil {
-			rs := workload.Status.Pause.Resources
-			replicas := float64(rs.Replicas)
-			cpuCores := replicas * float64(rs.CPUMillis) / 1000
-			memGiB := replicas * float64(rs.MemoryBytes) / bytesPerGiB
-			snap = cost.AccumulateSavings(snap, cpuCores, memGiB, elapsed, rates)
-		}
-
-	default:
-		// Running/Idle — accumulate actual usage.
-		cpuMillis, err := r.metrics.TotalCPUMillis(ctx, workload)
-		if err != nil {
-			logger.V(1).Info("skipping cpu cost accumulation", "error", err)
-			return
-		}
-		memBytes, err := r.metrics.TotalMemoryBytes(ctx, workload)
-		if err != nil {
-			logger.V(1).Info("skipping memory cost accumulation", "error", err)
-			memBytes = 0
-		}
-		pvcBytes, err := r.metrics.TotalPVCBytes(ctx, workload)
-		if err != nil {
-			logger.V(1).Info("skipping pvc cost accumulation", "error", err)
-			pvcBytes = 0
-		}
-
-		cpuCores := cpuMillis / 1000
-		memGiB := memBytes / bytesPerGiB
-		storageGiB := pvcBytes / bytesPerGiB
-
-		snap = cost.Accumulate(snap, cpuCores, memGiB, storageGiB, elapsed)
-	}
-
-	// Write back to status.
-	nowMeta := metav1.NewTime(now)
-	workload.Status.Cost.CurrentMonthCPUHours = *resource.NewMilliQuantity(int64(snap.CPUHours*1000), resource.DecimalSI)
-	workload.Status.Cost.CurrentMonthMemoryHours = *resource.NewMilliQuantity(int64(snap.MemoryHours*1000), resource.DecimalSI)
-	workload.Status.Cost.CurrentMonthStorageHours = *resource.NewMilliQuantity(int64(snap.StorageHours*1000), resource.DecimalSI)
-	workload.Status.Cost.EstimatedMonthlySavings = cost.FormatDollars(snap.EstimatedSavedCost)
-	workload.Status.Cost.LastAccumulatedAt = &nowMeta
-
-	estimate := cost.EstimateMonthlyCost(snap, rates, now.Day(), daysInMonth(now))
-	if estimate < 0 {
-		workload.Status.Cost.EstimatedMonthlyCost = "pending"
-	} else {
-		workload.Status.Cost.EstimatedMonthlyCost = cost.FormatDollars(estimate)
-	}
-
-	workload.Status.Cost.EstimatedCostWithoutManagement = cost.FormatDollars(cost.EstimatedCostWithoutManagement(snap, rates))
-
-	// Populate resource reduction from the snapshot captured at pause time.
-	workload.Status.Cost.ResourceReduction = nil
-	if p := workload.Status.Pause; phase == v1alpha1.PhasePaused && p != nil && p.Resources != nil {
+	c.ResourceReduction = nil
+	if p := workload.Status.Pause; workload.Status.Phase == v1alpha1.PhasePaused && p != nil && p.Resources != nil {
 		rs := p.Resources
-		workload.Status.Cost.ResourceReduction = &v1alpha1.ResourceReduction{
+		c.ResourceReduction = &v1alpha1.ResourceReduction{
 			CPUMillis:   rs.CPUMillis * int64(rs.Replicas),
 			MemoryBytes: rs.MemoryBytes * int64(rs.Replicas),
 			Replicas:    rs.Replicas,
 		}
 	}
+}
+
+// startMonth starts new totals when now is in a later UTC month than they
+// were last brought up to date in, counting from the start of the month so
+// the time since then isn't lost. What was last read about the workload
+// carries over. The time before the month began belonged to the last
+// month's totals, which aren't kept.
+func startMonth(c *v1alpha1.CostStatus, now time.Time) {
+	last := c.LastAccumulatedAt
+	month := cost.MonthOf(now)
+	if last == nil || cost.MonthOf(last.Time).Equal(month) {
+		return
+	}
+	*c = v1alpha1.CostStatus{
+		Running:            c.Running,
+		PricedAt:           c.PricedAt,
+		PricedTemplateHash: c.PricedTemplateHash,
+		ListRates:          c.ListRates,
+	}
+	if last.Time.Before(month) {
+		c.LastAccumulatedAt = &metav1.Time{Time: month}
+	}
+}
+
+// accruePaused counts a paused interval: what the paused replicas requested
+// is saved, and their claims still cost.
+func accruePaused(c *v1alpha1.CostStatus, pause *v1alpha1.PauseStatus, elapsed time.Duration) {
+	if pause == nil || pause.Resources == nil {
+		return
+	}
+	rs := pause.Resources
+	cores, gib := requested(rs)
+	addHours(&c.PausedCPUHours, cores, elapsed)
+	addHours(&c.PausedMemoryHours, gib, elapsed)
+	addHours(&c.StorageHours, float64(rs.StorageBytes)/bytesPerGiB, elapsed)
+}
+
+// accrueAwake counts an awake interval at what the workload runs now: its
+// replicas from the target, what each one requests, and its claims.
+func (r *Reconciler) accrueAwake(ctx context.Context, workload *v1alpha1.ManagedWorkload, elapsed time.Duration, now time.Time) error {
+	logger := log.FromContext(ctx)
+	c := workload.Status.Cost
+	running := &v1alpha1.ResourceSnapshot{}
+	if c.Running != nil {
+		*running = *c.Running
+	}
+
+	replicas, err := r.metrics.Replicas(ctx, workload)
+	if err != nil {
+		return fmt.Errorf("reading replicas: %w", err)
+	}
+	running.Replicas = replicas
+
+	if storage, err := r.metrics.TotalPVCBytes(ctx, workload); err != nil {
+		logger.V(1).Info("keeping the last storage read", "workload", workload.Name,
+			"namespace", workload.Namespace, "error", err.Error())
+	} else {
+		running.StorageBytes = int64(storage)
+	}
+
+	if pricingDue(workload, now) {
+		r.recordListRates(ctx, workload)
+		if cpuMillis, memBytes, err := r.metrics.PodRequestsPerReplica(ctx, workload); err != nil {
+			logger.V(1).Info("keeping the last requests read", "workload", workload.Name,
+				"namespace", workload.Namespace, "error", err.Error())
+		} else {
+			running.CPUMillis, running.MemoryBytes = int64(cpuMillis), int64(memBytes)
+		}
+		c.PricedAt = &metav1.Time{Time: now}
+		c.PricedTemplateHash = templateHashOf(workload)
+	}
+	c.Running = running
+
+	cores, gib := requested(running)
+	addHours(&c.AwakeCPUHours, cores, elapsed)
+	addHours(&c.AwakeMemoryHours, gib, elapsed)
+	addHours(&c.StorageHours, float64(running.StorageBytes)/bytesPerGiB, elapsed)
+	return nil
+}
+
+// pricingDue reports whether what a replica requests and its nodes' list
+// rates should be read again: they never have been, they're older than
+// pricingInterval, or the pod template has changed since.
+func pricingDue(workload *v1alpha1.ManagedWorkload, now time.Time) bool {
+	c := workload.Status.Cost
+	if c.PricedAt == nil || now.Sub(c.PricedAt.Time) >= pricingInterval {
+		return true
+	}
+	hash := templateHashOf(workload)
+	return hash != "" && hash != c.PricedTemplateHash
+}
+
+func templateHashOf(workload *v1alpha1.ManagedWorkload) string {
+	if a := workload.Status.Activity; a != nil {
+		return a.TemplateHash
+	}
+	return ""
+}
+
+// priceCost derives the dollar figures from the month's hours at rates.
+func priceCost(c *v1alpha1.CostStatus, rates cost.Rates, now time.Time) {
+	spent := cost.Hours{
+		CPU:     c.AwakeCPUHours.AsApproximateFloat64(),
+		Memory:  c.AwakeMemoryHours.AsApproximateFloat64(),
+		Storage: c.StorageHours.AsApproximateFloat64(),
+	}.Price(rates)
+	saved := cost.Hours{
+		CPU:    c.PausedCPUHours.AsApproximateFloat64(),
+		Memory: c.PausedMemoryHours.AsApproximateFloat64(),
+	}.Price(rates)
+
+	c.CostThisMonth = cost.FormatDollars(spent)
+	c.SavedThisMonth = cost.FormatDollars(saved)
+	c.CostWithoutHybernateThisMonth = cost.FormatDollars(spent + saved)
+	c.ProjectedMonthlyCost = projected(spent, c.Tracked.Duration, now)
+	c.ProjectedMonthlySavings = projected(saved, c.Tracked.Duration, now)
+}
+
+func projected(amount float64, tracked time.Duration, now time.Time) string {
+	p, ok := cost.Project(amount, tracked, now)
+	if !ok {
+		return "pending"
+	}
+	return cost.FormatDollars(p)
+}
+
+// requested is what all of rs's replicas request, in vCPUs and GiB.
+func requested(rs *v1alpha1.ResourceSnapshot) (cores, gib float64) {
+	n := float64(rs.Replicas)
+	return n * float64(rs.CPUMillis) / 1000, n * float64(rs.MemoryBytes) / bytesPerGiB
+}
+
+// addHours adds perHour over elapsed to q, to a billionth of an hour, and
+// returns what it added. Five minutes of a 10m CPU request is under a
+// thousandth of a vCPU-hour, which coarser units would round to nothing on
+// every update.
+func addHours(q *resource.Quantity, perHour float64, elapsed time.Duration) float64 {
+	n := int64(math.Round(perHour * elapsed.Hours() * 1e9))
+	q.Add(*resource.NewScaledQuantity(n, resource.Nano))
+	return float64(n) / 1e9
 }
 
 // recordListRates notes what the nodes the workload runs on cost, which it's
@@ -156,7 +247,8 @@ func (r *Reconciler) recordListRates(ctx context.Context, workload *v1alpha1.Man
 		return
 	}
 	if err != nil {
-		log.FromContext(ctx).V(1).Info("keeping the last list rates", "error", err)
+		log.FromContext(ctx).V(1).Info("keeping the last list rates", "workload", workload.Name,
+			"namespace", workload.Namespace, "error", err.Error())
 		return
 	}
 	if !listed {
@@ -175,10 +267,6 @@ func microQuantity(v float64) *resource.Quantity {
 	return resource.NewScaledQuantity(int64(math.Round(v*1e6)), resource.Micro)
 }
 
-func daysInMonth(t time.Time) int {
-	return time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, t.Location()).Day()
-}
-
 func (r *Reconciler) captureResourceSnapshot(ctx context.Context, workload *v1alpha1.ManagedWorkload) *v1alpha1.ResourceSnapshot {
 	if r.metrics == nil {
 		return nil
@@ -190,14 +278,16 @@ func (r *Reconciler) captureResourceSnapshot(ctx context.Context, workload *v1al
 	// pod reserves on a node, and what discovery estimates are based on.
 	replicas, err := r.metrics.Replicas(ctx, workload)
 	if err != nil {
-		logger.V(1).Info("could not capture replicas for resource snapshot", "error", err)
+		logger.V(1).Info("could not capture replicas for resource snapshot", "workload", workload.Name,
+			"namespace", workload.Namespace, "error", err.Error())
 	} else {
 		snap.Replicas = replicas
 	}
 
 	cpuMillis, memBytes, err := r.metrics.PodRequestsPerReplica(ctx, workload)
 	if err != nil {
-		logger.V(1).Info("could not capture requests for resource snapshot", "error", err)
+		logger.V(1).Info("could not capture requests for resource snapshot", "workload", workload.Name,
+			"namespace", workload.Namespace, "error", err.Error())
 	} else {
 		snap.CPUMillis = int64(cpuMillis)
 		snap.MemoryBytes = int64(memBytes)
@@ -205,7 +295,8 @@ func (r *Reconciler) captureResourceSnapshot(ctx context.Context, workload *v1al
 
 	pvcBytes, err := r.metrics.TotalPVCBytes(ctx, workload)
 	if err != nil {
-		logger.V(1).Info("could not capture pvc for resource snapshot", "error", err)
+		logger.V(1).Info("could not capture pvc for resource snapshot", "workload", workload.Name,
+			"namespace", workload.Namespace, "error", err.Error())
 	} else {
 		snap.StorageBytes = int64(pvcBytes)
 	}

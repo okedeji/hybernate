@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "if": {
+    "properties": {"leaderElection": {"properties": {"enabled": {"const": false}}}}
+  },
+  "then": {
+    "properties": {"replicaCount": {"maximum": 1}}
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "nameOverride": {"type": "string"},
+    "fullnameOverride": {"type": "string"},
+    "crds": {
+      "type": "object",
+      "properties": {
+        "install": {"type": "boolean"}
+      }
+    },
+    "replicaCount": {"type": "integer", "minimum": 1},
+    "leaderElection": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "maxConcurrentReconciles": {"type": "integer", "minimum": 1},
+    "timezone": {"type": "string", "minLength": 1},
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "secure": {"type": "boolean"},
+        "readerSubjects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "name"],
+            "properties": {
+              "kind": {"enum": ["ServiceAccount", "User", "Group"]},
+              "name": {"type": "string", "minLength": 1},
+              "namespace": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "prometheus": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "pattern": "^(https?://.+)?$"}
+      }
+    },
+    "watchNamespaces": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "protectedNamespaces": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "idleAfter": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "not": {"pattern": "^([0.]+(ns|us|µs|ms|s|m|h))+$"}
+        },
+        "cpuThreshold": {"type": "integer", "minimum": 1, "maximum": 100},
+        "dryRun": {"type": "boolean"}
+      }
+    },
+    "doorman": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "replicaCount": {"type": "integer", "minimum": 1},
+        "healthCheckUserAgents": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "pattern": "^[^,]+$"}
+        },
+        "podDisruptionBudget": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"}
+          }
+        },
+        "topologySpreadConstraints": {"type": "array"},
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "ingressFrom": {"type": "array", "items": {"type": "object", "minProperties": 1}},
+            "egress": {
+              "type": "object",
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "podCIDRs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "apiServer": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "apiServerPorts": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {"type": "integer", "minimum": 1, "maximum": 65535}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "logLevel": {
+      "anyOf": [
+        {"enum": ["debug", "info", "error", "panic"]},
+        {"type": "integer", "minimum": 1}
+      ]
+    },
+    "logEncoder": {"enum": ["json", "console"]}
+  }
+}

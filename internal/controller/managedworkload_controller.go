@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -32,10 +31,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
@@ -53,6 +56,17 @@ const (
 	// deletion re-triggers it immediately via the sibling watch, but an owner
 	// that is retargeted only emits an event carrying its new target.
 	duplicateRecheckInterval = 5 * time.Minute
+
+	// targetRecheckInterval is how often a workload whose target is missing
+	// or ignored is looked at again, as a fallback to the target watch.
+	targetRecheckInterval = time.Minute
+
+	// reconcileTimeout bounds every call one reconcile makes, so a Kubernetes,
+	// metrics or Prometheus endpoint that stops answering can't hold a worker,
+	// and every workload queued behind it, forever.
+	reconcileTimeout = 2 * time.Minute
+
+	reasonDryRunWake = "DryRunWake"
 )
 
 // Reconciler drives ManagedWorkload objects through their lifecycle.
@@ -62,12 +76,18 @@ type Reconciler struct {
 	Recorder      events.EventRecorder
 	PrometheusURL string
 
+	// MaxConcurrentReconciles is how many workloads are reconciled at once.
+	// Zero means one.
+	MaxConcurrentReconciles int
+
 	// DoormanService and DoormanNamespace locate the doorman, whose Ready
 	// pods paused workloads' Services are routed to. Empty disables it.
 	DoormanService   string
 	DoormanNamespace string
 
-	// PodReader reads pods without caching them. Defaults to Client.
+	// PodReader reads from the API server what the cache leaves out: pods,
+	// Services' own EndpointSlices, and every workload's doorman routes.
+	// Defaults to Client.
 	PodReader client.Reader
 
 	// ProtectedNamespaces are name patterns, such as prod-*, of namespaces
@@ -78,19 +98,28 @@ type Reconciler struct {
 	// each, or every namespace when empty.
 	WatchNamespaces []string
 
-	pauser        lifecyclePauser
-	metrics       metricsReader
-	prices        listPricer
-	autoscalers   *autoscaler.Finder
-	engines       *engineRegistry
-	activityMemo  activityMemo
-	prometheusURL string
-	clock         func() time.Time
+	// Timezone is where the forecast counts hours of the day and days of
+	// the week, so that business hours stay in their slots through daylight
+	// saving changes. Nil means UTC.
+	Timezone *time.Location
+
+	pauser          lifecyclePauser
+	metrics         metricsReader
+	prices          listPricer
+	autoscalers     *autoscaler.Finder
+	engines         *engineRegistry
+	activityMemo    activityMemo
+	doormanPorts    portAllocator
+	doormanFailures failureBackoff
+	prometheusURL   string
+	clock           func() time.Time
 }
 
 type lifecyclePauser interface {
+	Prepare(ctx context.Context, workload *v1alpha1.ManagedWorkload) error
 	Pause(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error)
 	Resume(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error)
+	Restore(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error)
 }
 
 // +kubebuilder:rbac:groups=hybernate.io,resources=managedworkloads,verbs=get;list;watch;create;update;patch;delete
@@ -99,7 +128,7 @@ type lifecyclePauser interface {
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments/scale;statefulsets/scale,verbs=get;update
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
@@ -111,12 +140,20 @@ type lifecyclePauser interface {
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile evaluates the current state of a ManagedWorkload and acts on it.
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, retErr error) {
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, retErr error) {
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
 	logger := log.FromContext(ctx)
 
+	var doormanRetry time.Duration
 	defer func() {
+		res, retErr = retryIfStale(ctx, res, retErr)
 		if retErr != nil {
 			metrics.ReconcileErrors.WithLabelValues("managedworkload").Inc()
+			return
+		}
+		if doormanRetry > 0 && (res.RequeueAfter == 0 || res.RequeueAfter > doormanRetry) {
+			res.RequeueAfter = doormanRetry
 		}
 	}()
 
@@ -125,7 +162,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Handle deletion with finalizer.
 	if !workload.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.reconcileDelete(ctx, &workload)
 	}
@@ -144,23 +180,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if duplicate, err := r.checkDuplicate(ctx, &workload); err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking duplicate target: %w", err)
 	} else if duplicate {
-		return ctrl.Result{RequeueAfter: duplicateRecheckInterval}, nil
+		return r.reconcileDuplicate(ctx, &workload)
 	}
 
-	// Set initial phase.
-	if workload.Status.Phase == "" {
-		return r.transition(ctx, &workload, v1alpha1.PhaseRunning, "Created")
+	if workload.Status.Phase == "" || workload.Status.Phase == v1alpha1.PhaseCreating {
+		return ctrl.Result{}, r.transition(ctx, &workload, v1alpha1.PhaseRunning, "Created")
 	}
-
-	// --- Target check, and a scale-up outside Hybernate ---
 
 	target, err := r.checkTarget(ctx, &workload)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if target == nil {
-		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+		return r.reconcileTargetMissing(ctx, &workload)
 	}
+	if target.GetLabels()[v1alpha1.LabelIgnore] == v1alpha1.True {
+		return r.reconcileIgnored(ctx, &workload)
+	}
+	r.setCondition(&workload, conditionTargetAvailable, metav1.ConditionTrue, "TargetExists", "")
 	if err := r.wakeOnScaleUp(ctx, &workload, target); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -177,15 +214,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	// --- Wake on request ---
+	doormanRetry = r.routeDoorman(ctx, &workload, target)
 
-	if err := r.reconcileDoorman(ctx, &workload, target); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling doorman routes: %w", err)
-	}
-
-	// --- In-flight transitions ---
-
-	result, err := r.resumeTransition(ctx, &workload)
+	result, err := r.resumeTransition(ctx, &workload, target)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -193,24 +224,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return *result, nil
 	}
 
-	// --- Manual lifecycle ---
+	if atZero, err := r.scaledToZero(ctx, &workload, target); err != nil {
+		return ctrl.Result{}, err
+	} else if atZero {
+		return r.reconcileScaledToZero(ctx, &workload, observed)
+	}
 
-	result, err = r.reconcileDesiredState(ctx, &workload)
+	result, err = r.reconcilePauseRequest(ctx, &workload, target)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if result != nil {
 		return *result, nil
 	}
-
-	// --- Automation ---
 
 	result, err = r.reconcileAutomation(ctx, &workload, target)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-
-	// --- Cost tracking and status ---
 
 	r.trackDryRun(&workload)
 	r.accumulateCost(ctx, &workload)
@@ -226,68 +257,63 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 }
 
 // resumeTransition finishes a pause or resume that an earlier reconcile
-// started but didn't complete. Without it, a transient failure strands the
-// workload in the intermediate phase, because neither the manual nor the
-// automated paths act on Pausing or Resuming.
-func (r *Reconciler) resumeTransition(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
-	switch workload.Status.Phase {
-	case v1alpha1.PhasePausing:
-		return r.handlePause(ctx, workload)
-	case v1alpha1.PhaseResuming:
-		return r.handleResume(ctx, workload)
-	default:
-		return nil, nil
-	}
-}
-
-func (r *Reconciler) reconcileDesiredState(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
-	if workload.Spec.DesiredState == nil {
-		return nil, nil
-	}
-
-	desired := *workload.Spec.DesiredState
-	if desired == v1alpha1.DesiredStatePaused && isAwake(workload.Status.Phase) &&
-		workload.Status.Phase != v1alpha1.PhasePausing {
-		if err := r.warnIfDependentsAwake(ctx, workload); err != nil {
-			return nil, err
-		}
-	}
-
-	switch desired {
-	case v1alpha1.DesiredStatePaused:
-		return r.handlePause(ctx, workload)
-	case v1alpha1.DesiredStateRunning:
-		return r.handleResume(ctx, workload)
-	default:
-		return nil, nil
-	}
-}
-
-func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
+// started but didn't complete, without which a transient failure would strand
+// the workload in the intermediate phase. It also turns back a pause the
+// workload must no longer be in: dry-run never leaves a workload paused.
+func (r *Reconciler) resumeTransition(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) (*ctrl.Result, error) {
 	phase := workload.Status.Phase
-	if phase == v1alpha1.PhasePaused {
+	if workload.Spec.DryRun && (phase == v1alpha1.PhasePausing || phase == v1alpha1.PhasePaused) {
+		return r.handleResume(ctx, workload, &phaseEvent{reason: reasonDryRunWake,
+			message: "dry-run is on, so Hybernate wakes the workload it had paused"})
+	}
+	switch phase {
+	case v1alpha1.PhasePausing:
+		return r.handlePause(ctx, workload, target, nil)
+	case v1alpha1.PhaseResuming:
+		return r.handleResume(ctx, workload, nil)
+	default:
 		return nil, nil
 	}
-	if phase != v1alpha1.PhaseRunning && phase != v1alpha1.PhaseIdle && phase != v1alpha1.PhasePausing {
-		return nil, nil
-	}
+}
 
-	if phase != v1alpha1.PhasePausing {
-		if until, held := gitOpsHold(workload, r.now()); held {
-			return &ctrl.Result{RequeueAfter: until.Sub(r.now())}, nil
-		}
-		if _, err := r.transition(ctx, workload, v1alpha1.PhasePausing, "PauseRequested"); err != nil {
+// handlePause drives the workload to Paused. What the pause changes is
+// recorded in the same status write that enters Pausing, before anything is
+// scaled, so an interrupted pause is finished, or undone, from the record
+// rather than from a target that's already at zero. why, if given, is
+// announced once the workload is Pausing.
+func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object,
+	why *phaseEvent) (*ctrl.Result, error) {
+	if workload.Spec.DryRun {
+		return nil, nil
+	}
+	switch workload.Status.Phase {
+	case v1alpha1.PhaseRunning, v1alpha1.PhaseIdle:
+		if err := r.preparePause(ctx, workload, target); err != nil {
 			return nil, err
 		}
-	}
-
-	// Capture resource profile before scaling to zero for cost savings tracking.
-	if workload.Status.Pause == nil || workload.Status.Pause.Resources == nil {
-		snap := r.captureResourceSnapshot(ctx, workload)
-		if workload.Status.Pause == nil {
-			workload.Status.Pause = &v1alpha1.PauseStatus{}
+		// The cache showed replicas the target no longer has: it was scaled
+		// to zero outside Hybernate, which the next reconcile sees.
+		if workload.Status.Pause.PreviousReplicas == 0 {
+			workload.Status.Pause = nil
+			return &ctrl.Result{RequeueAfter: time.Second}, nil
 		}
-		workload.Status.Pause.Resources = snap
+		if err := r.transition(ctx, workload, v1alpha1.PhasePausing, "PauseRequested"); err != nil {
+			return nil, err
+		}
+		if why != nil {
+			r.emitEvent(workload, false, "Normal", why.reason, actionPause, "%s", why.message)
+		}
+	case v1alpha1.PhasePausing:
+		if workload.Status.Pause == nil {
+			if err := r.preparePause(ctx, workload, target); err != nil {
+				return nil, err
+			}
+			if err := r.Status().Update(ctx, workload); err != nil {
+				return nil, fmt.Errorf("recording the pause: %w", err)
+			}
+		}
+	default:
+		return nil, nil
 	}
 
 	done, err := r.pauser.Pause(ctx, workload)
@@ -295,41 +321,79 @@ func (r *Reconciler) handlePause(ctx context.Context, workload *v1alpha1.Managed
 		return nil, fmt.Errorf("pausing workload: %w", err)
 	}
 	if !done {
-		result := ctrl.Result{RequeueAfter: 5 * time.Second}
-		return &result, nil
+		return &ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	r.stampLastActed(workload)
-	r.observeActionDuration(workload, "pause")
-	result, err := r.transition(ctx, workload, v1alpha1.PhasePaused, "Paused")
-	if err != nil {
+	took := r.sinceTransition(workload)
+	if err := r.transition(ctx, workload, v1alpha1.PhasePaused, "Paused"); err != nil {
 		return nil, err
 	}
+	metrics.LifecycleActionDuration.WithLabelValues("pause").Observe(took.Seconds())
 	r.emitEvent(workload, false, "Normal", ReasonPaused, actionPause, "paused")
-	return &result, nil
+	return &ctrl.Result{RequeueAfter: r.pausedRecheck()}, nil
 }
 
-func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.ManagedWorkload) (*ctrl.Result, error) {
-	phase := workload.Status.Phase
-	if phase == v1alpha1.PhaseRunning {
-		return nil, nil
+// preparePause records in workload.Status.Pause what the pause will change,
+// for the caller to persist before acting on it.
+func (r *Reconciler) preparePause(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) error {
+	if err := r.pauser.Prepare(ctx, workload); err != nil {
+		return fmt.Errorf("preparing to pause: %w", err)
 	}
-	if phase != v1alpha1.PhasePaused && phase != v1alpha1.PhaseResuming {
-		return nil, nil
+	workload.Status.Pause.Resources = r.captureResourceSnapshot(ctx, workload)
+	workload.Status.Pause.WakeAnnotations = &v1alpha1.WakeAnnotations{
+		Workload: activityAnnotationValues(workload),
+		Target:   activityAnnotationValues(target),
 	}
+	return nil
+}
 
-	if phase != v1alpha1.PhaseResuming {
+// phaseEvent says why a workload pauses or wakes. It's emitted once the
+// workload is Pausing or Resuming, so a retried pause or wake doesn't
+// announce itself twice.
+type phaseEvent struct {
+	reason, message string
+}
+
+// handleResume drives the workload to Running: a paused one, or one pausing,
+// is scaled back up and Running once its pods are Ready; an Idle one hasn't
+// been paused yet and is simply Running again.
+func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.ManagedWorkload, why *phaseEvent) (*ctrl.Result, error) {
+	switch workload.Status.Phase {
+	case v1alpha1.PhaseIdle:
+		if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ResumeRequested"); err != nil {
+			return nil, err
+		}
+		return &ctrl.Result{}, nil
+	case v1alpha1.PhasePausing, v1alpha1.PhasePaused:
+		if workload.Status.Pause == nil {
+			if err := r.pauser.Prepare(ctx, workload); err != nil {
+				return nil, fmt.Errorf("recording what to restore: %w", err)
+			}
+			// A pause without its record was written by hand or by an older
+			// version. Hybernate scaled it to zero, so zero isn't what it
+			// had, and one is the least that runs it.
+			workload.Status.Pause.PreviousReplicas = max(workload.Status.Pause.PreviousReplicas, 1)
+		}
 		// Learning never holds up a wake.
 		if err := r.learnFromWake(ctx, workload); err != nil {
 			log.FromContext(ctx).Info("couldn't learn what sent the request that woke the workload",
 				"workload", workload.Name, "namespace", workload.Namespace, "error", err.Error())
 		}
-		if _, err := r.transition(ctx, workload, v1alpha1.PhaseResuming, "ResumeRequested"); err != nil {
-			return nil, err
-		}
+		// Woken before the phase changes, so a failure here is retried
+		// from Paused rather than skipped by a retry that finds Resuming.
 		if err := r.wakeDependencies(ctx, workload); err != nil {
 			return nil, err
 		}
+		if err := r.transition(ctx, workload, v1alpha1.PhaseResuming, "ResumeRequested"); err != nil {
+			return nil, err
+		}
+		if why != nil {
+			r.emitEvent(workload, false, "Normal", why.reason, actionResume, "%s", why.message)
+		}
+	case v1alpha1.PhaseResuming:
+	default:
+		return nil, nil
 	}
 
 	if waiting, err := r.waitForDependencies(ctx, workload); waiting != nil || err != nil {
@@ -342,23 +406,32 @@ func (r *Reconciler) handleResume(ctx context.Context, workload *v1alpha1.Manage
 		return nil, fmt.Errorf("resuming workload: %w", err)
 	}
 	if !done {
-		result := ctrl.Result{RequeueAfter: 5 * time.Second}
-		return &result, nil
+		return &ctrl.Result{RequeueAfter: resumeRecheck(r.sinceTransition(workload))}, nil
 	}
 
 	r.stampLastActed(workload)
-	r.observeActionDuration(workload, "resume")
+	took := r.sinceTransition(workload)
 	r.resetActivity(workload, source)
-	r.clearGitOpsConflict(workload)
-	result, err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed")
-	if err != nil {
+	tool, resolved := r.clearGitOpsConflict(workload)
+	if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "Resumed"); err != nil {
 		return nil, err
 	}
+	metrics.LifecycleActionDuration.WithLabelValues("resume").Observe(took.Seconds())
+	if resolved {
+		r.announceGitOpsConflictResolved(workload, tool)
+	}
 	r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume, "resumed")
-	return &result, nil
+	return &ctrl.Result{}, nil
 }
 
-// --- Finalizer ---
+// resumeRecheck is when a resume waiting for its pods to be Ready is looked
+// at again: after as long again as it has waited, from 5 seconds up to a
+// minute. Pods becoming Ready requeue it through the target watch anyway,
+// so this paces only pods that never do, each retry of which annotates the
+// ScaledObject and reads the autoscalers and the scale.
+func resumeRecheck(waited time.Duration) time.Duration {
+	return min(max(waited, 5*time.Second), time.Minute)
+}
 
 func (r *Reconciler) ensureFinalizer(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
 	if controllerutil.ContainsFinalizer(workload, finalizerName) {
@@ -373,7 +446,8 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 		return nil
 	}
 
-	if err := r.restoreBeforeDelete(ctx, workload); err != nil {
+	released, replicas, err := r.releaseTarget(ctx, workload)
+	if err != nil {
 		return err
 	}
 
@@ -381,30 +455,115 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, workload *v1alpha1.Man
 	if err := r.Update(ctx, workload); err != nil {
 		return fmt.Errorf("removing finalizer: %w", err)
 	}
+	if released {
+		r.announceHandBack(workload, replicas, "no longer managed")
+	}
 	r.activityMemo.forget(workload.UID)
-	labels := prometheus.Labels{"namespace": workload.Namespace, "workload": workload.Name}
-	metrics.WorkloadPhase.DeletePartialMatch(labels)
-	metrics.IdleSeconds.DeletePartialMatch(labels)
+	r.doormanFailures.reset(workload.UID)
+	r.forgetForecast(workload)
+	metrics.DeleteWorkload(workload.Namespace, workload.Name)
 	return nil
 }
 
-// restoreBeforeDelete scales a paused workload back to the replicas it had,
-// so that no longer managing it never leaves it switched off. It doesn't
-// wait for the pods to be Ready, which would hold up the deletion; a
-// workload that's gone has nothing to restore.
-func (r *Reconciler) restoreBeforeDelete(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	if workload.Status.Pause == nil {
-		return nil
-	}
-	if _, err := r.pauser.Resume(ctx, workload); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
+// releaseTarget is where Hybernate lets go of a target it stops managing: on
+// deletion, the ignore label and a protected namespace. A paused target, or
+// one being paused or resumed, is handed back as it was, scaled back up and
+// released from KEDA without waiting for it to be Ready, and the dependencies
+// it needs are woken. Its Services stop routing to the doorman. It reports
+// whether there was a pause to undo, and the replicas the target is left
+// with. The record is cleared by the caller's transition to Running, which
+// settles the paused time's cost from it first.
+func (r *Reconciler) releaseTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, int32, error) {
+	paused := workload.Status.Pause != nil
+	var replicas int32
+	if paused {
+		var err error
+		if replicas, err = r.pauser.Restore(ctx, workload); err != nil {
+			return false, 0, fmt.Errorf("restoring the paused target: %w", err)
 		}
-		return fmt.Errorf("restoring paused workload before deletion: %w", err)
+		if err := r.wakeDependencies(ctx, workload); err != nil {
+			return false, 0, err
+		}
 	}
-	r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume,
-		"restored to %d replicas: no longer managed", workload.Status.Pause.PreviousReplicas)
-	return nil
+	if err := r.removeDoorman(ctx, workload); err != nil {
+		return false, 0, fmt.Errorf("removing doorman routes: %w", err)
+	}
+	return paused, replicas, nil
+}
+
+// announceHandBack says what handing a paused target back did, and why. A
+// target that was at zero before its pause, or is gone, isn't scaled up.
+func (r *Reconciler) announceHandBack(workload *v1alpha1.ManagedWorkload, replicas int32, why string) {
+	if replicas == 0 {
+		r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume, "released at zero replicas: %s", why)
+		return
+	}
+	r.emitEvent(workload, false, "Normal", ReasonResumed, actionResume, "restored to %d replicas: %s", replicas, why)
+}
+
+// reconcileDuplicate leaves a target another ManagedWorkload manages to
+// that one, which the DuplicateTarget condition reports.
+func (r *Reconciler) reconcileDuplicate(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
+	c := meta.FindStatusCondition(workload.Status.Conditions, conditionDuplicateTarget)
+	if err := r.refusePauseRequest(ctx, workload, "Warning", conditionDuplicateTarget, c.Message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: duplicateRecheckInterval}, nil
+}
+
+// reconcileIgnored stops managing a target labelled hybernate.io/ignore,
+// restoring it first if it's paused, so the label never leaves it off.
+func (r *Reconciler) reconcileIgnored(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
+	ref := workload.Spec.Target
+	reported := conditionFalseWith(workload, conditionTargetAvailable, "TargetIgnored")
+	r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetIgnored",
+		fmt.Sprintf("%s %s has %s label", ref.Kind, ref.Name, v1alpha1.LabelIgnore))
+	if err := r.refusePauseRequest(ctx, workload, "Warning", "TargetIgnored", fmt.Sprintf(
+		"%s %s has the %s label, so Hybernate doesn't manage it", ref.Kind, ref.Name, v1alpha1.LabelIgnore)); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	routed := len(workload.Status.Doorman) > 0
+	released, replicas, err := r.releaseTarget(ctx, workload)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	switch {
+	case workload.Status.Phase != v1alpha1.PhaseRunning || released:
+		if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "TargetIgnored"); err != nil {
+			return ctrl.Result{}, err
+		}
+	case !reported || routed:
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating target condition: %w", err)
+		}
+	}
+	if released {
+		r.announceHandBack(workload, replicas, fmt.Sprintf("%s has the %s label", ref.Name, v1alpha1.LabelIgnore))
+	}
+	return ctrl.Result{RequeueAfter: targetRecheckInterval}, nil
+}
+
+// reconcileTargetMissing stops routing the workload's Services to the
+// doorman while its target is gone: a request held there waits for pods
+// that nothing will start, where without the doorman it fails at once.
+func (r *Reconciler) reconcileTargetMissing(ctx context.Context, workload *v1alpha1.ManagedWorkload) (ctrl.Result, error) {
+	ref := workload.Spec.Target
+	if err := r.refusePauseRequest(ctx, workload, "Warning", ReasonTargetNotFound,
+		fmt.Sprintf("%s %s not found", ref.Kind, ref.Name)); err != nil {
+		return ctrl.Result{}, err
+	}
+	routed := len(workload.Status.Doorman) > 0
+	if err := r.removeDoorman(ctx, workload); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing doorman routes: %w", err)
+	}
+	if routed {
+		r.clearCondition(workload, conditionWakeOnRequest, "TargetNotFound")
+		if err := r.Status().Update(ctx, workload); err != nil {
+			return ctrl.Result{}, fmt.Errorf("recording doorman routes removed: %w", err)
+		}
+	}
+	return ctrl.Result{RequeueAfter: targetRecheckInterval}, nil
 }
 
 func recordPhase(workload *v1alpha1.ManagedWorkload) {
@@ -414,8 +573,6 @@ func recordPhase(workload *v1alpha1.ManagedWorkload) {
 	metrics.WorkloadPhase.WithLabelValues(workload.Namespace, workload.Name, string(workload.Status.Phase)).Set(1)
 }
 
-// --- Target ---
-
 const (
 	conditionTargetAvailable  = "TargetAvailable"
 	conditionMetricsAvailable = "MetricsAvailable"
@@ -424,8 +581,8 @@ const (
 	conditionPrometheusAvailable = "PrometheusAvailable"
 )
 
-// checkTarget verifies the target workload exists. Returns the target object
-// on success, nil when not found (condition set, status updated), or an error.
+// checkTarget returns the target workload, or nil when it doesn't exist,
+// which the TargetAvailable condition reports.
 func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.ManagedWorkload) (client.Object, error) {
 	ref := workload.Spec.Target
 	nn := types.NamespacedName{Name: ref.Name, Namespace: workload.Namespace}
@@ -442,6 +599,9 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 
 	err := r.Get(ctx, nn, obj)
 	if apierrors.IsNotFound(err) {
+		if conditionFalseWith(workload, conditionTargetAvailable, "TargetNotFound") {
+			return nil, nil
+		}
 		r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetNotFound",
 			fmt.Sprintf("%s %s not found", ref.Kind, ref.Name))
 		if err := r.Status().Update(ctx, workload); err != nil {
@@ -449,24 +609,20 @@ func (r *Reconciler) checkTarget(ctx context.Context, workload *v1alpha1.Managed
 		}
 		r.emitEvent(workload, false, "Warning", ReasonTargetNotFound, actionCheckTarget,
 			"%s %s not found", ref.Kind, ref.Name)
-		metrics.TargetUnavailable.WithLabelValues(workload.Namespace, workload.Spec.Target.Name).Inc()
+		metrics.TargetUnavailable.WithLabelValues(workload.Namespace, workload.Name).Inc()
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("checking target %s %s: %w", ref.Kind, ref.Name, err)
 	}
-
-	if obj.GetLabels()[v1alpha1.LabelIgnore] == v1alpha1.True {
-		r.setCondition(workload, conditionTargetAvailable, metav1.ConditionFalse, "TargetIgnored",
-			fmt.Sprintf("%s %s has %s label", ref.Kind, ref.Name, v1alpha1.LabelIgnore))
-		if err := r.Status().Update(ctx, workload); err != nil {
-			return nil, fmt.Errorf("updating target condition: %w", err)
-		}
-		return nil, nil
-	}
-
-	r.setCondition(workload, conditionTargetAvailable, metav1.ConditionTrue, "TargetExists", "")
 	return obj, nil
+}
+
+// conditionFalseWith reports whether a problem has already been reported,
+// as the condition False for that reason.
+func conditionFalseWith(workload *v1alpha1.ManagedWorkload, condType, reason string) bool {
+	c := meta.FindStatusCondition(workload.Status.Conditions, condType)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reason
 }
 
 func replicasFromTarget(obj client.Object) int32 {
@@ -512,7 +668,11 @@ func (r *Reconciler) checkDuplicate(ctx context.Context, workload *v1alpha1.Mana
 		}
 
 		msg := fmt.Sprintf("%s/%s is already managed by %s", workload.Spec.Target.Kind, workload.Spec.Target.Name, other.Name)
-		alreadyFlagged := meta.IsStatusConditionTrue(workload.Status.Conditions, conditionDuplicateTarget)
+		previous := meta.FindStatusCondition(workload.Status.Conditions, conditionDuplicateTarget)
+		alreadyFlagged := previous != nil && previous.Status == metav1.ConditionTrue
+		if alreadyFlagged && previous.Message == msg {
+			return true, nil
+		}
 		r.setCondition(workload, conditionDuplicateTarget, metav1.ConditionTrue, conditionDuplicateTarget, msg)
 		if err := r.Status().Update(ctx, workload); err != nil {
 			return false, fmt.Errorf("updating duplicate condition: %w", err)
@@ -588,6 +748,41 @@ func (r *Reconciler) findRelatedWorkloads(ctx context.Context, obj client.Object
 	return requests
 }
 
+// findRoutedNeighbours enqueues the paused workloads in a namespace whose
+// Services the doorman routes, when another workload there changes phase.
+// One that wakes may share a Service with them, which its pods now serve,
+// so they stop routing it at once rather than at their next recheck.
+func (r *Reconciler) findRoutedNeighbours(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list v1alpha1.ManagedWorkloadList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "listing workloads sharing a namespace",
+			"workload", obj.GetName(), "namespace", obj.GetNamespace())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range list.Items {
+		w := &list.Items[i]
+		if w.UID != obj.GetUID() && w.Status.Phase == v1alpha1.PhasePaused && len(w.Status.Doorman) > 0 {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(w)})
+		}
+	}
+	return requests
+}
+
+// phaseChanged passes a ManagedWorkload's updates that change its phase.
+func phaseChanged() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			old, okOld := e.ObjectOld.(*v1alpha1.ManagedWorkload)
+			cur, okNew := e.ObjectNew.(*v1alpha1.ManagedWorkload)
+			return okOld && okNew && old.Status.Phase != cur.Status.Phase
+		},
+	}
+}
+
 // targetRefFor identifies a watched object as a ManagedWorkload target.
 // Typed objects from the cache carry no GVK, so the kind comes from the Go
 // type rather than obj.GetObjectKind().
@@ -640,10 +835,12 @@ func dependsOnTarget(workload *v1alpha1.ManagedWorkload, id workloadID) bool {
 	return false
 }
 
-// --- Helpers ---
-
-func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) (ctrl.Result, error) { //nolint:unparam
+func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedWorkload, phase v1alpha1.WorkloadPhase, reason string) error {
 	logger := log.FromContext(ctx)
+	r.settleCost(ctx, workload)
+	if phase == v1alpha1.PhaseRunning {
+		workload.Status.Pause = nil
+	}
 	old := workload.Status.Phase
 	workload.Status.Phase = phase
 
@@ -651,13 +848,13 @@ func (r *Reconciler) transition(ctx context.Context, workload *v1alpha1.ManagedW
 	workload.Status.LastTransitionTime = &now
 
 	if err := r.Status().Update(ctx, workload); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating phase to %s: %w", phase, err)
+		return fmt.Errorf("updating phase to %s: %w", phase, err)
 	}
 	metrics.WorkloadPhase.DeleteLabelValues(workload.Namespace, workload.Name, string(old))
 	recordPhase(workload)
 	metrics.LifecycleTransitions.WithLabelValues(string(old), string(phase)).Inc()
 	logger.Info("phase transition", "from", old, "to", phase, "reason", reason)
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *Reconciler) now() time.Time {
@@ -671,12 +868,12 @@ func (r *Reconciler) clockTime() metav1.Time {
 	return metav1.NewTime(r.now())
 }
 
-func (r *Reconciler) observeActionDuration(workload *v1alpha1.ManagedWorkload, action string) {
+// sinceTransition is how long the workload has been in its phase.
+func (r *Reconciler) sinceTransition(workload *v1alpha1.ManagedWorkload) time.Duration {
 	if workload.Status.LastTransitionTime == nil {
-		return
+		return 0
 	}
-	duration := r.now().Sub(workload.Status.LastTransitionTime.Time).Seconds()
-	metrics.LifecycleActionDuration.WithLabelValues(action).Observe(duration)
+	return r.now().Sub(workload.Status.LastTransitionTime.Time)
 }
 
 func (r *Reconciler) initDefaults() {
@@ -698,8 +895,8 @@ func (r *Reconciler) initDefaults() {
 		}
 	}
 	if r.engines == nil {
-		r.engines = newEngineRegistry(func(threshold int) forecaster {
-			return forecast.NewEngine(forecast.DefaultParams(), threshold)
+		r.engines = newEngineRegistry(func() forecaster {
+			return forecast.NewEngine(forecast.DefaultParams(), forecast.Settings{})
 		})
 	}
 	r.prometheusURL = r.PrometheusURL
@@ -712,11 +909,16 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ManagedWorkload{}).
 		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findRelatedWorkloads)).
+		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.findRoutedNeighbours),
+			builder.WithPredicates(phaseChanged())).
 		Watches(&appsv1.Deployment{}, targetHandler).
 		Watches(&appsv1.StatefulSet{}, targetHandler).
-		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForDoorman)).
+		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsForDoorman),
+			builder.WithPredicates(predicate.NewPredicateFuncs(r.isDoormanEndpoints))).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.findPausedWorkloadsInNamespace)).
-		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsInNamespace)).
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.findWorkloadsInNamespace),
+			builder.WithPredicates(inWatchedNamespaces(r.WatchNamespaces))).
 		Named("managedworkload").
+		WithOptions(controller.Options{MaxConcurrentReconciles: max(r.MaxConcurrentReconciles, 1)}).
 		Complete(r)
 }

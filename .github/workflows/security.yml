@@ -2,6 +2,7 @@ name: Security
 
 on:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -20,11 +21,16 @@ jobs:
       - run: make vulncheck
 
   image:
-    name: Image vulnerabilities
+    name: Image vulnerabilities (${{ matrix.platform }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - run: docker build -t hybernate:scan .
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - run: docker buildx build --platform ${{ matrix.platform }} --load -t hybernate:scan .
       # Fails on critical and high vulnerabilities with a fix available;
       # unfixed ones are reported, not blocking, so an upstream bug with no
       # fix can't hold up every pull request.

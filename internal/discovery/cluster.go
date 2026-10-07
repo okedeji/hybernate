@@ -26,18 +26,13 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
-	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
-	"github.com/okedeji/hybernate/internal/gitops"
-	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 // State is how a scan judges a workload's use.
@@ -79,13 +74,30 @@ const defaultCPUThreshold = 10
 type ClusterReport struct {
 	Mode Mode `json:"mode"`
 	// History says what the replay read, in ModeHistory.
-	History   *HistorySource `json:"history,omitempty"`
-	Workloads []Workload     `json:"workloads"`
+	History *HistorySource `json:"history,omitempty"`
+	// Namespaces is how many namespaces were scanned.
+	Namespaces int        `json:"namespaces"`
+	Workloads  []Workload `json:"workloads"`
 	// NodePrices are the node types the workloads were priced at.
 	NodePrices Prices `json:"nodePrices"`
 	// Notes say what the scan couldn't see and how that limits it.
-	Notes  []string `json:"notes,omitempty"`
-	Totals Totals   `json:"totals"`
+	Notes []string `json:"notes,omitempty"`
+	// Incomplete are the namespaces the scan couldn't read all it should
+	// have of, by why; nil when it read them all.
+	Incomplete *Incomplete `json:"incomplete,omitempty"`
+	Totals     Totals      `json:"totals"`
+}
+
+// Incomplete are the namespaces a scan couldn't read all it should have
+// of. Their workloads are missing or judged on less than they should be.
+type Incomplete struct {
+	// Missing were named to scan but don't exist.
+	Missing []string `json:"missing,omitempty"`
+	// Denied were named to scan, but the user's access doesn't allow
+	// reading their workloads.
+	Denied []string `json:"denied,omitempty"`
+	// Failed couldn't be read for another reason, such as a timeout.
+	Failed []string `json:"failed,omitempty"`
 }
 
 // Workload is one Deployment or StatefulSet as a scan sees it.
@@ -152,7 +164,7 @@ type Workload struct {
 
 // Measured is what Hybernate would have done to a workload in dry-run.
 type Measured struct {
-	Since  time.Time `json:"since"`
+	Since  time.Time `json:"since,omitzero"`
 	Pauses int       `json:"pauses"`
 	// Wakes is how many of those pauses activity would have ended, which
 	// is all of them but one still under way.
@@ -178,6 +190,11 @@ type Slept struct {
 type Totals struct {
 	Workloads   int     `json:"workloads"`
 	MonthlyCost float64 `json:"monthlyCost"`
+	// SavingsBasis is what the workloads in MonthlyCost cost a month on the
+	// basis their saving is estimated on: over the replayed history for
+	// those replayed, with the pods they ran then, and as they run now for
+	// the rest. What Replayed and Measured could save is a share of it.
+	SavingsBasis float64 `json:"savingsBasis"`
 	// Paused and PausedHourlyCost are what Hybernate has paused right now
 	// and what that frees each hour.
 	Paused           int     `json:"paused"`
@@ -233,51 +250,67 @@ type ClusterOptions struct {
 	// History, when set, is replayed over Window.
 	History *Prometheus
 	Window  time.Duration
+	// NamedNamespaces says the user named the namespaces, so one their
+	// access doesn't let the scan read is a failure to scan what was asked,
+	// not a limit to note.
+	NamedNamespaces bool
 }
 
 // ScanCluster scans every Deployment and StatefulSet in the namespaces and
 // judges each from its CPU right now, plus clues that don't need history.
 // With History, it also replays the activity clock over each workload's
 // recorded CPU. It only reads, and carries on past what it can't read,
-// saying so in the report's notes.
+// saying so in the report's notes, and listing in Incomplete the namespaces
+// it should have been able to read but couldn't.
 func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*ClusterReport, error) {
-	report := &ClusterReport{Mode: ModeSnapshot}
-	var since time.Time
+	report := &ClusterReport{Mode: ModeSnapshot, Namespaces: len(opts.Namespaces), Workloads: []Workload{}}
 	if opts.History != nil {
 		report.Mode = ModeHistory
 		report.History = &HistorySource{Prometheus: opts.History.Source}
 	}
-	haveMetrics := s.metricsAvailable(ctx, opts.Namespaces)
-	if !haveMetrics {
-		report.Notes = append(report.Notes,
-			"the Metrics API isn't available, so CPU couldn't be measured; is metrics-server installed?")
-	}
-
 	pricing, nodePrices := s.readNodePrices(ctx)
 	report.NodePrices = nodePrices
 
-	var noHistory []string
-	sources := map[workloadKey]workloadSource{}
-	for _, namespace := range opts.Namespaces {
-		history, historySince, err := s.readHistory(ctx, namespace, opts)
-		if err != nil {
-			report.Notes = append(report.Notes, fmt.Sprintf("couldn't read history for namespace %s: %v", namespace, err))
-		}
-		if history != nil && (since.IsZero() || historySince.Before(since)) {
-			since = historySince
-		}
-		workloads, err := s.scanNamespace(ctx, namespace, haveMetrics, history, historySince, sources, pricing, opts)
-		if err != nil {
-			report.Notes = append(report.Notes, fmt.Sprintf("skipped namespace %s: %v", namespace, err))
-			continue
-		}
-		for _, w := range workloads {
-			if history != nil && w.History == nil && w.State != StateUnknown {
-				noHistory = append(noHistory, w.Namespace+"/"+w.Name)
-			}
-		}
-		report.Workloads = append(report.Workloads, workloads...)
+	scans := make([]namespaceScan, len(opts.Namespaces))
+	var g errgroup.Group
+	g.SetLimit(namespaceWorkers)
+	for i, namespace := range opts.Namespaces {
+		g.Go(func() error {
+			scans[i] = s.scanNamespace(ctx, namespace, pricing, opts)
+			return nil
+		})
 	}
+	_ = g.Wait() // each namespace's problems are in its scan; none is returned
+
+	var since time.Time
+	noHistory := make([]string, 0, len(scans))
+	problems := make([]readProblem, 0, len(scans))
+	metricsUnavailable := false
+	sources := map[workloadKey]workloadSource{}
+	services := map[string]map[string]corev1.Service{}
+	for _, scan := range scans {
+		report.Workloads = append(report.Workloads, scan.workloads...)
+		problems = append(problems, scan.problems...)
+		noHistory = append(noHistory, scan.noHistory...)
+		metricsUnavailable = metricsUnavailable || scan.metricsUnavailable
+		maps.Copy(sources, scan.sources)
+		if scan.services != nil {
+			services[scan.namespace] = scan.services
+		}
+		if !scan.historySince.IsZero() && (since.IsZero() || scan.historySince.Before(since)) {
+			since = scan.historySince
+		}
+	}
+	dependencyNotes, dependencyProblems := s.findDependencies(ctx, report.Workloads, sources, services)
+	problems = append(problems, dependencyProblems...)
+
+	if metricsUnavailable {
+		report.Notes = append(report.Notes,
+			"the Metrics API isn't available, so CPU couldn't be measured; is metrics-server installed?")
+	}
+	problemNotes, incomplete := problemNotes(problems, opts.NamedNamespaces)
+	report.Notes = append(report.Notes, problemNotes...)
+	report.Incomplete = incomplete
 	if report.History != nil && !since.IsZero() {
 		report.History.Since = since
 		report.History.Hours = opts.Now().Sub(since).Hours()
@@ -288,11 +321,16 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 				duration(covered), duration(opts.Window)))
 		}
 	}
+	if opts.History != nil {
+		if note := opts.History.mixedSourcesNote(); note != "" {
+			report.Notes = append(report.Notes, note)
+		}
+	}
 	if len(noHistory) > 0 {
 		report.Notes = append(report.Notes, fmt.Sprintf("%s no CPU history in Prometheus, so only their CPU right now is known: %s",
 			plural(len(noHistory), "workload has", "workloads have"), listSome(noHistory)))
 	}
-	report.Notes = append(report.Notes, s.findDependencies(ctx, report.Workloads, sources, opts.Namespaces)...)
+	report.Notes = append(report.Notes, dependencyNotes...)
 	report.Notes = append(report.Notes, gitOpsNotes(report.Workloads)...)
 
 	slices.SortFunc(report.Workloads, func(a, b Workload) int {
@@ -336,119 +374,6 @@ const gitOpsGuide = "https://okedeji.io/hybernate/guides/gitops/"
 // stateOrder lists idle workloads first, the ones worth acting on.
 var stateOrder = map[State]int{StateIdle: 0, StatePaused: 1, StateActive: 2, StateUnknown: 3}
 
-func (s *Scanner) metricsAvailable(ctx context.Context, namespaces []string) bool {
-	if len(namespaces) == 0 {
-		return false
-	}
-	var list metricsv1beta1.PodMetricsList
-	return s.client.List(ctx, &list, client.InNamespace(namespaces[0]), client.Limit(1)) == nil
-}
-
-func (s *Scanner) scanNamespace(ctx context.Context, namespace string, haveMetrics bool,
-	history []containerCPU, historySince time.Time, sources map[workloadKey]workloadSource, pricing nodePricing,
-	opts ClusterOptions) ([]Workload, error) {
-	managed := s.managedInNamespace(ctx, namespace)
-	protected := s.protectedNamespace(ctx, namespace)
-	rollouts, err := s.rollouts(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-	now := opts.Now()
-
-	var out []Workload
-	for _, kind := range []v1alpha1.TargetKind{v1alpha1.TargetKindDeployment, v1alpha1.TargetKindStatefulSet} {
-		objs, err := s.listWorkloads(ctx, namespace, kind)
-		if err != nil {
-			return nil, fmt.Errorf("listing %ss: %w", kind, err)
-		}
-		for _, obj := range objs {
-			if obj.GetLabels()[v1alpha1.LabelIgnore] == "true" {
-				continue
-			}
-			mw := managed[string(kind)+"/"+obj.GetName()]
-			replicas, spec, matchLabels := workloadFields(obj)
-			sources[workloadKey{namespace, kind, obj.GetName()}] = workloadSource{template: podTemplate(obj), managed: mw}
-			n := int32(1)
-			if replicas != nil {
-				n = *replicas
-			}
-			w := Workload{
-				Namespace: namespace,
-				Kind:      kind,
-				Name:      obj.GetName(),
-				Replicas:  n,
-				State:     StateUnknown,
-				Managed:   mw != nil,
-				DryRun:    mw != nil && mw.Spec.DryRun,
-				Protected: protected,
-			}
-			writer, _ := gitops.ReplicasWriter(obj.GetManagedFields())
-			w.ReplicasFromGit = string(writer.Tool)
-			if times := rollouts[obj.GetUID()]; len(times) > 0 {
-				last := slices.MaxFunc(times, func(a, b time.Time) int { return a.Compare(b) })
-				w.LastDeployed = &last
-			}
-			ownCPU, ownMemory := metrics.Requests(metrics.WorkloadContainers(spec))
-			w.PodCPURequestMillis, w.PodMemoryRequestBytes = ownCPU, ownMemory
-
-			var pods []corev1.Pod
-			if n == 0 {
-				if pausedByHybernate(mw) {
-					judgePaused(&w, mw, now)
-				} else {
-					w.State, w.Reason, w.ScaledByHand = StatePaused, "scaled to zero, not by Hybernate", true
-				}
-			} else {
-				if len(matchLabels) > 0 {
-					sel := labels.SelectorFromSet(matchLabels)
-					pods = s.workloadPods(ctx, namespace, sel)
-					w.PodCPURequestMillis, w.PodMemoryRequestBytes = metrics.PodRequests(pods, spec)
-					used, measured := s.cpuUsed(ctx, namespace, sel, spec)
-					switch {
-					case !haveMetrics:
-						w.Unmeasured = "no Metrics API"
-					case ownCPU == 0:
-						w.Unmeasured = "no CPU requests"
-					case !measured:
-						w.Unmeasured = "no metrics yet"
-					default:
-						percent := int(float64(used) / float64(ownCPU*int64(n)) * 100)
-						w.CPUPercent, w.CPUMillisUsed = &percent, used
-					}
-				}
-				if mw != nil && mw.Status.Activity != nil {
-					judgeManaged(&w, mw, now, thresholdFor(mw, opts))
-				} else {
-					judgeUnmanaged(&w, obj, now, thresholdFor(mw, opts), idleAfterFor(mw, opts))
-				}
-			}
-			w.Clues = clues(w, now)
-			w.rates, w.OnSpot = pricing.ratesFor(pods, mw, opts)
-			w.HourlyCost = hourlyCost(w, w.rates)
-			w.MonthlyCost = w.HourlyCost * hoursPerMonth
-			w.Measured = measured(mw, w.HourlyCost, now)
-			w.SavedThisMonth = SavedThisMonth(mw)
-			if history != nil && ownCPU > 0 {
-				w.History = replayWorkload(w, spec, history, historySince, rollouts[obj.GetUID()],
-					thresholdFor(mw, opts), idleAfterFor(mw, opts), opts)
-			}
-			out = append(out, w)
-		}
-	}
-	return out, nil
-}
-
-// protectedNamespace says the namespace is labelled protected. The
-// operator's own protected name patterns aren't visible to the scan, so
-// only the label counts here, and a namespace it can't read isn't.
-func (s *Scanner) protectedNamespace(ctx context.Context, namespace string) bool {
-	var ns corev1.Namespace
-	if err := s.client.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil {
-		return false
-	}
-	return v1alpha1.Protected(ns.Name, ns.Labels, nil)
-}
-
 func pausedByHybernate(mw *v1alpha1.ManagedWorkload) bool {
 	return mw != nil && mw.Status.Phase == v1alpha1.PhasePaused && mw.Status.Pause != nil
 }
@@ -466,15 +391,19 @@ func measured(mw *v1alpha1.ManagedWorkload, hourlyCost float64, now time.Time) *
 		slept += max(now.Sub(mw.Status.LastTransitionTime.Time), 0)
 		wakes--
 	}
+	measuring := max(now.Sub(d.Since.Time), 0)
+	// However the recorded times line up, what it would have freed is never
+	// more than what it cost meanwhile.
+	slept = min(slept, measuring)
 	m := &Measured{
-		Since:      d.Since.Time,
+		Since:      d.Since.UTC(),
 		Pauses:     int(d.Pauses),
 		Wakes:      max(wakes, 0),
 		SleptHours: slept.Hours(),
 		Freed:      hourlyCost * slept.Hours(),
 	}
-	if measuring := now.Sub(d.Since.Time).Hours(); measuring > 0 {
-		m.MonthlyFreed = m.Freed / measuring * hoursPerMonth
+	if measuring > 0 {
+		m.MonthlyFreed = m.Freed / measuring.Hours() * hoursPerMonth
 	}
 	return m
 }
@@ -485,7 +414,7 @@ func SavedThisMonth(mw *v1alpha1.ManagedWorkload) float64 {
 	if mw == nil || mw.Spec.DryRun || mw.Status.Cost == nil {
 		return 0
 	}
-	saved, err := strconv.ParseFloat(strings.TrimPrefix(mw.Status.Cost.EstimatedMonthlySavings, "$"), 64)
+	saved, err := strconv.ParseFloat(strings.TrimPrefix(mw.Status.Cost.SavedThisMonth, "$"), 64)
 	if err != nil {
 		return 0
 	}
@@ -526,8 +455,6 @@ func judgeManaged(w *Workload, mw *v1alpha1.ManagedWorkload, now time.Time, thre
 	}
 }
 
-// judgeUnmanaged applies the activity clock's sources a scan can see
-// without Hybernate: activity annotations, a recent rollout, and CPU.
 // idleAfterFor is how long without activity makes a workload idle: its own
 // setting when Hybernate manages it, otherwise the scan's.
 func idleAfterFor(mw *v1alpha1.ManagedWorkload, opts ClusterOptions) time.Duration {
@@ -559,6 +486,8 @@ func thresholdFor(mw *v1alpha1.ManagedWorkload, opts ClusterOptions) int {
 	return defaultCPUThreshold
 }
 
+// judgeUnmanaged applies the activity clock's sources a scan can see
+// without Hybernate: activity annotations, a recent rollout, and CPU.
 func judgeUnmanaged(w *Workload, obj client.Object, now time.Time, threshold int, idleAfter time.Duration) {
 	if w.CPUPercent != nil && *w.CPUPercent >= threshold {
 		w.State, w.Reason = StateActive, cpuReason(*w)
@@ -614,63 +543,6 @@ func duration(d time.Duration) string {
 	}
 }
 
-// cpuUsed returns the CPU the workload's own containers use, and false when
-// the Metrics API has nothing for its pods yet, which isn't the same as idle.
-func (s *Scanner) cpuUsed(ctx context.Context, namespace string, sel labels.Selector, spec corev1.PodSpec) (int64, bool) {
-	var list metricsv1beta1.PodMetricsList
-	if err := s.client.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil ||
-		len(list.Items) == 0 {
-		return 0, false
-	}
-	used, _ := metrics.Usage(list.Items, spec)
-	return used, true
-}
-
-// managedInNamespace returns the ManagedWorkload covering each workload,
-// keyed by "Kind/name". Without Hybernate installed there are none, which
-// isn't an error.
-func (s *Scanner) managedInNamespace(ctx context.Context, namespace string) map[string]*v1alpha1.ManagedWorkload {
-	out := map[string]*v1alpha1.ManagedWorkload{}
-	var list v1alpha1.ManagedWorkloadList
-	if err := s.client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
-		return out
-	}
-	for i := range list.Items {
-		mw := &list.Items[i]
-		out[string(mw.Spec.Target.Kind)+"/"+mw.Spec.Target.Name] = mw
-	}
-	return out
-}
-
-// rollouts returns when each workload rolled out, from the ReplicaSets and
-// ControllerRevisions it keeps: one per pod template it has run, as many as
-// its revision history limit keeps.
-func (s *Scanner) rollouts(ctx context.Context, namespace string) (map[types.UID][]time.Time, error) {
-	times := map[types.UID][]time.Time{}
-	note := func(owner client.Object) {
-		for _, ref := range owner.GetOwnerReferences() {
-			if ref.Controller != nil && *ref.Controller {
-				times[ref.UID] = append(times[ref.UID], owner.GetCreationTimestamp().Time)
-			}
-		}
-	}
-	var replicaSets appsv1.ReplicaSetList
-	if err := s.client.List(ctx, &replicaSets, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("listing replicasets: %w", err)
-	}
-	for i := range replicaSets.Items {
-		note(&replicaSets.Items[i])
-	}
-	var revisions appsv1.ControllerRevisionList
-	if err := s.client.List(ctx, &revisions, client.InNamespace(namespace)); err != nil && !meta.IsNoMatchError(err) {
-		return nil, fmt.Errorf("listing controllerrevisions: %w", err)
-	}
-	for i := range revisions.Items {
-		note(&revisions.Items[i])
-	}
-	return times, nil
-}
-
 // listSome names the first few of a list, and how many more there are.
 func listSome(names []string) string {
 	const shown = 3
@@ -718,7 +590,8 @@ func totals(workloads []Workload) Totals {
 			t.Live++
 			t.SavedThisMonth += w.SavedThisMonth
 		}
-		if h := w.History; h != nil && !w.Managed && !w.Protected {
+		replayed := w.History != nil && !w.Managed && !w.Protected
+		if h := w.History; replayed {
 			t.Replayed.Workloads++
 			if h.SleepHours > 0 {
 				t.Replayed.Sleepers++
@@ -738,6 +611,11 @@ func totals(workloads []Workload) Totals {
 			continue
 		}
 		t.MonthlyCost += w.MonthlyCost
+		if replayed {
+			t.SavingsBasis += w.History.MonthlyCost
+		} else {
+			t.SavingsBasis += w.MonthlyCost
+		}
 		if w.State == StateIdle {
 			t.Idle++
 			t.IdleCPUMillis += w.PodCPURequestMillis * int64(w.Replicas)

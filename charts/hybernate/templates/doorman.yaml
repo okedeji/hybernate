@@ -26,7 +26,11 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "hybernate.doormanName" . }}
-      terminationGracePeriodSeconds: 30
+      {{- /*
+      The 5s preStop sleep, then up to 25s for held and proxied
+      connections to finish, with room to exit before SIGKILL.
+      */}}
+      terminationGracePeriodSeconds: 40
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -39,16 +43,42 @@ spec:
           args:
             - --doorman
             - --health-probe-bind-address=:8081
+            {{- with .Values.doorman.healthCheckUserAgents }}
+            - --doorman-health-check-user-agents={{ join "," . }}
+            {{- end }}
             {{- with .Values.watchNamespaces }}
             - --watch-namespaces={{ join "," . }}
             {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
-            {{- if .Values.metrics.secure }}
-            - --metrics-secure
-            {{- end }}
+            - --metrics-secure={{ .Values.metrics.secure }}
             {{- end }}
             - --zap-log-level={{ .Values.logLevel }}
+            - --zap-encoder={{ .Values.logEncoder }}
+          env:
+            - name: MEMORY_LIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+          ports:
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+            - name: probes
+              containerPort: 8081
+              protocol: TCP
+          {{- /*
+          Kube-proxies and load balancers keep sending new connections for
+          a few seconds after the pod is marked terminating, until they see
+          its endpoint go. The sleep keeps it listening through that, and
+          needs no shell, which the image doesn't have.
+          */}}
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -57,29 +87,67 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8081
+              port: probes
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8081
+              port: probes
             initialDelaySeconds: 2
             periodSeconds: 5
           resources:
             {{- toYaml .Values.doorman.resources | nindent 12 }}
-      {{- with .Values.nodeSelector }}
+      {{- with .Values.doorman.nodeSelector | default .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with .Values.doorman.affinity | default .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.doorman.tolerations | default .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      topologySpreadConstraints:
+        {{- with .Values.doorman.topologySpreadConstraints }}
+        {{- toYaml . | nindent 8 }}
+        {{- else }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "hybernate.doormanSelectorLabels" . | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "hybernate.doormanSelectorLabels" . | nindent 14 }}
+        {{- end }}
+{{- if and .Values.doorman.podDisruptionBudget.enabled (gt (int .Values.doorman.replicaCount) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "hybernate.doormanName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "hybernate.doormanSelectorLabels" . | nindent 6 }}
+{{- end }}
 ---
 {{- /*
 The operator finds the Ready doorman pods through this Service's
-EndpointSlices and points paused workloads' Services at them.
+EndpointSlices and points paused workloads' Services at them. On a
+dual-stack cluster it needs both families, or it can't route the other
+family's Services.
 */}}
 apiVersion: v1
 kind: Service
@@ -89,6 +157,7 @@ metadata:
   labels:
     {{- include "hybernate.doormanLabels" . | nindent 4 }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "hybernate.doormanSelectorLabels" . | nindent 4 }}
   ports:
@@ -178,5 +247,42 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "hybernate.doormanName" . }}
     namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- with .Values.doorman.networkPolicy.egress }}
+{{- if .enabled }}
+{{- if or (not .podCIDRs) (not .apiServer) }}
+{{- fail "doorman.networkPolicy.egress needs podCIDRs and apiServer, or the doorman can't reach pods or the API server" }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "hybernate.doormanName" $ }}-egress
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "hybernate.doormanLabels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "hybernate.doormanSelectorLabels" $ | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        {{- range .podCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+    - to:
+        {{- range .apiServer }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range .apiServerPorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

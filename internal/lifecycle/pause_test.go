@@ -67,12 +67,30 @@ func TestPause_ScalesToZero(t *testing.T) {
 	scaler := &fakeScaler{replicas: 3}
 	p := newTestPauser(c, scaler)
 
+	require.NoError(t, p.Prepare(context.Background(), workload))
+	assert.Equal(t, int32(3), scaler.replicas, "preparing changes nothing")
+	assert.Nil(t, workload.Status.Pause.PausedAt)
+
 	done, err := p.Pause(context.Background(), workload)
 	require.NoError(t, err)
 	assert.True(t, done)
 	assert.Equal(t, int32(3), workload.Status.Pause.PreviousReplicas)
 	assert.NotNil(t, workload.Status.Pause.PausedAt)
 	assert.Equal(t, int32(0), scaler.replicas)
+}
+
+func TestPause_RequiresAPreparedRecord(t *testing.T) {
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec:       v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	scaler := &fakeScaler{replicas: 3}
+
+	_, err := newTestPauser(c, scaler).Pause(context.Background(), workload)
+
+	assert.ErrorIs(t, err, ErrNotPrepared)
+	assert.Equal(t, int32(3), scaler.replicas)
 }
 
 func TestPause_Idempotent(t *testing.T) {
@@ -144,7 +162,6 @@ func TestResume_ScalesBackUp(t *testing.T) {
 	done, err := p.Resume(context.Background(), workload)
 	require.NoError(t, err)
 	assert.True(t, done)
-	assert.Nil(t, workload.Status.Pause)
 	assert.Equal(t, int32(3), scaler.replicas)
 }
 
@@ -201,42 +218,69 @@ func TestResume_NoPauseStatusIsNoOp(t *testing.T) {
 	assert.True(t, done)
 }
 
-// The controller creates Status.Pause to hold the resource snapshot before
-// calling Pause. The replica count must still be recorded, or resume brings
-// the workload back with a single replica.
-func TestPause_RecordsReplicasWhenSnapshotAlreadyPresent(t *testing.T) {
-	scheme := testScheme(t)
-	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To(int32(3)),
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "api"}},
-				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "app:latest"}}},
-			},
-		},
-	}
-	workload := &v1alpha1.ManagedWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-		Spec: v1alpha1.ManagedWorkloadSpec{
-			Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "api"},
-		},
-		Status: v1alpha1.ManagedWorkloadStatus{
-			Pause: &v1alpha1.PauseStatus{
-				Resources: &v1alpha1.ResourceSnapshot{Replicas: 3, CPUMillis: 500},
-			},
-		},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dep).Build()
+// A pause interrupted after scaling to zero is retried from its record: the
+// target, now at zero, must never become the count to restore.
+func TestPause_RetryKeepsTheRecordedReplicas(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(readyDeployment(3)).Build()
 	scaler := &fakeScaler{replicas: 3}
 	p := newTestPauser(c, scaler)
+	workload := apiWorkload()
+
+	require.NoError(t, p.Prepare(context.Background(), workload))
+	_, err := p.Pause(context.Background(), workload)
+	require.NoError(t, err)
+	workload.Status.Pause.PausedAt = nil
 
 	done, err := p.Pause(context.Background(), workload)
+
 	require.NoError(t, err)
 	assert.True(t, done)
 	assert.Equal(t, int32(3), workload.Status.Pause.PreviousReplicas)
-	assert.NotNil(t, workload.Status.Pause.Resources, "the snapshot must survive the pause")
-	assert.Equal(t, int32(0), scaler.replicas)
+}
+
+// Restore hands the workload back without waiting for it, never scales
+// down what someone else has already scaled up, and never starts one that
+// was at zero before its pause.
+func TestRestore(t *testing.T) {
+	tests := []struct {
+		name     string
+		previous int32
+		current  int32
+		want     int32
+	}{
+		{name: "still at zero", previous: 3, current: 0, want: 3},
+		{name: "already scaled up by someone", previous: 3, current: 5, want: 5},
+		{name: "at zero before the pause", previous: 0, current: 0, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := kedaClient(t, readyDeployment(tt.current), scaledObjectFor(1))
+			scaler := &fakeScaler{replicas: tt.current}
+			workload := apiWorkload()
+			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: tt.previous, ScaledObject: "api-scaler"}
+			require.NoError(t, autoscaler.HoldKEDA(context.Background(), c, "default", "api-scaler", 0))
+
+			replicas, err := newTestPauser(c, scaler).Restore(context.Background(), workload)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, replicas, "says what it left the target at")
+			assert.Equal(t, tt.want, scaler.replicas)
+			_, held := pausedAnnotation(t, c)
+			assert.False(t, held, "KEDA scales it again")
+		})
+	}
+}
+
+func TestRestore_TargetGoneStillReleasesKEDA(t *testing.T) {
+	c := kedaClient(t, scaledObjectFor(1))
+	workload := apiWorkload()
+	workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3, ScaledObject: "api-scaler"}
+	require.NoError(t, autoscaler.HoldKEDA(context.Background(), c, "default", "api-scaler", 0))
+
+	replicas, err := newTestPauser(c, &fakeScaler{}).Restore(context.Background(), workload)
+	require.NoError(t, err)
+	assert.Zero(t, replicas)
+
+	_, held := pausedAnnotation(t, c)
+	assert.False(t, held)
 }

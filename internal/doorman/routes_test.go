@@ -22,49 +22,63 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 func TestAllocatePort(t *testing.T) {
-	first, err := AllocatePort("dev", "api", "http", nil)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, first, int32(minPort))
-	assert.LessOrEqual(t, first, int32(maxPort))
+	used := map[int32]bool{}
+	for range 200 {
+		port, err := AllocatePort(func(p int32) bool { return used[p] })
+		require.NoError(t, err)
+		assert.True(t, InRange(port))
+		assert.False(t, used[port], "a port in use is never handed out again")
+		used[port] = true
+	}
+}
 
-	again, err := AllocatePort("dev", "api", "http", nil)
-	require.NoError(t, err)
-	assert.Equal(t, first, again, "the same Service port gets the same doorman port when it's free")
-
-	next, err := AllocatePort("dev", "api", "http", map[int32]bool{first: true})
-	require.NoError(t, err)
-	assert.NotEqual(t, first, next, "a port in use is skipped")
+// A port that can be worked out from a workload's names can be aimed at
+// without scanning.
+func TestAllocatePort_IsNotDerivedFromNames(t *testing.T) {
+	seen := map[int32]bool{}
+	for range 20 {
+		port, err := AllocatePort(func(int32) bool { return false })
+		require.NoError(t, err)
+		seen[port] = true
+	}
+	assert.Greater(t, len(seen), 1)
 }
 
 func TestAllocatePort_Exhausted(t *testing.T) {
-	used := map[int32]bool{}
-	for p := int32(minPort); p <= maxPort; p++ {
-		used[p] = true
-	}
-
-	_, err := AllocatePort("dev", "api", "http", used)
+	_, err := AllocatePort(func(int32) bool { return true })
 
 	assert.ErrorIs(t, err, ErrNoFreePort)
 }
 
 func TestSliceName(t *testing.T) {
-	assert.Equal(t, "api-hybernate-doorman", SliceName("api"))
+	assert.True(t, strings.HasPrefix(SliceName("api", "stable", discoveryv1.AddressTypeIPv4), "api-o"))
+	assert.NotEqual(t, SliceName("api", "stable", discoveryv1.AddressTypeIPv4), SliceName("api", "canary", discoveryv1.AddressTypeIPv4),
+		"two workloads behind one Service each get a slice")
+	assert.NotEqual(t, SliceName("api", "stable", discoveryv1.AddressTypeIPv4), SliceName("api", "stable", discoveryv1.AddressTypeIPv6),
+		"and one per address family")
+	assert.Equal(t, SliceName("api", "stable", discoveryv1.AddressTypeIPv4), SliceName("api", "stable", discoveryv1.AddressTypeIPv4))
 
-	for _, n := range []int{45, 46, 57, 58, 63} {
+	for _, n := range []int{1, 45, 46, 51, 52, 57, 58, 63} {
 		service := strings.Repeat("a", n)
-		name := SliceName(service)
+		name := SliceName(service, strings.Repeat("w", 253), discoveryv1.AddressTypeIPv6)
 		assert.LessOrEqual(t, len(name), 63)
+		assert.Empty(t, validation.IsDNS1123Subdomain(name))
 		assert.True(t, strings.HasPrefix(name, service[:min(n, 57)]),
 			"ingress-nginx finds a Service's slices by up to 57 characters of its name: %d", n)
 	}
+}
 
-	long := strings.Repeat("a", 63)
-	assert.Equal(t, SliceName(long), SliceName(long), "stable for the same Service")
-	assert.NotEqual(t, SliceName(long), SliceName(long[:62]+"b"), "distinct for Services sharing a long prefix")
+func TestWorkloadLabel(t *testing.T) {
+	assert.Equal(t, "api", WorkloadLabel("api"))
+
+	long := strings.Repeat("a", 200)
+	assert.Empty(t, validation.IsValidLabelValue(WorkloadLabel(long)))
+	assert.NotEqual(t, WorkloadLabel(long), WorkloadLabel(long[:199]+"b"))
 }
 
 // The fake client doesn't validate objects, so this is the check that stands
@@ -72,5 +86,4 @@ func TestSliceName(t *testing.T) {
 func TestSliceMetadataIsValid(t *testing.T) {
 	assert.Empty(t, validation.IsValidLabelValue(ManagedBy))
 	assert.Empty(t, validation.IsQualifiedName(LabelManagedWorkload))
-	assert.Empty(t, validation.IsDNS1123Subdomain(SliceName(strings.Repeat("a", 63))))
 }

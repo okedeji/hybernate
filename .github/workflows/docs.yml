@@ -1,11 +1,11 @@
 name: docs
 
-# Publish on releases so the site documents the version users can install,
-# not unreleased work on main. Run manually to republish a release's docs.
+# The release workflow publishes these once a release succeeds, so the site
+# documents the version users can install, not unreleased work on main or a
+# tag whose release failed. Run manually, from a release's tag, to republish
+# its docs.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_call:
   workflow_dispatch:
 
 permissions:

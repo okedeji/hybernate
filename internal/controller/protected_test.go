@@ -31,8 +31,8 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
 
-func namespace(name string, labels map[string]string) *corev1.Namespace {
-	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
+func defaultNamespace(labels map[string]string) *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", Labels: labels}}
 }
 
 var protectedLabel = map[string]string{v1alpha1.LabelProtected: v1alpha1.True}
@@ -48,9 +48,9 @@ func TestReconcile_ProtectedNamespace(t *testing.T) {
 		wantPhase  v1alpha1.WorkloadPhase
 		wantResume bool
 	}{
-		{name: "idle, by label", phase: v1alpha1.PhaseIdle, ns: namespace("default", protectedLabel),
+		{name: "idle, by label", phase: v1alpha1.PhaseIdle, ns: defaultNamespace(protectedLabel),
 			wantPhase: v1alpha1.PhaseRunning},
-		{name: "paused, by pattern", phase: v1alpha1.PhasePaused, ns: namespace("default", nil),
+		{name: "paused, by pattern", phase: v1alpha1.PhasePaused, ns: defaultNamespace(nil),
 			patterns: []string{"def*"}, wantPhase: v1alpha1.PhaseRunning, wantResume: true},
 	}
 	for _, tt := range tests {
@@ -71,7 +71,8 @@ func TestReconcile_ProtectedNamespace(t *testing.T) {
 			got := fetch(t, r, "api")
 			assert.Equal(t, tt.wantPhase, got.Status.Phase)
 			assert.Zero(t, pauser.pauseCalls, "never paused")
-			assert.Equal(t, tt.wantResume, pauser.resumeCalls > 0)
+			assert.Equal(t, tt.wantResume, pauser.restoreCalls > 0)
+			assert.Nil(t, got.Status.Pause)
 			c := meta.FindStatusCondition(got.Status.Conditions, conditionProtected)
 			require.NotNil(t, c)
 			assert.Equal(t, metav1.ConditionTrue, c.Status)
@@ -80,11 +81,32 @@ func TestReconcile_ProtectedNamespace(t *testing.T) {
 	}
 }
 
+// Protecting a namespace part-way through a pause, or a resume, hands the
+// workload back at the replicas it had rather than leaving it at zero.
+func TestReconcile_ProtectedNamespaceFinishesAnInterruptedTransition(t *testing.T) {
+	for _, phase := range []v1alpha1.WorkloadPhase{v1alpha1.PhasePausing, v1alpha1.PhasePaused, v1alpha1.PhaseResuming} {
+		t.Run(string(phase), func(t *testing.T) {
+			workload := pausedWorkload(phase)
+			r := realPauserReconciler(t, workload, defaultNamespace(protectedLabel))
+
+			for range 2 {
+				_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+				require.NoError(t, err)
+			}
+
+			got := getWorkload(t, r, "api")
+			assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+			assert.Nil(t, got.Status.Pause)
+			assert.Equal(t, int32(3), targetReplicas(t, r))
+		})
+	}
+}
+
 func TestReconcile_UnprotectedClearsTheCondition(t *testing.T) {
 	workload := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning)
 	meta.SetStatusCondition(&workload.Status.Conditions, metav1.Condition{Type: conditionProtected,
 		Status: metav1.ConditionTrue, Reason: "ProtectedNamespace"})
-	allowed := namespace("default", map[string]string{v1alpha1.LabelProtected: v1alpha1.True,
+	allowed := defaultNamespace(map[string]string{v1alpha1.LabelProtected: v1alpha1.True,
 		v1alpha1.LabelAllowProtected: v1alpha1.True})
 	r := depReconciler(t, &stubPauser{}, []client.Object{workload, allowed, clockTarget("api:v1", nil)}...)
 

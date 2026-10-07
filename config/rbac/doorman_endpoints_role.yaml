@@ -1,0 +1,38 @@
+# The operator finds the Ready doorman pods through the doorman Service's
+# EndpointSlices. The ClusterRole already allows this; the Role keeps it
+# allowed when the operator is limited to --watch-namespaces, with Roles
+# in those namespaces in place of the ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+  name: doorman-endpoints-role
+  namespace: system
+rules:
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: hybernate
+    app.kubernetes.io/managed-by: kustomize
+  name: doorman-endpoints-rolebinding
+  namespace: system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: doorman-endpoints-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system

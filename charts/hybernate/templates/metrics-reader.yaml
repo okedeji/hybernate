@@ -1,0 +1,31 @@
+{{- if and .Values.metrics.enabled .Values.metrics.secure }}
+{{- /*
+The secure metrics endpoints serve only those allowed to get /metrics.
+Bind Prometheus to this, through metrics.readerSubjects or a binding of
+your own.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hybernate.fullname" . }}-metrics-reader
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: [/metrics]
+    verbs: [get]
+{{- with .Values.metrics.readerSubjects }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "hybernate.fullname" $ }}-metrics-reader
+  labels:
+    {{- include "hybernate.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "hybernate.fullname" $ }}-metrics-reader
+subjects:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}

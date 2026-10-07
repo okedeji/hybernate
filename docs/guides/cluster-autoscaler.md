@@ -148,12 +148,13 @@ These are the simplest setups for Hybernate because the cost savings are 1:1 wit
 
 After configuring your autoscaler, verify the end-to-end flow:
 
-1. **Pause a workload:**
+1. **Pause a workload now,** rather than waiting for its idle clock:
 
     ```bash
-    kubectl patch managedworkload my-api -n staging \
-      --type merge -p '{"spec":{"desiredState":"Paused"}}'
+    kubectl hybernate pause my-api -n staging
     ```
+
+    It returns once the workload is `Paused`, or says why Hybernate won't pause it, such as workloads that depend on it being awake. See [Pause Now](pause.md#pause-now).
 
 2. **Watch node count:**
 
@@ -163,12 +164,13 @@ After configuring your autoscaler, verify the end-to-end flow:
 
 3. **Confirm a node is removed** after the autoscaler's configured delay.
 
-4. **Resume the workload:**
+4. **Wake the workload,** with a request to its Service or:
 
     ```bash
-    kubectl patch managedworkload my-api -n staging \
-      --type merge -p '{"spec":{"desiredState":"Running"}}'
+    kubectl hybernate wake my-api -n staging
     ```
+
+    It returns once the workload is `Running`, all its replicas Ready. Its idle clock starts again, so it pauses on its own once it's idle.
 
 5. **Confirm a node is provisioned** and the workload pods become ready.
 

@@ -25,7 +25,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -47,8 +46,10 @@ var reportTemplate = template.Must(template.New("report").Funcs(template.FuncMap
 // reportPage is what the HTML report shows, worded from the same report
 // data and helpers as the terminal table, so the two never disagree.
 type reportPage struct {
-	Cluster      string
-	ScannedAt    string
+	Cluster   string
+	ScannedAt string
+	// Empty says why there are no workloads, when there are none.
+	Empty        string
 	Basis        string
 	Prices       string
 	Headline     headline
@@ -70,7 +71,8 @@ type reportPage struct {
 	Tips         tips
 	Terms        []term
 	Mark         string
-	HubURL       string
+	// Unjudged is how many workloads the notes list instead of Workloads.
+	Unjudged int
 }
 
 type headline struct {
@@ -166,14 +168,11 @@ var (
 // unless one is asked for.
 func writeReport(stdout, stderr io.Writer, result scanResult, opts scanOptions) error {
 	open := opts.open && opts.output == outputTable && interactive(stdout)
-	path := opts.html
-	if path == "" {
-		if !open {
-			return nil
-		}
-		path = filepath.Join(os.TempDir(), "hybernate-scan-"+result.ScannedAt.Format("20060102-150405")+".html")
+	if opts.html == "" && !open {
+		return nil
 	}
-	if err := writeHTMLFile(path, result, opts.idleAfter); err != nil {
+	path, err := writeHTMLFile(opts.html, result, opts.idleAfter)
+	if err != nil {
 		return err
 	}
 	if !open {
@@ -188,8 +187,9 @@ func writeReport(stdout, stderr io.Writer, result scanResult, opts scanOptions) 
 	return nil
 }
 
-func isTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
+// isTerminal reports whether stream, such as stdout or stdin, is a terminal.
+func isTerminal(stream any) bool {
+	f, ok := stream.(*os.File)
 	if !ok {
 		return false
 	}
@@ -200,10 +200,21 @@ func isTerminal(w io.Writer) bool {
 // canBrowse reports whether there's a desktop to open a browser on, which
 // an SSH session or a container on Linux doesn't have.
 func canBrowse() bool {
-	if runtime.GOOS != "linux" {
-		return runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+	return canBrowseOn(runtime.GOOS, os.Getenv)
+}
+
+// canBrowseOn is canBrowse on an OS with an environment. Over SSH to a Mac
+// or Windows machine, its desktop is there but the user isn't, so a browser
+// would open where nobody sees it. On Linux, a display set over SSH is X
+// forwarding, which shows the browser on the user's own screen.
+func canBrowseOn(goos string, getenv func(string) string) bool {
+	if goos == "linux" {
+		return getenv("DISPLAY") != "" || getenv("WAYLAND_DISPLAY") != ""
 	}
-	return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+	if getenv("SSH_CONNECTION") != "" || getenv("SSH_TTY") != "" {
+		return false
+	}
+	return goos == "darwin" || goos == "windows"
 }
 
 // browserTimeout bounds the opener, which hands the file to the browser and
@@ -225,19 +236,28 @@ func openInBrowser(path string) error {
 	return cmd.Run()
 }
 
-func writeHTMLFile(path string, result scanResult, idleAfter time.Duration) error {
-	f, err := os.Create(path)
+// writeHTMLFile writes the report to path, or, without one, to a new
+// temporary file only the user can read, since the report names the
+// cluster's workloads. It returns where it wrote.
+func writeHTMLFile(path string, result scanResult, idleAfter time.Duration) (string, error) {
+	var f *os.File
+	var err error
+	if path == "" {
+		f, err = os.CreateTemp("", "hybernate-scan-*.html")
+	} else {
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	}
 	if err != nil {
-		return fmt.Errorf("creating %s: %w", path, err)
+		return "", fmt.Errorf("creating the report: %w", err)
 	}
 	if err := writeHTML(f, result, idleAfter); err != nil {
 		_ = f.Close() // the write error is the one to report
-		return err
+		return "", err
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
+		return "", fmt.Errorf("writing %s: %w", f.Name(), err)
 	}
-	return nil
+	return f.Name(), nil
 }
 
 func writeHTML(w io.Writer, result scanResult, idleAfter time.Duration) error {
@@ -259,7 +279,9 @@ func buildReport(result scanResult, idleAfter time.Duration) reportPage {
 		IdleAfter: roundedDuration(idleAfter),
 		Over:      replayedOver(result.History),
 		Mark:      doorman.Mark,
-		HubURL:    hubURL,
+	}
+	if result.Totals.Workloads == 0 {
+		page.Empty = emptySentence(result)
 	}
 	page.Headline, page.Facts = headlineFor(result.Totals, replayedOver(result.History))
 	page.Saving, page.CouldSave = savingColumns(result.Workloads)
@@ -308,14 +330,19 @@ func buildReport(result scanResult, idleAfter time.Duration) reportPage {
 	}
 
 	_, unjudged := splitJudged(result.Workloads)
+	page.Unjudged = len(unjudged)
 	page.Notes = append(unjudgedNotes(unjudged), result.Notes...)
 	if n := result.Totals.ScaledToZero; n > 0 {
 		page.Notes = append([]string{plural(n, "workload is", "workloads are") + " scaled to zero by hand; Hybernate " +
 			"can pause them while idle and wake them on the next request instead"}, page.Notes...)
 	}
 	page.Method = methodFor(result, history, len(page.Dependencies) > 0, idleAfter)
-	for _, step := range nextStepsFor(result.Workloads) {
+	measure, enable := nextStepCommands(nextStepTargets(result.Workloads))
+	for _, step := range measure {
 		page.NextSteps = append(page.NextSteps, shellHTML(step))
+	}
+	if enable != "" {
+		page.NextSteps = append(page.NextSteps, shellHTML(enable))
 	}
 	return page
 }
@@ -350,8 +377,15 @@ func headlineFor(t discovery.Totals, over string) (headline, []fact) {
 	case r.Sleepers > 0 || t.DryRun > 0:
 		could := r.MonthlyFreed + t.Measured.MonthlyFreed
 		f := figure{Value: dollars(could), Label: "could be saved a month"}
-		if t.MonthlyCost > 0 {
-			f.Detail = fmt.Sprintf("%d%% of what these workloads cost", int(could/t.MonthlyCost*100+0.5))
+		// The share is of what the workloads cost on the saving's own basis.
+		// A workload that ran more pods in its history than it runs now
+		// would otherwise be shown saving more than it costs.
+		if t.SavingsBasis > 0 {
+			of := "what these workloads cost"
+			if r.Workloads > 0 {
+				of += " over the same time"
+			}
+			f.Detail = fmt.Sprintf("%d%% of %s", int(could/t.SavingsBasis*100+0.5), of)
 		}
 		h.Figures = append(h.Figures, f)
 	case t.Idle > 0:
@@ -436,34 +470,6 @@ func methodFor(result scanResult, history, dependencies bool, idleAfter time.Dur
 	return method
 }
 
-func nextStepsFor(workloads []Workload) []string {
-	var idle, measuring *Workload
-	for i := range workloads {
-		wl := &workloads[i]
-		if idle == nil && wl.State == discovery.StateIdle && !wl.Managed {
-			idle = wl
-		}
-		if measuring == nil && wl.Measured != nil {
-			measuring = wl
-		}
-	}
-	var steps []string
-	if idle != nil {
-		kind := strings.ToLower(string(idle.Kind))
-		steps = append(steps,
-			fmt.Sprintf("kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace),
-			fmt.Sprintf("kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, idle.Name, idle.Namespace))
-	}
-	if measuring == nil {
-		measuring = idle
-	}
-	if measuring != nil {
-		steps = append(steps, fmt.Sprintf("kubectl hybernate enable %s/%s -n %s",
-			strings.ToLower(string(measuring.Kind)), measuring.Name, measuring.Namespace))
-	}
-	return steps
-}
-
 // shellHTML colours a command the way a terminal would: the program and
 // its subcommands, flags, and the key and value of each key=value.
 func shellHTML(command string) template.HTML {
@@ -491,11 +497,27 @@ func shellHTML(command string) template.HTML {
 	return template.HTML(b.String()) //nolint:gosec // every part is escaped above
 }
 
-// roundedDuration is d without Duration's zero units: "1h", "90m", "2h30m".
+// roundedDuration writes d to the second without zero units: "1h", "90m"
+// as "1h30m", "10s", "2h0m5s" as "2h5s".
 func roundedDuration(d time.Duration) string {
-	s := strings.TrimSuffix(d.String(), "0s")
-	if strings.HasSuffix(s, "h0m") {
-		s = strings.TrimSuffix(s, "0m")
+	d = d.Round(time.Second)
+	if d == 0 {
+		return "0s"
 	}
-	return s
+	sign := ""
+	if d < 0 {
+		sign, d = "-", -d
+	}
+	var b strings.Builder
+	b.WriteString(sign)
+	for _, unit := range []struct {
+		size time.Duration
+		name string
+	}{{time.Hour, "h"}, {time.Minute, "m"}, {time.Second, "s"}} {
+		if n := d / unit.size; n > 0 {
+			fmt.Fprintf(&b, "%d%s", n, unit.name)
+			d -= n * unit.size
+		}
+	}
+	return b.String()
 }

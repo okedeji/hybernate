@@ -3,6 +3,7 @@
 Some workloads never see outside traffic: databases, message brokers, caches, workers. Their own [activity clock](idle-detection.md) can run out while the workloads that use them are still busy. Hybernate [learns](#learned-dependencies) who needs what from each workload's environment, and `dependsOn` declares it by hand.
 
 ```yaml title="managedworkload.yaml" linenums="1"
+apiVersion: hybernate.io/v1alpha1
 kind: ManagedWorkload
 metadata:
   name: api
@@ -14,7 +15,10 @@ spec:
     - {namespace: messaging, kind: StatefulSet, name: nats}       # another namespace
   idlePolicy:
     idleAfter: 1h
+  prediction: {}                                                  # default confidence
 ```
+
+With the label instead, set `hybernate.io/depends-on: "statefulset/postgres, messaging/statefulset/nats"` on the workload; see [Opting In](../guides/opt-in.md#settings).
 
 Declare `dependsOn` on the workload that **needs** the other one. Each entry names the dependency's Deployment or StatefulSet, not its ManagedWorkload. `namespace` defaults to the ManagedWorkload's own.
 
@@ -28,7 +32,7 @@ HeldByDependents=True   kept awake for preview-42/api, preview-43/api
 
 Its clock keeps running. Once the last dependent has paused, the dependency pauses on its next check, provided its own clock has run out too.
 
-**Waking a workload wakes its dependencies.** Hybernate sets `hybernate.io/last-activity` on each dependency's ManagedWorkload, which wakes it through the usual [activity annotation](idle-detection.md#activity-annotations) path. This chains: if Postgres itself depends on something, that wakes too. You can see it happen with `kubectl describe`.
+**Waking a workload wakes its dependencies.** Before the workload starts resuming, Hybernate sets `hybernate.io/last-activity` on each dependency's ManagedWorkload, which wakes it through the usual [activity annotation](idle-detection.md#activity-annotations) path. This chains: if Postgres itself depends on something, that wakes too. You can see it happen with `kubectl describe`.
 
 By default, everything wakes at once, so a chain of dependencies doesn't add up to sequential cold starts.
 
@@ -48,7 +52,7 @@ The dependent then stays in `Resuming`, without scaling up, until every replica 
 WaitingForDependencies=True   waiting for preview-42/postgres (0 ready)
 ```
 
-There's no timeout, because a slow start is exactly why you'd set it. If the wait runs past 15 minutes, the `HybernateWorkloadStuck` alert fires.
+There's no timeout, because a slow start is exactly why you'd set it. If the wait runs past 15 minutes, the `HybernateWorkloadStuck` alert fires. It doesn't wait for a dependency that can't start by waiting, which would leave the dependent at zero for good: one Hybernate doesn't manage that's scaled to zero. `WaitingForDependencies=False` then names it. A managed dependency that's still paused is woken again every few seconds while the dependent waits.
 
 ## Edge cases
 
@@ -56,8 +60,10 @@ There's no timeout, because a slow start is exactly why you'd set it. If the wai
 |-----------|--------------|
 | The dependency has no ManagedWorkload | Hybernate never pauses it, so there's nothing to hold or wake |
 | The dependency doesn't exist | `DependencyNotFound=True` on the dependent. Nothing is blocked, including a `waitForReady` resume |
-| A cycle (A depends on B, B depends on A) | Each would hold the other awake forever, so neither pauses and both report `DependencyCycle=True` until it's removed |
-| `desiredState: Paused` on a dependency that's in use | Your manual setting wins, with a `DependentsAwake` warning event naming the dependents |
+| The dependency is in a namespace outside `watchNamespaces`, or Hybernate isn't allowed to read it | `DependencyNotFound=True` with reason `DependencyNotVisible`, naming why. It isn't held or woken, and nothing is blocked |
+| A cycle in `dependsOn` (A depends on B, B depends on A) | Each would hold the other awake forever, so neither pauses and both report `DependencyCycle=True` until it's removed |
+| A cycle through learned dependencies, such as two services that call each other | Not a cycle: a learned dependent doesn't hold a workload it's itself a dependency of. Each pauses when idle, and waking either wakes the other |
+| `kubectl hybernate pause` on a dependency that's in use | It isn't paused: the request is answered with `PauseRequest=False`, reason `HeldByDependents`, and a `HeldByDependents` event naming the dependents, as for an idle pause. Pause the dependents first |
 | `dryRun: true` | The hold still applies and is reported; nothing is changed |
 
 ## Across namespaces

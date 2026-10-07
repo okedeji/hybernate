@@ -22,10 +22,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -61,11 +63,21 @@ type Autoscaler struct {
 	Kind     Kind
 	Name     string
 	Min, Max int32
+
+	// PausedReplicas is a ScaledObject's paused-replicas annotation, and nil
+	// when it has none.
+	PausedReplicas *string
 }
 
 // Clamp is n within the autoscaler's range.
 func (a Autoscaler) Clamp(n int32) int32 {
 	return min(max(n, a.Min), a.Max)
+}
+
+// HeldAt reports whether a ScaledObject's paused-replicas annotation already
+// holds its target at n replicas.
+func (a Autoscaler) HeldAt(n int32) bool {
+	return a.PausedReplicas != nil && *a.PausedReplicas == strconv.Itoa(int(n))
 }
 
 // kedaRecheck is how long Find remembers that KEDA isn't installed. The
@@ -139,7 +151,7 @@ func (f *Finder) findScaledObject(ctx context.Context, namespace string, kind v1
 	var list unstructured.UnstructuredList
 	list.SetGroupVersionKind(scaledObjects)
 	if err := f.c.List(ctx, &list, client.InNamespace(namespace)); err != nil {
-		if meta.IsNoMatchError(err) {
+		if kedaMissing(err) {
 			f.mu.Lock()
 			f.noKEDAUntil = f.now().Add(kedaRecheck)
 			f.mu.Unlock()
@@ -166,30 +178,52 @@ func (f *Finder) findScaledObject(ctx context.Context, namespace string, kind v1
 		if v, ok, _ := unstructured.NestedInt64(so.Object, "spec", "maxReplicaCount"); ok {
 			a.Max = int32(v)
 		}
+		if v, ok := so.GetAnnotations()[PausedReplicasAnnotation]; ok {
+			a.PausedReplicas = &v
+		}
 		return a, true, nil
 	}
 	return Autoscaler{}, false, nil
 }
 
-// HoldKEDA has KEDA hold a ScaledObject's target at zero, so it doesn't
-// scale up a workload Hybernate has paused, or, with hold false, lets KEDA
-// scale it again. A ScaledObject that's gone has nothing to hold.
-func HoldKEDA(ctx context.Context, c client.Client, namespace, name string, hold bool) error {
+// HoldKEDA has KEDA hold a ScaledObject's target at replicas and stop
+// scaling it, so it doesn't undo a pause, or a resume still under way.
+func HoldKEDA(ctx context.Context, c client.Client, namespace, name string, replicas int32) error {
+	return setPausedReplicas(ctx, c, namespace, name, strconv.Itoa(int(replicas)))
+}
+
+// ReleaseKEDA lets KEDA scale a ScaledObject's target again, putting back
+// the paused-replicas annotation it had before Hybernate held it, if any.
+func ReleaseKEDA(ctx context.Context, c client.Client, namespace, name string, previous *string) error {
+	if previous != nil {
+		return setPausedReplicas(ctx, c, namespace, name, *previous)
+	}
+	return setPausedReplicas(ctx, c, namespace, name, nil)
+}
+
+// setPausedReplicas sets the annotation, or removes it for a nil value. A
+// ScaledObject that's gone, or KEDA uninstalled, leaves nothing to hold.
+func setPausedReplicas(ctx context.Context, c client.Client, namespace, name string, value any) error {
 	so := &unstructured.Unstructured{}
 	so.SetGroupVersionKind(scaledObjects.GroupVersion().WithKind("ScaledObject"))
 	so.SetNamespace(namespace)
 	so.SetName(name)
-	value := any(nil)
-	if hold {
-		value = "0"
-	}
 	body, err := json.Marshal(map[string]any{"metadata": map[string]any{
 		"annotations": map[string]any{PausedReplicasAnnotation: value}}})
 	if err != nil {
 		return fmt.Errorf("building the ScaledObject patch: %w", err)
 	}
-	if err := c.Patch(ctx, so, client.RawPatch(types.MergePatchType, body)); client.IgnoreNotFound(err) != nil {
-		return fmt.Errorf("annotating ScaledObject %s/%s: %w", namespace, name, err)
+	err = c.Patch(ctx, so, client.RawPatch(types.MergePatchType, body))
+	if err == nil || kedaMissing(err) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("annotating ScaledObject %s/%s: %w", namespace, name, err)
+}
+
+// kedaMissing reports whether err says there's no ScaledObject to be had.
+// KEDA never installed gives no match for the kind; KEDA uninstalled while
+// the operator runs gives NotFound instead, because the client's RESTMapper
+// still maps the kind it saw, and the API server no longer serves it.
+func kedaMissing(err error) bool {
+	return meta.IsNoMatchError(err) || apierrors.IsNotFound(err)
 }

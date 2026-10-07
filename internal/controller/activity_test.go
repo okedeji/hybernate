@@ -22,17 +22,24 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/forecast"
@@ -115,18 +122,6 @@ func TestActivityClock_PausesAfterIdleAfter(t *testing.T) {
 
 	assert.Equal(t, 1, pauser.pauseCalls)
 	assert.Equal(t, v1alpha1.PhasePaused, workload.Status.Phase)
-}
-
-// A mesh proxy's background work is the proxy's, not use of the workload.
-func TestActivityClock_SidecarCPUIsNotActivity(t *testing.T) {
-	target := clockTarget("app:v1", nil)
-	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
-	metrics := idleCPU
-	metrics.sidecarCPUMillis = 400
-
-	pauser := runClock(t, workload, target, clockOpts{metrics: metrics})
-
-	assert.Equal(t, 1, pauser.pauseCalls)
 }
 
 func TestActivityClock_StaysAwake(t *testing.T) {
@@ -294,6 +289,11 @@ func TestActivityClock_ForecastVeto(t *testing.T) {
 		{name: "confident forecast of demand defers the pause", engine: &stubForecaster{phase: forecast.DailyActive, predictValue: 300}},
 		{name: "confident forecast of no demand", engine: &stubForecaster{phase: forecast.DailyActive, predictValue: 20}, wantPause: true},
 		{name: "unconfident forecast is ignored", engine: &stubForecaster{phase: forecast.DailySuggesting, predictValue: 300}, wantPause: true},
+		// autoResume would wake it straight back for the rest of this hour.
+		{name: "demand forecast for the rest of this hour", engine: &stubForecaster{phase: forecast.DailyActive,
+			predictByHour: map[int]float64{0: 300, 1: 20}}},
+		{name: "demand forecast for the next hour", engine: &stubForecaster{phase: forecast.DailyActive,
+			predictByHour: map[int]float64{0: 20, 1: 300}}},
 	}
 
 	for _, tt := range tests {
@@ -304,6 +304,165 @@ func TestActivityClock_ForecastVeto(t *testing.T) {
 			pauser := runClock(t, workload, target, clockOpts{metrics: idleCPU, engine: tt.engine})
 
 			assert.Equal(t, tt.wantPause, pauser.pauseCalls == 1)
+		})
+	}
+}
+
+func vetoEvents(recorder *events.FakeRecorder) int {
+	n := 0
+	for len(recorder.Events) > 0 {
+		if strings.Contains(<-recorder.Events, ReasonIdleVetoed) {
+			n++
+		}
+	}
+	return n
+}
+
+// A veto lasts as long as the forecast expects demand, and the clock checks
+// every minute meanwhile. The condition says so throughout; the event marks
+// only its beginning.
+func TestActivityClock_ForecastVetoIsACondition(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	engine := &stubForecaster{phase: forecast.DailyActive, predictByHour: map[int]float64{0: 20, 1: 300}}
+	metrics := idleCPU
+	pauser := &stubPauser{pauseDone: true}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &metrics, pauser: pauser})
+	recorder := r.Recorder.(*events.FakeRecorder)
+
+	for range 3 {
+		_, err := r.reconcileAutomation(context.Background(), workload, target)
+		require.NoError(t, err)
+	}
+
+	cond := meta.FindStatusCondition(workload.Status.Conditions, conditionIdleVetoed)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "ForecastExpectsDemand", cond.Reason)
+	assert.Contains(t, cond.Message, "30% of requests in the hour from 13:00 UTC", "says when demand is expected")
+	assert.Equal(t, 1, vetoEvents(recorder), "one event for the veto, not one a minute")
+	assert.Zero(t, pauser.pauseCalls)
+	written := getWorkload(t, r, "api")
+	assert.True(t, meta.IsStatusConditionTrue(written.Status.Conditions, conditionIdleVetoed), "and it's written")
+
+	engine.predictByHour[1] = 20
+	_, err := r.reconcileAutomation(context.Background(), workload, target)
+	require.NoError(t, err)
+
+	assert.True(t, meta.IsStatusConditionFalse(workload.Status.Conditions, conditionIdleVetoed), "the veto is over")
+	assert.Equal(t, 1, pauser.pauseCalls)
+}
+
+// The event follows the write that records the veto, so a conflict doesn't
+// announce one veto twice.
+func TestActivityClock_ForecastVetoEventFollowsTheWrite(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	engine := &stubForecaster{phase: forecast.DailyActive, predictValue: 300}
+	metrics := idleCPU
+	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &metrics})
+	recorder := r.Recorder.(*events.FakeRecorder)
+	fail := true
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if fail {
+				return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("managedworkloads").GroupResource(), obj.GetName(), errors.New("stale"))
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		}})
+
+	_, err := r.reconcileAutomation(context.Background(), workload.DeepCopy(), target)
+	require.Error(t, err)
+	assert.Zero(t, vetoEvents(recorder), "nothing is announced until it's recorded")
+
+	fail = false
+	_, err = r.reconcileAutomation(context.Background(), workload, target)
+	require.NoError(t, err)
+	assert.Equal(t, 1, vetoEvents(recorder))
+}
+
+// A dry-run workload gone Idle is measuring a would-be pause, which a real
+// pause would already be. The forecast doesn't hold back a pause it's too
+// late for, so it doesn't say it does.
+func TestActivityClock_ForecastDoesNotVetoAPauseUnderWay(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	workload.Spec.DryRun = true
+	workload.Status.Phase = v1alpha1.PhaseIdle
+	engine := &stubForecaster{phase: forecast.DailyActive, predictValue: 300}
+	metrics := idleCPU
+	r := newAutomationReconciler(t, workload, engine, automationOpts{metrics: &metrics})
+
+	_, err := r.reconcileAutomation(context.Background(), workload, target)
+	require.NoError(t, err)
+
+	assert.Equal(t, v1alpha1.PhaseIdle, workload.Status.Phase)
+	assert.False(t, meta.IsStatusConditionTrue(workload.Status.Conditions, conditionIdleVetoed))
+	assert.Zero(t, vetoEvents(r.Recorder.(*events.FakeRecorder)))
+}
+
+// The veto can't judge the forecast when the CPU the workload requests
+// can't be read, and the pause goes ahead. Why is logged, rather than the
+// forecast being silently ignored.
+func TestActivityClock_ForecastVetoSaysWhyItCantJudge(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	engine := &stubForecaster{phase: forecast.DailyActive, predictValue: 300}
+	metrics := &failingRequestsMetrics{stubMetrics: idleCPU}
+	pauser := &stubPauser{pauseDone: true}
+	r := newAutomationReconciler(t, workload, engine, automationOpts{pauser: pauser})
+	r.metrics = metrics
+	var logged []string
+	logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{Verbosity: 1})
+
+	_, err := r.reconcileAutomation(logr.NewContext(context.Background(), logger), workload, target)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, pauser.pauseCalls, "a forecast it can't judge doesn't hold back the pause")
+	assert.True(t, slices.ContainsFunc(logged, func(l string) bool {
+		return strings.Contains(l, "CPU requested can't be read") && strings.Contains(l, `"workload"="api"`)
+	}), "logged: %v", logged)
+}
+
+// failingRequestsMetrics reports usage, but not the requests it's judged
+// against, once the activity clock has read them: as when a pod template's
+// requests are removed between two reads.
+type failingRequestsMetrics struct {
+	stubMetrics
+	reads int
+}
+
+func (m *failingRequestsMetrics) CPURequestPerReplica(ctx context.Context, w *v1alpha1.ManagedWorkload) (float64, error) {
+	m.reads++
+	if m.reads > 1 {
+		return 0, errors.New("no pods")
+	}
+	return m.stubMetrics.CPURequestPerReplica(ctx, w)
+}
+
+func TestHourStart(t *testing.T) {
+	kolkata, err := time.LoadLocation("Asia/Kolkata")
+	require.NoError(t, err)
+	newYork, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	tests := []struct {
+		name string
+		loc  *time.Location
+		at   time.Time
+		want time.Time
+	}{
+		{name: "UTC", at: fixedTime.Add(10 * time.Minute), want: fixedTime},
+		{name: "hours at half past in UTC", loc: kolkata, at: fixedTime.Add(10 * time.Minute),
+			want: fixedTime.Add(-30 * time.Minute)},
+		{name: "the first 1am of a clock change", loc: newYork, at: time.Date(2026, 11, 1, 5, 40, 0, 0, time.UTC),
+			want: time.Date(2026, 11, 1, 5, 0, 0, 0, time.UTC)},
+		{name: "the repeated 1am", loc: newYork, at: time.Date(2026, 11, 1, 6, 40, 0, 0, time.UTC),
+			want: time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Reconciler{Timezone: tt.loc}
+			assert.True(t, tt.want.Equal(r.hourStart(tt.at)), "got %s", r.hourStart(tt.at).UTC())
 		})
 	}
 }
@@ -346,8 +505,11 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 		name       string
 		target     *appsv1.Deployment
 		onWorkload map[string]string
-		wantWake   bool
-		wantSource v1alpha1.ActivitySource
+		// beforePause says the annotations were already there when the
+		// pause began, so its record holds them.
+		beforePause bool
+		wantWake    bool
+		wantSource  v1alpha1.ActivitySource
 	}{
 		{
 			name: "last-activity newer than the pause",
@@ -372,6 +534,7 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 			onWorkload: map[string]string{
 				v1alpha1.AnnotationLastRequest: fixedTime.Add(-3 * time.Hour).Format(time.RFC3339),
 			},
+			beforePause: true,
 		},
 		{
 			name: "active-until in the future",
@@ -386,6 +549,7 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 			target: clockTarget("app:v1", map[string]string{
 				v1alpha1.AnnotationLastActivity: fixedTime.Add(-3 * time.Hour).Format(time.RFC3339),
 			}),
+			beforePause: true,
 		},
 	}
 
@@ -394,7 +558,13 @@ func TestActivityClock_AnnotationWakesPausedWorkload(t *testing.T) {
 			workload := clockWorkload(fixedTime.Add(-3*time.Hour), tt.target)
 			workload.Annotations = tt.onWorkload
 			workload.Status.Phase = v1alpha1.PhasePaused
-			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 2, PausedAt: &pausedAt}
+			recorded := &v1alpha1.WakeAnnotations{}
+			if tt.beforePause {
+				recorded.Workload = activityAnnotationValues(workload)
+				recorded.Target = activityAnnotationValues(tt.target)
+			}
+			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 2, PausedAt: &pausedAt,
+				WakeAnnotations: recorded}
 
 			pauser := runClock(t, workload, tt.target, clockOpts{metrics: idleCPU})
 
@@ -531,4 +701,46 @@ func TestActivityClock_NoPrometheusConditionWithoutQueries(t *testing.T) {
 	runClock(t, workload, target, clockOpts{metrics: idleCPU})
 
 	assert.Nil(t, meta.FindStatusCondition(workload.Status.Conditions, conditionPrometheusAvailable))
+}
+
+// A paused workload wakes for any activity annotation set since the pause
+// began, whatever time it states: the doorman stamps to the second, so a
+// request can share the pause's second, and kubectl hybernate wake stamps
+// from a laptop clock that may be behind.
+func TestWokenByActivity(t *testing.T) {
+	pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
+	old := fixedTime.Add(-2 * time.Hour).Format(time.RFC3339)
+	skewed := fixedTime.Add(-90 * time.Minute).Format(time.RFC3339)
+	tests := []struct {
+		name        string
+		pausedAt    metav1.Time
+		recorded    *v1alpha1.WakeAnnotations
+		annotations map[string]string
+		want        bool
+	}{
+		{name: "a request in the second the pause completed", pausedAt: metav1.NewTime(fixedTime.Truncate(time.Second)),
+			annotations: map[string]string{v1alpha1.AnnotationLastRequest: fixedTime.Format(time.RFC3339)}, want: true},
+		{name: "a wake stamped by a clock behind the operator's", pausedAt: pausedAt,
+			recorded:    &v1alpha1.WakeAnnotations{Workload: map[string]string{v1alpha1.AnnotationLastActivity: old}},
+			annotations: map[string]string{v1alpha1.AnnotationLastActivity: skewed}, want: true},
+		{name: "the activity it was paused after", pausedAt: pausedAt,
+			recorded:    &v1alpha1.WakeAnnotations{Workload: map[string]string{v1alpha1.AnnotationLastActivity: old}},
+			annotations: map[string]string{v1alpha1.AnnotationLastActivity: old}},
+		{name: "no annotations", pausedAt: pausedAt, recorded: &v1alpha1.WakeAnnotations{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := pausedWorkload(v1alpha1.PhasePaused)
+			workload.Status.Pause.PausedAt = &tt.pausedAt
+			workload.Status.Pause.WakeAnnotations = tt.recorded
+			workload.Annotations = tt.annotations
+			pauser := &stubPauser{resumeDone: true}
+			r := newTestReconcilerWithReplicas(t, workload, pauser, 0)
+
+			_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, pauser.resumeCalls > 0)
+		})
+	}
 }

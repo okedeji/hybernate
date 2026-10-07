@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{{.Refresh}}">
 <meta name="robots" content="noindex">
-<title>{{if .Ready}}{{.Service}} is ready{{else}}Waking up {{.Service}}{{end}}</title>
+<title>Waking up{{with .Address}} {{.}}{{end}}</title>
 <style>
 :root {
   --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
@@ -17,7 +17,6 @@
   --line: #ececec;
   --track: #efefef;
   --amber: #f5a623;
-  --green: #16a34a;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -28,7 +27,6 @@
     --line: #1c1c1c;
     --track: #161616;
     --amber: #f5b041;
-    --green: #22c55e;
   }
 }
 * { box-sizing: border-box; }
@@ -65,14 +63,12 @@ main { flex: 1; display: flex; align-items: center; justify-content: center; pad
   animation: pulse 1.6s ease-out infinite;
 }
 @keyframes pulse { to { box-shadow: 0 0 0 9px transparent; } }
-.ready .dot { background: var(--green); animation: none; box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 20%, transparent); }
 h1 { margin: 0 0 14px; font: 600 30px/1.2 var(--mono); letter-spacing: -.02em; overflow-wrap: anywhere; }
 h1 span { color: var(--muted); font-weight: 500; }
 .lede { margin: 0 0 36px; max-width: 470px; color: var(--muted); font-size: 15px; line-height: 1.65; }
 .bar { height: 2px; margin-bottom: 30px; background: var(--track); overflow: hidden; }
 .bar i { display: block; width: 30%; height: 100%; background: var(--amber); animation: slide 1.8s cubic-bezier(.65, 0, .35, 1) infinite; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
-.ready .bar i { width: 100%; background: var(--green); animation: none; }
 ol { list-style: none; margin: 0 0 36px; padding: 0; font: 14px var(--mono); }
 li { display: flex; align-items: center; gap: 14px; padding: 10px 0; color: var(--faint); }
 li.done, li.now { color: var(--text); }
@@ -82,9 +78,6 @@ li.done .i { background: var(--text); border-color: var(--text); }
 li.done .i svg { width: 10px; height: 10px; color: var(--bg); }
 li.now .i { border-color: var(--line); border-top-color: var(--amber); animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-dl { display: grid; grid-template-columns: 110px 1fr; row-gap: 8px; margin: 0; padding-top: 22px; border-top: 1px solid var(--line); font: 12.5px var(--mono); }
-dt { color: var(--muted); }
-dd { margin: 0; overflow-wrap: anywhere; }
 footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; padding: 22px 32px; font: 12px var(--mono); color: var(--muted); }
 footer a { display: inline-flex; align-items: center; gap: 7px; color: inherit; text-decoration: none; }
 footer a:hover { color: var(--text); }
@@ -94,38 +87,27 @@ footer svg { width: 13px; height: 13px; }
   header, footer { padding: 18px 22px; }
   main { padding: 24px 22px 56px; }
   h1 { font-size: 24px; }
-  dl { grid-template-columns: 96px 1fr; }
 }
 </style>
 </head>
 <body>
 <header>{{.Address}}</header>
 <main role="status" aria-live="polite">
-  <div class="wrap{{if .Ready}} ready{{end}}">
-    <div class="state"><span class="dot"></span>{{if .Ready}}Ready, opening{{else}}Starting{{end}}</div>
-    {{if .Ready}}
-    <h1>{{.Service}} <span>is ready</span></h1>
-    <p class="lede">It's up. Opening it now&hellip;</p>
-    {{else}}
-    <h1>Waking up <span>{{.Service}}</span></h1>
+  <div class="wrap">
+    <div class="state"><span class="dot"></span>Starting</div>
+    <h1>Waking up <span>{{with .Address}}{{.}}{{else}}this app{{end}}</span></h1>
     <p class="lede">This environment was paused while nobody was using it. It's starting now and will open here on its own.</p>
-    {{end}}
     <div class="bar"><i></i></div>
     <ol>
       <li class="done"><span class="i">{{template "check"}}</span>Request received</li>
-      <li class="{{if .Ready}}done{{else}}now{{end}}"><span class="i">{{if .Ready}}{{template "check"}}{{end}}</span>Starting {{.Workload}}{{if .Elapsed}}<span class="t">{{.Elapsed}}</span>{{end}}</li>
-      <li{{if .Ready}} class="done"{{end}}><span class="i">{{if .Ready}}{{template "check"}}{{end}}</span>Ready</li>
+      <li class="now"><span class="i"></span>Starting{{if .Elapsed}}<span class="t">{{.Elapsed}}</span>{{end}}</li>
+      <li><span class="i"></span>Ready</li>
     </ol>
-    <dl>
-      <dt>Namespace</dt><dd>{{.Namespace}}</dd>
-      <dt>Service</dt><dd>{{.Service}}</dd>
-      {{if .PausedAgo}}<dt>Paused</dt><dd>{{.PausedAgo}}</dd>{{end}}
-    </dl>
   </div>
 </main>
 <footer>
   <span>Refreshes automatically</span>
-  <a href="https://okedeji.io/hybernate" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="{{.Mark}}"/></svg>Paused by Hybernate</a>
+  <a href="https://okedeji.io/hybernate/" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="{{.Mark}}"/></svg>Paused by Hybernate</a>
 </footer>
 </body>
 </html>

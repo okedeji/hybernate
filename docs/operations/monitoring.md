@@ -1,18 +1,41 @@
 # Monitoring
 
-Hybernate ships with Prometheus metrics for operator health and a set of alerting rules.
+Hybernate ships with Prometheus metrics for the operator and the doorman, and a set of alerting rules. See the [Metrics Reference](../reference/metrics.md) for every metric.
 
 ## Prometheus
 
-### ServiceMonitor
+### Scraping
 
-The project includes a ServiceMonitor in `config/prometheus/` for automatic Prometheus scraping:
+Metrics are served over HTTPS, and only to a scraper whose token is allowed to `get` the `/metrics` URL.
 
-```bash
-kubectl apply -f config/prometheus/monitor.yaml
+**With Helm**, turn on the ServiceMonitors (one for the operator, one for the doorman) and bind your Prometheus's ServiceAccount to the chart's `<fullname>-metrics-reader` ClusterRole:
+
+```yaml title="values.yaml"
+metrics:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+  readerSubjects:
+    - kind: ServiceAccount
+      name: prometheus-k8s
+      namespace: monitoring
 ```
 
-This configures Prometheus to scrape the operator's metrics endpoint.
+**With the kustomize manifests**, apply the ServiceMonitors and the alerting rules into `hybernate-system`:
+
+```bash
+kubectl apply -k config/prometheus
+```
+
+and bind your Prometheus's ServiceAccount to the `hybernate-metrics-reader` ClusterRole yourself:
+
+```bash
+kubectl create clusterrolebinding hybernate-metrics-reader \
+  --clusterrole=hybernate-metrics-reader --serviceaccount=monitoring:prometheus-k8s
+```
+
+Without that binding, the targets show as down with `401` or `403`, and the `HybernateDown` alert fires. With `metrics.secure: false` in the chart, metrics are plain HTTP and need no binding, but anyone who can reach the port can read them.
 
 ### Key Metrics to Watch
 
@@ -24,6 +47,9 @@ rate(hybernate_lifecycle_transitions_total[1h])
 
 # Are there errors?
 rate(hybernate_reconcile_errors_total[5m]) > 0
+
+# Are requests to paused workloads waking them?
+sum by (result) (rate(hybernate_doorman_wakes_total[1h]))
 ```
 
 **Per-workload health:**
@@ -38,19 +64,22 @@ rate(hybernate_lifecycle_transitions_total[1h])
 
 ## Alerting Rules
 
-The Helm chart creates these rules when `metrics.prometheusRule.enabled` is `true`; the same rules are in `config/prometheus/alerts.yaml` for kustomize installs.
+The Helm chart creates these rules when `metrics.prometheusRule.enabled` is `true`; `kubectl apply -k config/prometheus` creates the same rules for kustomize installs.
 
 | Alert | Fires when | Severity |
 |-------|-----------|----------|
 | `HybernateReconcileErrorsHigh` | Reconcile errors exceed 0.1/sec for 10 minutes | critical |
-| `HybernateDown` | No healthy operator target is scraped for 5 minutes | critical |
+| `HybernateDown` | No healthy operator target has been scraped for 5 minutes, so nothing is paused or woken | critical |
+| `HybernateDoormanDown` | No healthy doorman target has been scraped for 5 minutes, so requests to paused workloads fail instead of waking them. Only with the doorman enabled | critical |
 | `HybernateWorkloadStuck` | A workload stays in `Pausing` or `Resuming` for 15 minutes | warning |
-| `HybernateTargetUnavailable` | A ManagedWorkload's target is missing more than 3 times in an hour | warning |
-| `HybernateDoormanWakesFailing` | More than 3 requests to a paused workload timed out or failed in 15 minutes | warning |
+| `HybernateTargetUnavailable` | A ManagedWorkload's target goes missing more than 3 times in an hour | warning |
+| `HybernateDoormanWakesFailing` | More than 3 requests to one paused workload timed out or failed (`result` `timeout` or `error`) in 15 minutes, for 5 minutes | warning |
+
+`HybernateDown` and `HybernateDoormanDown` match the scrape job of the operator's and the doorman's metrics Service, so they need the ServiceMonitors above.
 
 ## Health Checks
 
-The operator exposes health endpoints:
+The operator and the doorman expose health endpoints on port 8081, which the chart and the kustomize manifests already use as liveness and readiness probes:
 
 ```bash
 # Liveness
@@ -60,19 +89,23 @@ curl http://localhost:8081/healthz
 curl http://localhost:8081/readyz
 ```
 
-Configure these in your Deployment's liveness and readiness probes (already set up in the default manifests).
-
 ## Operator Logs
 
-For debugging, check the operator logs:
+Logs are JSON by default. For debugging, check the operator logs; the label selectors work for both Helm and kustomize installs:
 
 ```bash
-kubectl logs -n hybernate-system deployment/hybernate-controller-manager -f
+kubectl logs -n hybernate-system -l control-plane=controller-manager -f
+kubectl logs -n hybernate-system -l control-plane=doorman -f
 ```
 
-Key log entries to watch for:
+The Deployments themselves are `hybernate` and `hybernate-doorman` for a Helm release named `hybernate`, and `hybernate-controller-manager` and `hybernate-doorman` with kustomize.
 
-- `"phase transition"`: lifecycle state changes
-- `"idle confirmed"`: idle detection results
-- `"regime change"`: prediction engine pattern shifts
-- `"paused workload scaled externally"`: someone scaled up a paused workload
+Log entries to look for:
+
+- `"phase transition"`: lifecycle state changes, with `from`, `to` and `reason`
+- `"paused workload scaled up outside Hybernate"`: someone scaled up a paused workload
+- `"managing workload from its label"`: the opt-in controller created a ManagedWorkload
+- `"routing requests through the doorman"`: an error routing a paused workload's Services to the doorman
+- `"ignoring malformed activity annotation"`: an activity annotation that isn't an RFC 3339 time
+
+Forecast regime changes, idle detection and wakes are recorded as [events](../concepts/lifecycle.md#events) on the ManagedWorkload rather than logged.

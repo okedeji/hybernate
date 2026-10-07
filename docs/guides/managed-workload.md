@@ -15,10 +15,12 @@ spec:
     kind: Deployment
     name: my-api
   prediction:
-    confidence: 85
+    confidence: 75
 ```
 
-This is the absolute minimum. The operator will watch the Deployment but won't take any automated action until you add an idle policy.
+This is the absolute minimum: `target` and `prediction` are required, and `prediction: {}` takes the default confidence. The operator will watch the Deployment, track its cost and learn its forecast, but won't pause it on its own until you add an idle policy; [`kubectl hybernate pause`](pause.md#pause-now) pauses it when you ask.
+
+For most workloads you don't need to write one: the `hybernate.io/managed` label creates one from annotations; see [Opting In](opt-in.md). Write one yourself for settings annotations don't cover, such as Prometheus queries, `waitForReady`, or cost rates. A ManagedWorkload you write for a workload wins over the label.
 
 ## Full Example
 
@@ -47,7 +49,7 @@ spec:
     page: true
 
   prediction:
-    confidence: 85
+    confidence: 75
 
   costTracking:
     rates:
@@ -67,16 +69,7 @@ spec:
 | `kind` | `Deployment` or `StatefulSet` | `Deployment` | The kind of workload to manage |
 | `name` | string | _(required)_ | Name of the workload (must be in the same namespace) |
 
-### `desiredState`
-
-Optional manual override. When set, automation stops and the operator drives the workload to this state.
-
-| Value | Effect |
-|-------|--------|
-| `Running` | Resume the workload (restore previous replicas) |
-| `Paused` | Pause the workload (scale to zero), and keep it paused |
-
-Remove the field to return to automatic management.
+`target` can't be changed once the ManagedWorkload exists, since a paused target would be left at zero; the API server refuses the edit. To manage another workload, create another ManagedWorkload.
 
 ### `idlePolicy`
 
@@ -85,7 +78,7 @@ See [Idle Detection](../concepts/idle-detection.md) for how the activity clock w
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `idleAfter` | duration | `1h` | How long without any activity before pausing |
-| `activity.cpuThreshold` | int (percent) | `10` | CPU utilization, as % of requests, above which the workload counts as active (0-100) |
+| `activity.cpuThreshold` | int (percent) | `10` | CPU utilization, as % of requests, above which the workload counts as active (1-100) |
 | `activity.prometheus[].promQL` | string | _(none)_ | PromQL query; a result above zero counts as activity. See the [Prometheus Activity Guide](prometheus-signals.md) |
 | `autoResume` | bool | `false` | Wake ahead of the demand a confident forecast predicts |
 
@@ -112,17 +105,17 @@ While the workload is paused, a request to any of its Services wakes it and is a
 | `maxWait` | duration | `2m` | How long a request is held while the workload wakes. After it, the connection is closed; the wake carries on |
 | `page` | bool | `true` | Answer a browser loading a page with a waking-up page that reloads until the workload is Running. Other requests are held either way |
 
-A workload paused with `desiredState: Paused` doesn't wake on request.
-
 ### `prediction`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `confidence` | int (0-100) | `85` | Minimum accuracy before predictions drive decisions |
+| `confidence` | int (50-100) | `75` | Accuracy, as 1 − WAPE, a season's forecasts must reach before they drive decisions. See [Forecasting](../concepts/forecasting.md) |
+
+`prediction` itself is required; `prediction: {}` takes the default.
 
 ### `costTracking`
 
-Cost tracking is always enabled with AWS on-demand defaults. Set `costTracking.rates` to override pricing for your cloud provider.
+Cost tracking is always on, priced at the list price of the nodes the workload runs on, or AWS on-demand defaults where there's none. Set `costTracking.rates` to override pricing with what you pay; each rate you set wins over the others. See [Cost Tracking](../concepts/cost-tracking.md#prices).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -136,8 +129,8 @@ A paused workload scaled up by anything else, such as `kubectl scale` or a deplo
 
 ### `dryRun`
 
-When `true`, the operator evaluates all policies and emits events but takes no action. Use this to validate configuration before enabling.
+When `true`, the operator evaluates all policies and emits events but never pauses the workload, and wakes it if it had. Use this to validate configuration before enabling. See [Dry Run](dry-run.md).
 
 ## One Workload Per Target
 
-Only one ManagedWorkload can manage a given Deployment or StatefulSet. If you create a second ManagedWorkload pointing at the same target, the operator will set a `DuplicateTarget` condition and refuse to reconcile.
+Only one ManagedWorkload can manage a given Deployment or StatefulSet. If you create a second ManagedWorkload pointing at the same target, the newer one gets a `DuplicateTarget` condition naming the other, and does nothing until the older one is gone.

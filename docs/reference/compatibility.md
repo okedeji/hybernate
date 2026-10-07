@@ -1,6 +1,8 @@
 # Compatibility
 
-[Wake on request](../concepts/wake-on-request.md) adds an EndpointSlice to each Service of a paused workload, pointing at the doorman. Anything that finds a Service's backends through its EndpointSlices sends traffic to the doorman without changes. Each project reads them a little differently, so this page records what's been checked.
+Hybernate supports Kubernetes 1.30 and later, and is tested in CI on 1.30 and 1.37.
+
+[Wake on request](../concepts/wake-on-request.md) adds an EndpointSlice to each Service of a paused workload, one per IP family, pointing at the doorman. Anything that finds a Service's backends through its EndpointSlices sends traffic to the doorman without changes. Each project reads them a little differently, so this page records what's been checked.
 
 **Tested** means an end-to-end test runs it on every change. **Tried by hand** means it was run once on a test cluster for the release listed. **Checked against source** means the project's endpoint code was read for the release listed, but nothing runs it yet.
 
@@ -8,7 +10,8 @@
 
 | Proxy | Status | Notes |
 |-------|--------|-------|
-| kube-proxy (iptables, ipvs, nftables) | Tested | Covers ClusterIP, NodePort, and LoadBalancer Services |
+| kube-proxy, kind's default mode | Tested | ClusterIP Services, called from pods in the cluster and through ingress-nginx |
+| kube-proxy, other modes (ipvs, nftables), and NodePort and LoadBalancer Services | Not tested yet | kube-proxy programs these from the same EndpointSlices as ClusterIP, but no test runs them |
 | Cilium kube-proxy replacement (v1.20) | Checked against source | |
 
 ## Ingress controllers and Gateway API
@@ -30,7 +33,8 @@
 | AWS Load Balancer Controller, target type `instance` | Checked against source | Traffic reaches the doorman through the NodePort |
 | AWS Load Balancer Controller, target type `ip` | Checked against source | Registers the doorman pods as targets. The controller must watch the Hybernate namespace, which it does unless `--watch-namespace` is set |
 | GKE Ingress without NEGs | Checked against source | Traffic reaches the doorman through the NodePort |
-| GKE container-native load balancing (NEGs) | **Not supported** | Services with the `cloud.google.com/neg` annotation aren't routed: the NEG controller rejects endpoints whose pods are in another namespace, and can stop syncing the load balancer altogether. The workload reports `WakeOnRequest=False`, reason `UnsupportedLoadBalancer`, with a warning event. GKE adds the annotation to Services used by an Ingress by default |
+| HTTPS health checks on the traffic port, any provider | **Partial** | The doorman can't read an encrypted health check, so it can't tell it from a request, and each check wakes the workload: it never stays paused longer than the check interval. AWS target groups that use HTTPS, and Google Cloud backend services that use HTTPS or HTTP/2, check over HTTPS by default. Check over HTTP, or on a port of its own listed in `hybernate.io/doorman-ignore-ports`; see [Health checks the doorman can't recognise](../concepts/wake-on-request.md#health-checks-the-doorman-cant-recognise) |
+| GKE container-native load balancing (NEGs) | **Not supported** | Services with the `cloud.google.com/neg` annotation aren't routed: the NEG controller rejects endpoints whose pods are in another namespace, and can stop syncing the load balancer altogether. A warning event names them, and the workload reports `WakeOnRequest=False`, reason `UnsupportedLoadBalancer`, when no other Service of its is routed. GKE adds the annotation to Services used by an Ingress by default |
 
 ## Service meshes
 
