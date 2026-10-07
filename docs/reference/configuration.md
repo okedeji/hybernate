@@ -25,6 +25,7 @@ These flags are passed to the binary (`/manager`), which runs as the operator, o
 | `--doorman` | `false` | Run as the doorman instead of the operator. The doorman Deployment sets it |
 | `--doorman-service` | `hybernate-doorman` | Name of the doorman's Service, which the operator routes paused workloads to. Empty disables waking on request |
 | `--doorman-namespace` | `$POD_NAMESPACE`, else `hybernate-system` | Namespace of the doorman's Service |
+| `--doorman-health-check-user-agents` | | Comma-separated `User-Agent` prefixes of health checkers and scrapers, besides the built-in ones, whose `GET` and `HEAD` requests don't wake a paused workload. Helm value `doorman.healthCheckUserAgents` |
 | `--kubeconfig` | in-cluster | Path to a kubeconfig, only when running outside the cluster |
 | `--zap-log-level` | `info` | Log level: `debug`, `info`, `error`, `panic`, or a whole number above 0 for more verbose debug levels |
 | `--zap-encoder` | `json` | Log format: `json` or `console` |

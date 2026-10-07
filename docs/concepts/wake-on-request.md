@@ -29,14 +29,30 @@ WakeOnRequest=True   DoormanRouted   requests are held and wake the workload
 | Connects and sends nothing for 3 seconds | Held, and the workload wakes: it's taken for a protocol where the server speaks first, such as MySQL |
 | Connects and closes without sending anything, like a TCP health check | Closed; nothing wakes |
 | An HTTP `GET` or `HEAD` whose `User-Agent` starts with `kube-probe/`, `Prometheus/`, `vm_promscrape`, `GrafanaAgent/`, `Alloy/`, `OpenTelemetry Collector`, `otelcol`, `Datadog Agent/`, `ELB-HealthChecker/`, `GoogleHC/` or `Envoy/HC` | Answered `503 Service Unavailable` with `Connection: close` while no pod is Ready; nothing wakes. Probes and scrapers would otherwise keep a workload awake forever. Once a pod is Ready they're passed through like any other request |
+| An HTTP `GET` or `HEAD` whose `User-Agent` starts with one you added with the Helm value `doorman.healthCheckUserAgents`, such as an in-house uptime monitor's | Answered `503` as above; nothing wakes |
 | Any other method from those agents, such as a Prometheus remote write or an Alertmanager notification `POST` | Held, and the workload wakes: it's data for the workload, not a check on it |
+| An HTTP request for a hidden file: a path with a part that starts with a dot, such as `/.env`, `/.git/config` or `/.aws/credentials`, except under `/.well-known/` | Answered `404 Not Found`; nothing wakes. Scanners probe every address on the internet for these, hunting for leaked secrets, and no app serves them to its users |
 
-To keep the doorman off a port altogether, such as a metrics port something else scrapes, list it on the Service by name or number:
+Your own health checkers and scrapers are recognised once you add their `User-Agent` prefixes, cluster-wide:
 
 ```yaml
+doorman:
+  healthCheckUserAgents: ["MyCorpMonitor/", "uptime-kuma"]
+```
+
+To keep the doorman off a port altogether, such as a metrics port something else scrapes, list it on the Service. Ports are named in the Service's `ports`, and the annotation takes either the name or the number:
+
+```yaml
+kind: Service
 metadata:
   annotations:
-    hybernate.io/doorman-ignore-ports: "metrics,9090"
+    hybernate.io/doorman-ignore-ports: "metrics"   # or "9090", or both: "metrics,9090"
+spec:
+  ports:
+    - name: http
+      port: 80
+    - name: metrics
+      port: 9090
 ```
 
 Listed ports are never routed, so connections to them fail while the workload is paused, as they would without Hybernate.
@@ -46,7 +62,7 @@ Listed ports are never routed, so connections to them fail while the workload is
 The doorman can only tell a health check from a real caller by reading it. Two kinds reach a paused workload on its traffic port and wake it every time they run, so it never stays paused for longer than their interval:
 
 - **HTTPS and other TLS health checks.** The request is encrypted, so the doorman can't see its `User-Agent`. AWS target groups that use HTTPS check over HTTPS by default, as do Google Cloud backend services that use HTTPS or HTTP/2.
-- **HTTP checks and scrapers whose `User-Agent` isn't in the list above**, such as an uptime monitor.
+- **HTTP checks and scrapers whose `User-Agent` isn't recognised**, such as an uptime monitor you haven't added to `doorman.healthCheckUserAgents`.
 
 `hybernate.io/doorman-ignore-ports` can't help when the checked port is the traffic port, since ignoring it would stop requests waking the workload too. Instead, either:
 
@@ -54,6 +70,12 @@ The doorman can only tell a health check from a real caller by reading it. Two k
 - **Check a port of its own,** one the workload serves only for health checks, and list it in `hybernate.io/doorman-ignore-ports`.
 
 Either way, the load balancer sees the workload as unhealthy while it's paused, as it would without Hybernate. That's what lets it pause, and it's what makes the first request after a pause slow rather than instant. Most load balancers still send requests when every target is unhealthy (AWS's Application and Network Load Balancers fail open), so the first request still reaches the doorman and wakes the workload. Some answer with an error instead until a target is healthy again; check yours before relying on wake on request behind it.
+
+### Environments on the public internet
+
+Wake on request wakes a paused workload for any request it can't recognise as a health check, and on the public internet most requests are robots: search engine crawlers, and scanners that try every address for known weaknesses. Many of them present an ordinary browser's `User-Agent` on purpose, so no list of agents can keep up with them. A paused workload anyone on the internet can reach is woken by them every few minutes, and saves little.
+
+The doorman turns away the scanners hunting for leaked secrets in hidden files, as above, but not the rest. Put non-production environments behind a VPN, single sign-on at the ingress, or an allowlist of your offices' and VPN's addresses. That keeps the robots away from them, which pausing needs, and keeps unfinished work away from the internet, which a staging or preview environment needs anyway.
 
 ### Services shared with other workloads
 
