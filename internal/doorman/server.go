@@ -81,6 +81,11 @@ type Options struct {
 	// Informers, when set, wake held connections as soon as their
 	// workload's endpoints change instead of at the next poll.
 	Informers Informers
+
+	// HealthCheckAgents are User-Agent prefixes of health checkers and
+	// scrapers to recognise besides the built-in ones, such as an in-house
+	// uptime monitor's, so their requests don't wake workloads.
+	HealthCheckAgents []string
 }
 
 // route is what the doorman knows about one listening port.
@@ -116,6 +121,8 @@ type Server struct {
 	pollEvery time.Duration
 	silent    time.Duration
 
+	healthCheckAgents []string
+
 	backends  *backends
 	admission *admission
 
@@ -147,15 +154,29 @@ func NewServer(c client.Client, recorder events.EventRecorder, opts Options) *Se
 		pollEvery: backendPollInterval,
 		silent:    silentWake,
 		backends:  newBackends(c),
-		admission: newAdmission(defaultLimits),
-		routes:    map[int32]route{},
-		conflicts: map[int32]bool{},
-		listeners: map[int32]net.Listener{},
-		conns:     map[net.Conn]struct{}{},
-		wakeCalls: map[types.NamespacedName]*wakeCall{},
-		stamped:   map[types.NamespacedName]stampRecord{},
-		lastWarn:  map[types.NamespacedName]time.Time{},
+
+		healthCheckAgents: healthCheckAgents(opts.HealthCheckAgents),
+		admission:         newAdmission(defaultLimits),
+		routes:            map[int32]route{},
+		conflicts:         map[int32]bool{},
+		listeners:         map[int32]net.Listener{},
+		conns:             map[net.Conn]struct{}{},
+		wakeCalls:         map[types.NamespacedName]*wakeCall{},
+		stamped:           map[types.NamespacedName]stampRecord{},
+		lastWarn:          map[types.NamespacedName]time.Time{},
 	}
+}
+
+// healthCheckAgents is the built-in User-Agent prefixes and the extra ones
+// asked for, without blanks, which would match every request.
+func healthCheckAgents(extra []string) []string {
+	agents := slices.Clone(defaultHealthCheckAgents)
+	for _, agent := range extra {
+		if agent = strings.TrimSpace(agent); agent != "" {
+			agents = append(agents, agent)
+		}
+	}
+	return agents
 }
 
 // Start serves until ctx is done. Then it stops accepting connections,

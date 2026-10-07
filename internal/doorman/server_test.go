@@ -596,6 +596,42 @@ func TestServer_PassesAProbeThroughWhenAPodIsReady(t *testing.T) {
 	assert.Empty(t, lastRequest(t, c), "a scrape never wakes the workload")
 }
 
+// A scanner hunting for leaked secrets in hidden files gets a 404, and the
+// paused workload sleeps on; a real request after it still wakes it.
+func TestServer_HiddenFileRequestsDoNotWake(t *testing.T) {
+	port := freePort(t)
+	_, c := startServer(t, pausedWorkload("api", port, time.Minute))
+	before := wakes(resultIgnored)
+
+	conn := dial(t, port)
+	send(t, conn, "GET /.env HTTP/1.1\r\nHost: shop.example.dev\r\nUser-Agent: Mozilla/5.0\r\n\r\n")
+	resp, _ := readResponse(t, conn)
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	require.Eventually(t, func() bool { return wakes(resultIgnored) == before+1 }, 5*time.Second, 10*time.Millisecond)
+	assert.Empty(t, lastRequest(t, c), "the workload stays paused")
+
+	send(t, dial(t, port), "GET / HTTP/1.1\r\nHost: shop.example.dev\r\n\r\n")
+	require.Eventually(t, func() bool { return lastRequest(t, c) != "" }, 5*time.Second, 20*time.Millisecond,
+		"a real request still wakes it")
+}
+
+// A health checker the doorman doesn't know by default is recognised once
+// its User-Agent is added.
+func TestServer_AddedHealthCheckAgentsDoNotWake(t *testing.T) {
+	port := freePort(t)
+	_, c := startServerWith(t, func(s *Server) { s.healthCheckAgents = healthCheckAgents([]string{"MyCorpMonitor/"}) },
+		pausedWorkload("api", port, time.Minute))
+
+	conn := dial(t, port)
+	send(t, conn, "GET /healthz HTTP/1.1\r\nHost: 10.0.0.1\r\nUser-Agent: MyCorpMonitor/3.1\r\n\r\n")
+	resp, _ := readResponse(t, conn)
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Never(t, func() bool { return lastRequest(t, c) != "" }, 300*time.Millisecond, 20*time.Millisecond,
+		"the workload stays paused")
+}
+
 // Some protocols, such as MySQL, wait for the server to speak first. A
 // client that stays connected without sending anything wakes the workload.
 func TestServer_WakesForAClientWaitingOnTheServer(t *testing.T) {

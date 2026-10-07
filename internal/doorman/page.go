@@ -99,10 +99,11 @@ func parseRequest(head []byte) (*http.Request, bool) {
 	return req, true
 }
 
-// healthCheckAgents are the User-Agent prefixes of load balancer health
-// checks, kubelet probes and metrics scrapers. They reach a paused
+// defaultHealthCheckAgents are the User-Agent prefixes of load balancer
+// health checks, kubelet probes and metrics scrapers. They reach a paused
 // workload's Service on a schedule, so a request from one never wakes it.
-var healthCheckAgents = []string{
+// Options.HealthCheckAgents adds to them.
+var defaultHealthCheckAgents = []string{
 	"kube-probe/",
 	"Prometheus/",
 	"vm_promscrape",
@@ -116,16 +117,17 @@ var healthCheckAgents = []string{
 	"Envoy/HC",
 }
 
-// isHealthCheck reports whether req comes from a health checker or scraper.
-// Only a GET or HEAD can be one: the same agents also send real traffic,
-// such as Prometheus remote write and Alertmanager notifications, which
-// are POSTs and must reach the workload.
-func isHealthCheck(req *http.Request) bool {
+// isHealthCheck reports whether req comes from a health checker or scraper,
+// one whose User-Agent starts with one of agents. Only a GET or HEAD can be
+// one: the same agents also send real traffic, such as Prometheus remote
+// write and Alertmanager notifications, which are POSTs and must reach the
+// workload.
+func isHealthCheck(req *http.Request, agents []string) bool {
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		return false
 	}
 	agent := req.UserAgent()
-	for _, prefix := range healthCheckAgents {
+	for _, prefix := range agents {
 		if strings.HasPrefix(agent, prefix) {
 			return true
 		}
@@ -135,6 +137,33 @@ func isHealthCheck(req *http.Request) bool {
 
 // writeUnavailable answers a health check: the workload is paused, so it
 // isn't healthy, and it stays paused.
+// isHiddenFileRequest reports whether req asks for a hidden file, one with
+// a path segment that starts with a dot, such as /.env or /.git/config.
+// Scanners crawl the internet for these, hoping for leaked secrets; no app
+// serves them to its users, so such a request never wakes a workload.
+// /.well-known/ is the exception, since real clients use it, as ACME
+// certificate checks do.
+func isHiddenFileRequest(req *http.Request) bool {
+	for i, segment := range strings.Split(req.URL.Path, "/") {
+		if !strings.HasPrefix(segment, ".") || segment == "." || segment == ".." {
+			continue
+		}
+		if i == 1 && segment == ".well-known" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func writeNotFound(w io.Writer) error {
+	_, err := io.WriteString(w, "HTTP/1.1 404 Not Found\r\n"+
+		"Content-Length: 0\r\n"+
+		"Cache-Control: no-store\r\n"+
+		"Connection: close\r\n\r\n")
+	return err
+}
+
 func writeUnavailable(w io.Writer) error {
 	_, err := io.WriteString(w, "HTTP/1.1 503 Service Unavailable\r\n"+
 		"Content-Length: 0\r\n"+

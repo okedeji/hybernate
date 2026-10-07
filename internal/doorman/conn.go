@@ -169,9 +169,14 @@ func (h *heldConn) hold(ctx context.Context) (net.Conn, string) {
 	h.head = head
 	req, isHTTP := parseRequest(head)
 
-	if isHTTP && isHealthCheck(req) {
+	if isHTTP && isHealthCheck(req, h.healthCheckAgents) {
 		_ = h.conn.SetWriteDeadline(time.Now().Add(dialTimeout)) // a failure just means no deadline
 		_ = writeUnavailable(h.conn)                             // the caller may already have gone
+		return nil, resultIgnored
+	}
+	if isHTTP && isHiddenFileRequest(req) {
+		_ = h.conn.SetWriteDeadline(time.Now().Add(dialTimeout)) // a failure just means no deadline
+		_ = writeNotFound(h.conn)                                // the caller may already have gone
 		return nil, resultIgnored
 	}
 

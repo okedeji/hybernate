@@ -88,7 +88,53 @@ func TestIsHealthCheck(t *testing.T) {
 	for _, tt := range tests {
 		req, ok := parseRequest(request(tt.method+" /healthz HTTP/1.1", "Host: shop", "User-Agent: "+tt.agent))
 		require.True(t, ok)
-		assert.Equal(t, tt.want, isHealthCheck(req), "%s %s", tt.method, tt.agent)
+		assert.Equal(t, tt.want, isHealthCheck(req, defaultHealthCheckAgents), "%s %s", tt.method, tt.agent)
+	}
+}
+
+// Agents added with Options.HealthCheckAgents are recognised alongside the
+// built-in ones, and a blank one is dropped rather than matching everything.
+func TestHealthCheckAgents_AddToTheBuiltIn(t *testing.T) {
+	agents := healthCheckAgents([]string{"MyCorpMonitor/", "  uptime-kuma ", "", "   "})
+	probe := func(agent string) bool {
+		req, ok := parseRequest(request("GET /healthz HTTP/1.1", "Host: shop", "User-Agent: "+agent))
+		require.True(t, ok)
+		return isHealthCheck(req, agents)
+	}
+
+	assert.True(t, probe("MyCorpMonitor/3.1"))
+	assert.True(t, probe("uptime-kuma/1.23"))
+	assert.True(t, probe("kube-probe/1.31"), "the built-in agents still count")
+	assert.False(t, probe("Mozilla/5.0 (X11; Linux x86_64)"))
+	assert.Len(t, agents, len(defaultHealthCheckAgents)+2)
+}
+
+// Scanners probe every address for hidden files, hoping for leaked secrets;
+// none of them is anything an app serves its users.
+func TestIsHiddenFileRequest(t *testing.T) {
+	tests := map[string]bool{
+		"/.env":                             true,
+		"/.env.production":                  true,
+		"/.git/config":                      true,
+		"/.aws/credentials":                 true,
+		"/.ssh/id_rsa":                      true,
+		"/api/.env":                         true,
+		"/static/.DS_Store":                 true,
+		"/%2eenv":                           true,
+		"/.well-known/acme-challenge/token": false,
+		"/.well-known/openid-configuration": false,
+		"/api/.well-known/x":                true,
+		"/":                                 false,
+		"/index.html":                       false,
+		"/api/v1/users":                     false,
+		"/files/report.v2.pdf":              false,
+		"/a/../b":                           false,
+		"/./index.html":                     false,
+	}
+	for path, want := range tests {
+		req, ok := parseRequest(request("GET "+path+" HTTP/1.1", "Host: shop"))
+		require.True(t, ok, path)
+		assert.Equal(t, want, isHiddenFileRequest(req), path)
 	}
 }
 
