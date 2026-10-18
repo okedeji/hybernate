@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -38,9 +39,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 func optInNamespace(labels, annotations map[string]string) *corev1.Namespace {
@@ -128,6 +131,17 @@ func TestOptIn_Namespace(t *testing.T) {
 	assert.Equal(t, 20*time.Minute, worker.Spec.IdlePolicy.IdleAfter.Duration, "a workload's own setting wins")
 	_, ok = managedWorkload(t, r, "tools")
 	assert.False(t, ok, "ignore opts a workload out")
+}
+
+func TestOptIn_FailedReconcileIsCounted(t *testing.T) {
+	r, _ := optInReconciler(t, optInDeployment("api", managedLabel, nil))
+	failed := metrics.ReconcileErrors.WithLabelValues("optin")
+	before := testutil.ToFloat64(failed)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "dev", Name: "api"}})
+
+	require.Error(t, err, "the workload's namespace can't be read")
+	assert.Equal(t, before+1, testutil.ToFloat64(failed))
 }
 
 func TestOptIn_NotOptedIn(t *testing.T) {
@@ -563,4 +577,74 @@ func TestOptIn_NamespaceLabelThroughTheWatch(t *testing.T) {
 	require.NoError(t, c.Update(ctx, ns))
 	require.Eventually(t, gone, 10*time.Second, 50*time.Millisecond,
 		"removing the namespace's label releases a paused workload, whose ManagedWorkload's deletion restores it")
+}
+
+// A namespace's depends-on makes its workloads depend on the ones it names,
+// not those on each other or on what depends on them: either would be a
+// cycle, and no workload in it could pause.
+func TestOptIn_NamespaceDependsOnReachesOnlyDependents(t *testing.T) {
+	statefulSet := func(name string, annotations map[string]string) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "dev",
+			UID: types.UID("uid-sts-" + name), Annotations: annotations}}
+	}
+	ref := func(kind v1alpha1.TargetKind, name string) v1alpha1.DependencyRef {
+		return v1alpha1.DependencyRef{Kind: kind, Name: name}
+	}
+	postgres := ref(v1alpha1.TargetKindStatefulSet, "postgres")
+	redis := ref(v1alpha1.TargetKindStatefulSet, "redis")
+	auth := ref(v1alpha1.TargetKindDeployment, "auth")
+	tests := []struct {
+		name      string
+		namespace string
+		objs      []client.Object
+		want      map[v1alpha1.DependencyRef][]v1alpha1.DependencyRef
+	}{
+		{name: "several entries", namespace: "statefulset/postgres, statefulset/redis",
+			objs: []client.Object{statefulSet("postgres", nil), statefulSet("redis", nil), optInDeployment("api", nil, nil)},
+			want: map[v1alpha1.DependencyRef][]v1alpha1.DependencyRef{
+				postgres: nil, redis: nil, ref(v1alpha1.TargetKindDeployment, "api"): {postgres, redis}}},
+		{name: "a named workload's own dependency", namespace: "deployment/auth",
+			objs: []client.Object{statefulSet("postgres", nil), optInDeployment("api", nil, nil),
+				optInDeployment("auth", nil, map[string]string{v1alpha1.AnnotationDependsOn: "statefulset/postgres"})},
+			want: map[v1alpha1.DependencyRef][]v1alpha1.DependencyRef{
+				postgres: nil, auth: {postgres}, ref(v1alpha1.TargetKindDeployment, "api"): {auth}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := optInNamespace(managedLabel, map[string]string{v1alpha1.AnnotationDependsOn: tt.namespace})
+			deployments, _ := optInReconciler(t, append(tt.objs, ns)...)
+			statefulSets := statefulSetReconciler(deployments)
+
+			for workload := range tt.want {
+				r := deployments
+				if workload.Kind == v1alpha1.TargetKindStatefulSet {
+					r = statefulSets
+				}
+				reconcileOptIn(t, r, workload.Name)
+			}
+
+			for workload, want := range tt.want {
+				mw, ok := managedWorkload(t, deployments, workload.Name)
+				require.True(t, ok, workload.Name)
+				assert.Equal(t, want, mw.Spec.DependsOn, workload.Name)
+			}
+		})
+	}
+}
+
+// A workload's own depends-on changing re-checks the workloads beside it,
+// which may take their namespace's depends-on, or stop taking it, as a
+// result.
+func TestOptIn_DependsOnChangedPredicate(t *testing.T) {
+	with := func(value string) *appsv1.Deployment {
+		return optInDeployment("auth", nil, map[string]string{v1alpha1.AnnotationDependsOn: value})
+	}
+	p := dependsOnChanged()
+
+	assert.True(t, p.Create(event.CreateEvent{Object: with("statefulset/postgres")}))
+	assert.False(t, p.Create(event.CreateEvent{Object: optInDeployment("auth", nil, nil)}))
+	assert.True(t, p.Update(event.UpdateEvent{ObjectOld: optInDeployment("auth", nil, nil), ObjectNew: with("")}))
+	assert.True(t, p.Update(event.UpdateEvent{ObjectOld: with("statefulset/postgres"), ObjectNew: with("statefulset/redis")}))
+	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: with("statefulset/postgres"), ObjectNew: with("statefulset/postgres")}))
+	assert.True(t, p.Delete(event.DeleteEvent{Object: with("statefulset/postgres")}))
 }

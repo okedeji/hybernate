@@ -11,7 +11,8 @@ Hybernate supports Kubernetes 1.30 and later, and is tested in CI on 1.30 and 1.
 | Proxy | Status | Notes |
 |-------|--------|-------|
 | kube-proxy, kind's default mode | Tested | ClusterIP Services, called from pods in the cluster and through ingress-nginx |
-| kube-proxy, other modes (ipvs, nftables), and NodePort and LoadBalancer Services | Not tested yet | kube-proxy programs these from the same EndpointSlices as ClusterIP, but no test runs them |
+| kube-proxy, other modes (ipvs, nftables), and NodePort and LoadBalancer Services | Not tested yet | kube-proxy programs these from the same EndpointSlices as ClusterIP, but no test runs them. Their traffic usually reaches the doorman from a node's address, which `doorman.networkPolicy.ingressFrom` must admit as an `ipBlock`; see [Restricting who can reach the doorman](../concepts/wake-on-request.md#restricting-who-can-reach-the-doorman) |
+| NodePort and LoadBalancer Services with `externalTrafficPolicy: Local` | **Partial** | Routed, but kube-proxy sends external traffic only to endpoints on the node it arrives at, so it reaches the doorman only through nodes that run a doorman pod; through any other node it's dropped, and the workload doesn't wake |
 | Cilium kube-proxy replacement (v1.20) | Checked against source | |
 
 ## Ingress controllers and Gateway API
@@ -46,4 +47,4 @@ Hybernate supports Kubernetes 1.30 and later, and is tested in CI on 1.30 and 1.
 | Istio ambient mode (v1.31) | **Not supported** | ztunnel builds a Service's backends from its pods, not its EndpointSlices, so callers in the mesh never reach the doorman and the workload doesn't wake. Callers outside the mesh still do |
 | Istio AuthorizationPolicies that match on the caller's identity | **Not supported** (not tried) | Connections from the doorman carry no caller identity, so a policy that allows only certain callers denies them |
 
-If you run something that isn't listed, or hit a problem with something that is, please [open an issue](https://github.com/okedeji/hybernate/issues). To turn wake on request off for one workload, set `wake.onRequest: false`; for the whole cluster, set the Helm value `doorman.enabled: false`.
+If you run something that isn't listed, or hit a problem with something that is, please [open an issue](https://github.com/okedeji/hybernate/issues). To turn wake on request off for one workload, set `wake.onRequest: false`, or the annotation `hybernate.io/wake-on-request: "false"` on a workload opted in with the label; for the whole cluster, set the Helm value `doorman.enabled: false`.

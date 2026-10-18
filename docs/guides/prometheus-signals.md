@@ -4,7 +4,7 @@ CPU tells Hybernate whether a workload is doing work. A Prometheus query tells i
 
 ## How It Works
 
-On every check (about once a minute while the workload is awake), Hybernate runs each query as an instant query against the Prometheus API (`/api/v1/query`), with a 5-second timeout.
+On every check (about once a minute while the workload is awake), Hybernate runs each query in turn as an instant query against the Prometheus API (`/api/v1/query`), stopping at the first that shows activity. Each query has 2 seconds to answer, and all of a workload's queries 5 seconds together.
 
 - **Any series above zero**: activity. The [activity clock](../concepts/idle-detection.md) resets. With a series per pod, one busy pod is enough.
 - **Zero, or an empty result**: no activity from this source. The clock keeps running.
@@ -31,10 +31,10 @@ Prometheus queries can't be set with an annotation. On a ManagedWorkload created
 
 ## Prometheus Endpoint
 
-Set the Prometheus URL with the `prometheus.url` Helm value, which passes `--prometheus-url` to the operator:
+Set the Prometheus URL with the `prometheus.url` Helm value, which passes `--prometheus-url` to the operator. Pass the chart version you have installed as `--version`, which `helm list -n hybernate-system` shows, or Helm upgrades to the newest chart too:
 
 ```bash
-helm upgrade hybernate oci://ghcr.io/okedeji/charts/hybernate \
+helm upgrade hybernate oci://ghcr.io/okedeji/charts/hybernate --version X.Y.Z \
   --namespace hybernate-system --reuse-values \
   --set prometheus.url=http://prometheus.monitoring.svc.cluster.local:9090
 ```
@@ -48,7 +48,7 @@ If a query fails, Hybernate can't see that activity, so it doesn't pause the wor
 | Reason | Meaning |
 |--------|---------|
 | `EndpointNotConfigured` | Queries are configured but the operator has no `--prometheus-url` |
-| `QueryFailed` | Prometheus returned an error, couldn't be reached within 5 seconds, or returned a range vector or an oversized result. The condition message has the details |
+| `QueryFailed` | Prometheus returned an error, didn't answer a query within 2 seconds or all of the workload's within 5, or returned a range vector or an oversized result. The condition message has the details |
 
 ```bash
 kubectl get managedworkload my-api -n staging \
@@ -56,6 +56,10 @@ kubectl get managedworkload my-api -n staging \
 ```
 
 The condition only appears on workloads that configure Prometheus queries.
+
+A query that answers but matches no series at all looks just like a quiet workload, and that's also what a misspelt metric or label name gives. Hybernate can't tell the two apart, so the workload pauses on its other sources as usual, but a query that has matched no series since it was first evaluated is pointed out: `PrometheusQueryEmpty=True`, reason `NoSeries`, with the queries in its message, and a `PrometheusQueryEmpty` warning event when it begins. It clears once the query matches a series, even one at zero. A counter that's only created on the first request, as many client libraries' labelled counters are, also matches nothing until then; once it exists the condition clears. What a query has matched is remembered in memory, so after an operator restart a query is checked again from its first evaluation.
+
+When Prometheus itself fails, by not answering, answering with a server error or `429`, or timing out on three queries in a row, the operator doesn't ask it again for a minute: every workload's queries fail at once, as `QueryFailed` with `prometheus failed recently, not asked again yet` and the original error, so none waits out a timeout and holds up the wakes queued behind it. A query Prometheus rejects, such as one that doesn't parse, fails only for the workloads that use it. Time that a query can't be evaluated isn't counted as idle: Prometheus out for longer than a couple of checks restarts the clock (`lastActivitySource: unobserved`), so a workload is never paused because Prometheus was down. A query that times out while other queries are answered fails only for the workloads that use it, so one tenant's slow query doesn't hold off everyone's. Still keep queries cheap: aggregate, and use recording rules for anything heavy.
 
 ## Example Queries
 

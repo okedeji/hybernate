@@ -31,3 +31,6 @@ resources:
 - managedworkload_editor_role.yaml
 - managedworkload_viewer_role.yaml
 
+
+configurations:
+- kustomizeconfig.yaml

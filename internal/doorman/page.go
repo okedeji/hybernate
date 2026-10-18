@@ -86,6 +86,18 @@ func looksLikeHTTP(head []byte) bool {
 	return false
 }
 
+// startsMethod reports whether head is cut short of a method, as the first
+// segment of a request split by a proxy or a slow link can be, so more must
+// be read before the connection can be told apart.
+func startsMethod(head []byte) bool {
+	for _, m := range httpMethods {
+		if len(head) > 0 && len(head) < len(m) && strings.HasPrefix(m, string(head)) {
+			return true
+		}
+	}
+	return false
+}
+
 // headersEnded reports whether head holds a whole request's headers. Lines
 // may end in a bare LF, as net/http accepts and some probes and scripts
 // send.

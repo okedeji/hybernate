@@ -53,6 +53,8 @@ for platform in "${platforms[@]}"; do
           to: kubectl-hybernate${ext}
         - from: LICENSE
           to: .
+        - from: NOTICE
+          to: .
       bin: kubectl-hybernate${ext}
 EOF
 done

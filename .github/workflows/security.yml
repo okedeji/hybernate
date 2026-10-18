@@ -1,8 +1,14 @@
 name: Security
 
+# Daily as well as on every change, so a vulnerability disclosed after a
+# release is reported against main and the released image, not only the
+# next pull request.
 on:
   pull_request:
   workflow_call:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,9 +17,10 @@ jobs:
   govulncheck:
     name: Go vulnerabilities
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       # Fails only on vulnerabilities Hybernate's code reaches, not every
@@ -23,19 +30,43 @@ jobs:
   image:
     name: Image vulnerabilities (${{ matrix.platform }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - run: docker buildx build --platform ${{ matrix.platform }} --load -t hybernate:scan .
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - env:
+          PLATFORM: ${{ matrix.platform }}
+        run: docker buildx build --platform "$PLATFORM" --load -t hybernate:scan .
       # Fails on critical and high vulnerabilities with a fix available;
       # unfixed ones are reported, not blocking, so an upstream bug with no
       # fix can't hold up every pull request.
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: hybernate:scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  # The image the last release published, which runs the operator and the
+  # doorman both.
+  released:
+    name: Released image vulnerabilities (${{ matrix.platform }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:latest
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"

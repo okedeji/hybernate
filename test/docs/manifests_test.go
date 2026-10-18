@@ -213,13 +213,17 @@ func specFields(t *testing.T) map[string]bool {
 }
 
 // TestDocsHelmValuesAreValid checks the docs' Helm values against the
-// chart's values.schema.json, as helm install would, and also that each value
-// they set is one the chart has: the schema leaves unknown keys open, and
-// helm ignores a misspelt value without a word.
+// chart's values.schema.json, as helm install would, which also refuses a
+// value the chart doesn't have, such as a misspelt one.
 func TestDocsHelmValuesAreValid(t *testing.T) {
 	chart := filepath.Join(repoRoot, "charts", "hybernate")
 
 	data, err := os.ReadFile(filepath.Join(chart, "values.schema.json"))
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	definitions, _ := raw["definitions"].(map[string]any)
+	data, err = json.Marshal(inlineRefs(t, raw, definitions))
 	require.NoError(t, err)
 	var schema spec.Schema
 	require.NoError(t, json.Unmarshal(data, &schema))
@@ -239,11 +243,36 @@ func TestDocsHelmValuesAreValid(t *testing.T) {
 		t.Run(m.source, func(t *testing.T) {
 			assert.NoError(t, validate.AgainstSchema(&schema, values, strfmt.Default),
 				"%s: the chart's schema rejects these values", m.source)
-			assert.Empty(t, unknownValues("", values, defaults, &schema),
-				"%s: the chart has no such values", m.source)
 		})
 	}
 	require.NotZero(t, checked, "the docs show at least one set of Helm values")
+}
+
+// inlineRefs replaces each "$ref" to the schema's definitions with the
+// definition, since the validator doesn't follow references, as helm does.
+func inlineRefs(t *testing.T, node any, definitions map[string]any) any {
+	t.Helper()
+	switch n := node.(type) {
+	case map[string]any:
+		if ref, ok := n["$ref"].(string); ok {
+			def, found := definitions[strings.TrimPrefix(ref, "#/definitions/")]
+			require.True(t, found, "the chart's schema has no %s", ref)
+			return inlineRefs(t, def, definitions)
+		}
+		out := make(map[string]any, len(n))
+		for k, v := range n {
+			out[k] = inlineRefs(t, v, definitions)
+		}
+		return out
+	case []any:
+		out := make([]any, len(n))
+		for i, v := range n {
+			out[i] = inlineRefs(t, v, definitions)
+		}
+		return out
+	default:
+		return node
+	}
 }
 
 var valuesFile = regexp.MustCompile(`^values(-[\w.-]+)?\.yaml$`)
@@ -269,37 +298,6 @@ func isChartValues(m manifest, values, defaults map[string]any, schema *spec.Sch
 		return false
 	}
 	return true
-}
-
-// unknownValues returns the paths in values that neither the chart's
-// defaults nor its schema has. It doesn't look inside lists, or inside a map
-// whose contents the chart leaves to the user, such as nodeSelector.
-func unknownValues(path string, values, defaults map[string]any, schema *spec.Schema) []string {
-	var unknown []string
-	for key, value := range values {
-		at := path + key
-		def, inDefaults := defaults[key]
-		var sub *spec.Schema
-		if schema != nil {
-			if s, ok := schema.Properties[key]; ok {
-				sub = &s
-			}
-		}
-		if !inDefaults && sub == nil {
-			unknown = append(unknown, at)
-			continue
-		}
-		nested, ok := value.(map[string]any)
-		if !ok {
-			continue
-		}
-		nestedDefaults, _ := def.(map[string]any)
-		if len(nestedDefaults) == 0 && (sub == nil || len(sub.Properties) == 0) {
-			continue
-		}
-		unknown = append(unknown, unknownValues(at+".", nested, nestedDefaults, sub)...)
-	}
-	return unknown
 }
 
 func markdownManifests(t *testing.T) []manifest {
@@ -500,21 +498,4 @@ func TestSpecFragment(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-func TestUnknownValues(t *testing.T) {
-	defaults := map[string]any{
-		"doorman":      map[string]any{"enabled": true, "nodeSelector": map[string]any{}},
-		"replicaCount": 1,
-	}
-	schema := &spec.Schema{SchemaProps: spec.SchemaProps{Properties: map[string]spec.Schema{
-		"logLevel": {},
-	}}}
-	values := map[string]any{
-		"doorman":      map[string]any{"enabled": false, "enabeld": true, "nodeSelector": map[string]any{"pool": "spot"}},
-		"logLevel":     "debug",
-		"replicaCount": 2,
-		"replicas":     2,
-	}
-	assert.ElementsMatch(t, []string{"doorman.enabeld", "replicas"}, unknownValues("", values, defaults, schema))
 }

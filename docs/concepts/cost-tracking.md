@@ -19,7 +19,7 @@ Hybernate keeps the month's totals as resource-hours, brought up to date at ever
 | `storageHours` | GiB-hours of the PersistentVolumeClaims its pods mount, in every phase: a pause doesn't free storage |
 | `pausedCPUHours`, `pausedMemoryHours` | vCPU-hours and GiB-hours the replicas Hybernate paused had requested, for as long as they were paused: what pausing freed |
 
-While the workload is awake, its replicas are read from the target each time, and what one replica requests is read from its pods hourly and whenever its pod template changes. While it's paused, the paused hours are priced on what it ran when the pause began (`status.pause.resources`). If its pods can't be read as it pauses, that snapshot keeps what was last read of it awake.
+While the workload is awake, its replicas are read from the target each time, or, if they can't be read, taken as last read, so the time before a phase change is still counted in the phase it was spent in; what one replica requests is read from its pods hourly and whenever its pod template changes. While it's paused, the paused hours are priced on what it ran when the pause began (`status.pause.resources`). If its pods can't be read as it pauses, that snapshot keeps what was last read of it awake, as it does the replicas of a pause finished after an interruption, which finds the target at zero already.
 
 A gap between updates longer than 2 hours, such as while the operator wasn't running, counts as 2 hours, since what the workload did meanwhile isn't known. `tracked` is how much of the month the totals cover: less than the time since the month began when the workload was created during the month, or after such a gap.
 
@@ -43,7 +43,7 @@ The rates are applied to the whole month's hours each time the dollar figures ar
 
 **How a node's price becomes rates.** A cloud provider prices an instance as a whole, so Hybernate splits its hourly price between its vCPUs and its memory in the defaults' proportion: a vCPU costs as much as 7.75 GiB of memory. An `m6i.large` (2 vCPU, 8 GiB, $0.096 an hour) comes out at $0.0317 per vCPU-hour and $0.0041 per GiB-hour. A memory-optimized instance's memory and a compute-optimized one's CPU come out at what they cost there, and a pod pays for the share of the node it requests.
 
-**Where the prices come from.** Hybernate ships with the on-demand Linux list price of every AWS, Google Cloud, and Azure instance type, in every region it's sold, taken from the providers' public price lists through [instances.vantage.sh](https://instances.vantage.sh) and refreshed each release. Nothing is looked up at runtime, so it works offline and air-gapped. Instances on GPU nodes are priced the same way, so a pod on a GPU node pays its share of the GPU too.
+**Where the prices come from.** Hybernate ships with the on-demand Linux list price of every AWS, Google Cloud, and Azure instance type, in every region it's sold, taken from the providers' public price lists through [instances.vantage.sh](https://instances.vantage.sh) and refreshed each release. Nothing is looked up at runtime, so it works offline and air-gapped. An Azure constrained vCPU size, such as `Standard_E4-2s_v5`, is billed as its base size, `Standard_E4s_v5`, so it's priced at the base size's price spread over the vCPUs it has. Instances on GPU nodes are priced the same way, so a pod on a GPU node pays its share of the GPU too.
 
 **What list prices leave out.** Spot and preemptible nodes are priced at on-demand, so their workloads cost less than shown. Savings plans, reserved instances, committed-use discounts, and negotiated rates aren't known to Hybernate; set `costTracking.rates` for those.
 
@@ -74,15 +74,15 @@ status:
     storageHours: "4125"
     pausedCPUHours: "664500m"
     pausedMemoryHours: "1329"
-    costThisMonth: "$6.71"
-    savedThisMonth: "$25.92"
-    costWithoutHybernateThisMonth: "$32.63"
-    projectedMonthlyCost: "$12.11"
-    projectedMonthlySavings: "$46.71"
+    costThisMonth: "$6.84"
+    savedThisMonth: "$26.47"
+    costWithoutHybernateThisMonth: "$33.31"
+    projectedMonthlyCost: "$12.35"
+    projectedMonthlySavings: "$47.74"
     running:
       replicas: 2
-      cpuMillis: 500
-      memoryBytes: 1073741824
+      cpuMillis: 1000
+      memoryBytes: 2147483648
       storageBytes: 10737418240
     pricedAt: "2026-10-18T14:00:00Z"
     pricedTemplateHash: 3f9c2a71d0e4b815

@@ -1,0 +1,11 @@
+# The doorman's ValidatingAdmissionPolicyBinding names its policy, so the
+# name prefix applied to the policy is applied there too. Without it, the
+# binding would name a policy that doesn't exist, and the doorman would go
+# unrestricted.
+nameReference:
+- kind: ValidatingAdmissionPolicy
+  group: admissionregistration.k8s.io
+  fieldSpecs:
+  - kind: ValidatingAdmissionPolicyBinding
+    group: admissionregistration.k8s.io
+    path: spec/policyName

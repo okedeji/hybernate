@@ -29,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -465,6 +466,59 @@ func TestScanCluster_SavingsBySource(t *testing.T) {
 	assert.InDelta(t, got["dry"].Measured.MonthlyFreed, report.Totals.Measured.MonthlyFreed, 0.001)
 }
 
+// A workload in dry-run that someone scaled to zero can't sleep any more
+// than it does, so what dry-run measured before isn't in the totals, though
+// it's still one of the workloads in dry-run.
+func TestScanCluster_DryRunScaledByHandIsntMeasured(t *testing.T) {
+	dry := managedFor("dry", v1alpha1.ManagedWorkloadStatus{Phase: v1alpha1.PhaseRunning,
+		DryRun: &v1alpha1.DryRunStatus{Since: metav1.NewTime(scanTime.Add(-73 * time.Hour)), Pauses: 2,
+			Slept: metav1.Duration{Duration: 10 * time.Hour}}})
+	dry.Spec.DryRun = true
+	objs := append(deploymentWithRollout("dry", testNamespace, 0, 30*24*time.Hour), dry)
+
+	report := scanWorkloads(t, objs...)
+
+	w := byName(report)["dry"]
+	require.True(t, w.ScaledByHand)
+	require.NotNil(t, w.Measured)
+	assert.Zero(t, CouldSave(w))
+	assert.Equal(t, 1, report.Totals.DryRun)
+	assert.Equal(t, Measured{}, report.Totals.Measured)
+}
+
+// Hybernate refuses to pause a StatefulSet that deletes its PVCs when
+// scaled down, as a pause would lose its data, so the scan says so, and
+// leaves it out of what pausing could save, as the operator would.
+func TestScanCluster_WontPauseAStatefulSetThatDeletesItsClaims(t *testing.T) {
+	sts := database("postgres", testNamespace)
+	sts.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")}
+	sts.Spec.PersistentVolumeClaimRetentionPolicy = &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+		WhenScaled: appsv1.DeletePersistentVolumeClaimRetentionPolicyType}
+	kept := sts.DeepCopy()
+	kept.Name = "redis"
+	kept.Spec.PersistentVolumeClaimRetentionPolicy.WhenScaled = appsv1.RetainPersistentVolumeClaimRetentionPolicyType
+	metrics := func(pod, app string) *metricsv1beta1.PodMetrics {
+		return &metricsv1beta1.PodMetrics{
+			ObjectMeta: metav1.ObjectMeta{Name: pod, Namespace: testNamespace, Labels: map[string]string{"app": app}},
+			Containers: []metricsv1beta1.ContainerMetrics{{Name: "db", Usage: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1m"), corev1.ResourceMemory: resource.MustParse("10Mi")}}},
+		}
+	}
+	kept.Spec.Selector.MatchLabels = map[string]string{"app": "redis"}
+	kept.Spec.Template.Labels = map[string]string{"app": "redis"}
+
+	report := scanWorkloads(t, sts, kept, metrics("postgres-0", "postgres"), metrics("redis-0", "redis"))
+
+	got := byName(report)
+	assert.Equal(t, StateIdle, got["postgres"].State)
+	assert.Equal(t, "PVCs deleted on scale-down", got["postgres"].WontPause)
+	assert.Contains(t, got["postgres"].Clues, "won't pause: PVCs deleted on scale-down")
+	assert.Zero(t, CouldSave(Workload{WontPause: "PVCs deleted on scale-down", History: &History{MonthlyFreed: 50},
+		State: StateIdle}))
+	assert.Empty(t, got["redis"].WontPause, "PVCs kept on scale-down")
+}
+
 // A report's times are in UTC whatever the machine's zone, which the API
 // client reads times into, so reports from different machines compare.
 func TestScanCluster_TimesInUTC(t *testing.T) {
@@ -527,13 +581,13 @@ func TestScanCluster_ReplicasFromGit(t *testing.T) {
 		d := makeDeployment(name, testNamespace, 1, "100m", "128Mi", nil)
 		d.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: manager, Operation: metav1.ManagedFieldsOperationApply, APIVersion: "apps/v1",
 			Time: &metav1.Time{Time: scanTime}, FieldsType: "FieldsV1",
-			FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:spec":{"f:replicas":{}}}`)}}}
+			FieldsV1: metav1.NewFieldsV1(`{"f:spec":{"f:replicas":{}}}`)}}
 		return d
 	}
 
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithReturnManagedFields().WithRuntimeObjects(
 		fromGit("argo-app", "argocd-controller"), fromGit("argo-db", "argocd-controller"),
-		fromGit("flux-app", "kustomize-controller"), fromGit("scaled", "kubectl-scale")).Build()
+		fromGit("flux-app", "kustomize-controller"), fromGit("scaled", "kubectl-edit")).Build()
 	report, err := NewScanner(c, c).ScanCluster(context.Background(), scanOptions(testNamespace))
 	require.NoError(t, err)
 

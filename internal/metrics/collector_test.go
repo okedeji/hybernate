@@ -26,6 +26,7 @@ import (
 
 func TestAllMetricsRegistered(t *testing.T) {
 	expected := []string{
+		"hybernate_build_info",
 		"hybernate_workload_phase",
 		// Tier 1
 		"hybernate_reconcile_errors_total",
@@ -59,6 +60,7 @@ func TestAllMetricsRegistered(t *testing.T) {
 
 	// Metrics without observations won't appear in Gather(), so we verify
 	// they're at least discoverable by writing a value and re-gathering.
+	BuildInfo.WithLabelValues("v0.0.0").Set(1)
 	ReconcileErrors.WithLabelValues("test").Inc()
 	WorkloadPhase.WithLabelValues("ns", "w", "Running").Set(1)
 	LifecycleTransitions.WithLabelValues("a", "b").Inc()

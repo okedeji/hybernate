@@ -1,0 +1,34 @@
+{{- /*
+Aggregated into the built-in view, edit and admin ClusterRoles, so that
+whoever can view a namespace can see its ManagedWorkloads, and whoever can
+edit it can pause, wake and configure them, as kubectl hybernate does.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hybernate.fullname" . }}-view
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: [hybernate.io]
+    resources: [managedworkloads]
+    verbs: [get, list, watch]
+  - apiGroups: [hybernate.io]
+    resources: [managedworkloads/status]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hybernate.fullname" . }}-edit
+  labels:
+    {{- include "hybernate.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: [hybernate.io]
+    resources: [managedworkloads]
+    verbs: [create, delete, patch, update]

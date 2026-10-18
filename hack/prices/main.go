@@ -23,11 +23,15 @@ limitations under the License.
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"regexp"
@@ -76,6 +80,13 @@ type regionPrice struct {
 	price  float64
 }
 
+// A feed that's emptied or renamed would otherwise drop every price for its
+// provider without an error, and every node there would go unpriced.
+const (
+	minRows     = 100
+	maxDropRate = 0.2
+)
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: prices OUTPUT.csv.gz")
@@ -99,6 +110,13 @@ func run(out string) error {
 				rows = append(rows, r)
 			}
 		}
+	}
+	previous, err := countsIn(out)
+	if err != nil {
+		return err
+	}
+	if err := checkCounts(previous, countsOf(rows)); err != nil {
+		return err
 	}
 	slices.SortFunc(rows, func(a, b row) int {
 		return strings.Compare(a.provider+" "+a.instanceType, b.provider+" "+b.instanceType)
@@ -132,6 +150,69 @@ func run(out string) error {
 	}
 	fmt.Printf("wrote %d instance types to %s\n", len(rows), out)
 	return nil
+}
+
+func countsOf(rows []row) map[string]int {
+	counts := make(map[string]int)
+	for _, r := range rows {
+		counts[r.provider]++
+	}
+	return counts
+}
+
+// countsIn counts the instance types per provider in the committed table at
+// path; there's none to compare against the first time it's written.
+func countsIn(path string) (map[string]int, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }() // read-only, nothing to do if closing fails
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("decompressing %s: %w", path, err)
+	}
+	counts, err := countRows(gz)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return counts, nil
+}
+
+func countRows(r io.Reader) (map[string]int, error) {
+	counts := make(map[string]int)
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(nil, 1<<20)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		provider, _, _ := strings.Cut(line, ",")
+		counts[provider]++
+	}
+	return counts, scanner.Err()
+}
+
+// checkCounts fails if any provider has fewer than minRows instance types,
+// or lost more than maxDropRate of those in the previous table.
+func checkCounts(previous, current map[string]int) error {
+	var errs []error
+	for _, s := range sources {
+		n, was := current[s.provider], previous[s.provider]
+		switch {
+		case n < minRows:
+			errs = append(errs, fmt.Errorf("%s has %d instance types, fewer than %d; is %s still the feed?",
+				s.provider, n, minRows, s.url))
+		case float64(n) < float64(was)*(1-maxDropRate):
+			errs = append(errs, fmt.Errorf("%s has %d instance types, down from %d; is %s still the feed?",
+				s.provider, n, was, s.url))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func fetch(url string) ([]instance, error) {

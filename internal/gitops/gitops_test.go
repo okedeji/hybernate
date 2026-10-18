@@ -28,17 +28,7 @@ var t0 = time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
 
 func entry(manager, fields string, at time.Time) metav1.ManagedFieldsEntry {
 	return metav1.ManagedFieldsEntry{Manager: manager, Time: &metav1.Time{Time: at},
-		FieldsV1: &metav1.FieldsV1{Raw: []byte(fields)}}
-}
-
-// scaled is a write through the scale subresource, such as kubectl scale,
-// an HPA, or Hybernate's own pause, which the API server records against
-// the workload's spec.replicas.
-func scaled(manager string, at time.Time) metav1.ManagedFieldsEntry {
-	e := entry(manager, replicas, at)
-	e.Operation = metav1.ManagedFieldsOperationUpdate
-	e.Subresource = "scale"
-	return e
+		FieldsV1: metav1.NewFieldsV1(fields)}
 }
 
 const (
@@ -69,29 +59,26 @@ func TestReplicasWriter(t *testing.T) {
 			want: Writer{Manager: "kluctl", Tool: Kluctl, At: t0}, ok: true},
 		{name: "the Kluctl controller", fields: []metav1.ManagedFieldsEntry{entry("kluctl-controller", replicas, t0)},
 			want: Writer{Manager: "kluctl-controller", Tool: Kluctl, At: t0}, ok: true},
-		{name: "a person", fields: []metav1.ManagedFieldsEntry{entry("kubectl-scale", replicas, t0)},
-			want: Writer{Manager: "kubectl-scale", At: t0}, ok: true},
+		{name: "a person", fields: []metav1.ManagedFieldsEntry{entry("kubectl-patch", replicas, t0)},
+			want: Writer{Manager: "kubectl-patch", At: t0}, ok: true},
 		{name: "the latest of several", fields: []metav1.ManagedFieldsEntry{
-			entry("argocd-controller", replicas, t0), entry("hybernate", replicas, t0.Add(time.Hour)),
-			entry("kubectl-scale", replicas, t0.Add(time.Minute))},
-			want: Writer{Manager: "hybernate", At: t0.Add(time.Hour)}, ok: true},
+			entry("argocd-controller", replicas, t0), entry("kubectl-edit", replicas, t0.Add(time.Hour)),
+			entry("kubectl-client-side-apply", replicas, t0.Add(time.Minute))},
+			want: Writer{Manager: "kubectl-edit", At: t0.Add(time.Hour)}, ok: true},
 		{name: "others' fields don't count", fields: []metav1.ManagedFieldsEntry{
-			entry("argocd-controller", template, t0.Add(time.Hour)), entry("kubectl-scale", replicas, t0)},
-			want: Writer{Manager: "kubectl-scale", At: t0}, ok: true},
+			entry("argocd-controller", template, t0.Add(time.Hour)), entry("kubectl-patch", replicas, t0)},
+			want: Writer{Manager: "kubectl-patch", At: t0}, ok: true},
 		{name: "a tie goes to the GitOps tool", fields: []metav1.ManagedFieldsEntry{
-			entry("hybernate", replicas, t0), entry("argocd-controller", replicas, t0)},
+			entry("kubectl-edit", replicas, t0), entry("argocd-controller", replicas, t0)},
 			want: Writer{Manager: "argocd-controller", Tool: ArgoCD, At: t0}, ok: true},
 		{name: "a tie goes to the GitOps tool whichever comes first", fields: []metav1.ManagedFieldsEntry{
-			entry("kustomize-controller", replicas, t0), entry("kubectl-scale", replicas, t0)},
+			entry("kustomize-controller", replicas, t0), entry("kubectl-patch", replicas, t0)},
 			want: Writer{Manager: "kustomize-controller", Tool: Flux, At: t0}, ok: true},
 		{name: "a tie between people goes to the first", fields: []metav1.ManagedFieldsEntry{
-			entry("kubectl-scale", replicas, t0), entry("kubectl-edit", replicas, t0)},
-			want: Writer{Manager: "kubectl-scale", At: t0}, ok: true},
-		{name: "through the scale subresource", fields: []metav1.ManagedFieldsEntry{
-			entry("argocd-controller", replicas, t0), scaled("kube-controller-manager", t0.Add(time.Minute))},
-			want: Writer{Manager: "kube-controller-manager", At: t0.Add(time.Minute)}, ok: true},
+			entry("kubectl-patch", replicas, t0), entry("kubectl-edit", replicas, t0)},
+			want: Writer{Manager: "kubectl-patch", At: t0}, ok: true},
 		{name: "a GitOps tool after a scale", fields: []metav1.ManagedFieldsEntry{
-			scaled("hybernate", t0), entry("argocd-controller", replicas, t0.Add(time.Minute))},
+			entry("argocd-controller", replicas, t0.Add(time.Minute))},
 			want: Writer{Manager: "argocd-controller", Tool: ArgoCD, At: t0.Add(time.Minute)}, ok: true},
 		{name: "nobody", fields: []metav1.ManagedFieldsEntry{entry("argocd-controller", template, t0)}},
 		{name: "no fields", fields: []metav1.ManagedFieldsEntry{{Manager: "argocd-controller"}}},

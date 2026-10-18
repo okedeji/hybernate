@@ -50,17 +50,42 @@ type demandExpected struct{ msg string }
 func (e demandExpected) Error() string { return e.msg }
 func (e demandExpected) Unwrap() error { return errNotPaused }
 
-// heldAwake is a pause Hybernate would refuse, since the active-until
-// annotation on the ManagedWorkload, as wake --for sets, holds the workload
-// awake. The person asking can clear it.
+// heldAwake is a pause Hybernate would refuse, since an active-until
+// annotation holds the workload awake: on the ManagedWorkload, as wake --for
+// sets, or on the workload itself, which the operator honours too. The
+// person asking can clear it.
 type heldAwake struct {
 	ref   string
 	until time.Time
+	// on says which of them hold it.
+	on string
 }
 
 func (e heldAwake) Error() string {
-	return fmt.Sprintf("%s %s: the %s annotation on its ManagedWorkload keeps it awake until %s",
-		e.ref, errNotPaused, v1alpha1.AnnotationActiveUntil, e.until.UTC().Format(time.RFC3339))
+	return fmt.Sprintf("%s %s: the %s annotation on %s keeps it awake until %s",
+		e.ref, errNotPaused, v1alpha1.AnnotationActiveUntil, e.on, e.until.UTC().Format(time.RFC3339))
+}
+
+// holdOn is the active-until hold on the ManagedWorkload, its target, or
+// both, as the operator weighs them, or a zero until when neither holds it
+// now. target is nil when it couldn't be read.
+func holdOn(w *v1alpha1.ManagedWorkload, target client.Object, now time.Time) heldAwake {
+	var held heldAwake
+	var on []string
+	if until := activeUntil(w.Annotations); until.After(now) {
+		held.until = until
+		on = append(on, "its ManagedWorkload")
+	}
+	if target != nil {
+		if until := activeUntil(target.GetAnnotations()); until.After(now) {
+			if until.After(held.until) {
+				held.until = until
+			}
+			on = append(on, fmt.Sprintf("%s %s", strings.ToLower(string(w.Spec.Target.Kind)), w.Spec.Target.Name))
+		}
+	}
+	held.on = strings.Join(on, " and ")
+	return held
 }
 
 func (e heldAwake) Unwrap() error { return errNotPaused }
@@ -117,9 +142,9 @@ When the forecast expects the workload to be busy within the hour, Hybernate
 says when, and pause asks whether to pause it anyway, since it would likely
 be woken straight back. --yes pauses it without asking, as a script needs.
 
-When an active-until annotation on its ManagedWorkload holds it awake, as
-wake --for sets, pause asks whether to clear it and pause now; --clear-hold
-clears it without asking.
+When an active-until annotation holds it awake, on its ManagedWorkload, as
+wake --for sets, or on the workload itself, pause asks whether to clear it
+and pause now; --clear-hold clears it without asking.
 
 NAME is the workload, as status shows it, such as api or statefulset/postgres,
 or its ManagedWorkload's name.
@@ -167,7 +192,7 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.overrideForecast, "yes", "y", false,
 		"Pause it even if the forecast expects it to be busy within the hour, without asking")
 	cmd.Flags().BoolVar(&opts.clearHold, "clear-hold", false,
-		"Clear an active-until hold on its ManagedWorkload, as wake --for sets, without asking")
+		"Clear an active-until hold on its ManagedWorkload, as wake --for sets, or on the workload, without asking")
 	addTimeoutFlag(cmd, &opts.timeout, "How long to wait; it starts again after you answer a question")
 	return cmd
 }
@@ -220,13 +245,15 @@ func pause(s clusterSteps, key client.ObjectKey, opts pauseOptions, out, errOut 
 			}
 			return waitForPause(ctx, c, key, ref, "", w.Status.Phase, opts.now(), opts, out)
 		}
-		warnIfGitOpsUndoes(ctx, c, w, ref, errOut)
-		held := activeUntil(w.Annotations).After(opts.now())
-		if held && !opts.clearHold {
-			return heldAwake{ref: ref, until: activeUntil(w.Annotations)}
+		target := readTarget(ctx, c, w)
+		warnIfGitOpsUndoes(target, ref, errOut)
+		held := holdOn(w, target, opts.now())
+		if !held.until.IsZero() && !opts.clearHold {
+			held.ref = ref
+			return held
 		}
-		return requestAndWait(ctx, c, w, ref,
-			pauseRequest{overrideForecast: opts.overrideForecast, clearHold: held}, opts, out)
+		return requestAndWait(ctx, c, w, ref, pauseRequest{overrideForecast: opts.overrideForecast,
+			clearHold: !held.until.IsZero(), target: target}, opts, out)
 	})
 
 	var held heldAwake
@@ -276,15 +303,18 @@ func clearHoldAndPause(s clusterSteps, key client.ObjectKey, held heldAwake, opt
 		if err := c.Get(ctx, key, &w); err != nil {
 			return fmt.Errorf("getting ManagedWorkload %s: %w", key, err)
 		}
-		return requestAndWait(ctx, c, &w, held.ref,
-			pauseRequest{overrideForecast: opts.overrideForecast, clearHold: true}, opts, out)
+		return requestAndWait(ctx, c, &w, held.ref, pauseRequest{overrideForecast: opts.overrideForecast,
+			clearHold: true, target: readTarget(ctx, c, &w)}, opts, out)
 	})
 }
 
 // pauseRequest is what a request to pause asks besides the pause.
 type pauseRequest struct {
 	overrideForecast bool
-	clearHold        bool
+	// clearHold removes the active-until holds on the ManagedWorkload and
+	// on target, the workload, when it was read.
+	clearHold bool
+	target    client.Object
 }
 
 // requestAndWait asks Hybernate to pause the workload, says what that does
@@ -312,6 +342,11 @@ func requestAndWait(ctx context.Context, c client.Client, w *v1alpha1.ManagedWor
 // request it was asked with.
 func requestPause(ctx context.Context, c client.Client, w *v1alpha1.ManagedWorkload, ref string,
 	req pauseRequest, now func() time.Time) (string, error) {
+	if req.clearHold && req.target != nil && activeUntil(req.target.GetAnnotations()).After(now()) {
+		if err := setAnnotation(ctx, c, req.target, v1alpha1.AnnotationActiveUntil, ""); err != nil {
+			return "", fmt.Errorf("clearing the hold on %s: %w", ref, err)
+		}
+	}
 	token := now().UTC().Format(time.RFC3339Nano)
 	patch := client.MergeFrom(w.DeepCopy())
 	if w.Annotations == nil {
@@ -425,13 +460,10 @@ func pauseAnswered(w *v1alpha1.ManagedWorkload, ref string, requested bool, out 
 // warnIfGitOpsUndoes warns when a GitOps tool last set the workload's
 // replicas: it sets them from Git again on its next sync, which undoes the
 // pause, as the operator finds from the same managed fields. The pause is
-// asked for anyway. A workload that can't be read goes without the warning.
-func warnIfGitOpsUndoes(ctx context.Context, c client.Client, w *v1alpha1.ManagedWorkload, ref string, out io.Writer) {
-	var target client.Object = &appsv1.Deployment{}
-	if w.Spec.Target.Kind == v1alpha1.TargetKindStatefulSet {
-		target = &appsv1.StatefulSet{}
-	}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: w.Namespace, Name: w.Spec.Target.Name}, target); err != nil {
+// asked for anyway. A workload that couldn't be read goes without the
+// warning.
+func warnIfGitOpsUndoes(target client.Object, ref string, out io.Writer) {
+	if target == nil {
 		return
 	}
 	writer, found := gitops.ReplicasWriter(target.GetManagedFields())
@@ -445,6 +477,20 @@ func warnIfGitOpsUndoes(ctx context.Context, c client.Client, w *v1alpha1.Manage
 		_, _ = fmt.Fprintf(out, "  %s\n", line)
 	}
 	_, _ = fmt.Fprintf(out, "See %s\n", gitOpsGuide)
+}
+
+// readTarget reads the workload the ManagedWorkload manages, or nil when it
+// can't, which pause carries on without: the operator says why it won't
+// pause one that's missing.
+func readTarget(ctx context.Context, c client.Client, w *v1alpha1.ManagedWorkload) client.Object {
+	var target client.Object = &appsv1.Deployment{}
+	if w.Spec.Target.Kind == v1alpha1.TargetKindStatefulSet {
+		target = &appsv1.StatefulSet{}
+	}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: w.Namespace, Name: w.Spec.Target.Name}, target); err != nil {
+		return nil
+	}
+	return target
 }
 
 // askYesNo asks a question on out and reads the answer from in, taking

@@ -68,7 +68,9 @@ type settings struct {
 
 // resolve offers each value of key, in order of precedence, to read until
 // read accepts one, and reports each one it rejects along with where the
-// setting came from instead. read is told where the value is.
+// setting came from instead. read is told where the value is. Values are
+// offered without surrounding whitespace, which a YAML block scalar leaves
+// as a trailing newline.
 func (s *settings) resolve(key, invalid string, read func(value, on string) bool) {
 	start := len(s.problems)
 	outcome := "the default is used"
@@ -80,6 +82,7 @@ func (s *settings) resolve(key, invalid string, read func(value, on string) bool
 		if !ok {
 			continue
 		}
+		v = strings.TrimSpace(v)
 		if read(v, level.on) {
 			outcome = "the " + level.on + "'s value is used"
 			break
@@ -127,18 +130,21 @@ func (s *settings) dryRun(fallback bool) bool {
 	return true
 }
 
-// duration accepts a Go duration above zero.
+// duration accepts a Go duration of at least v1alpha1.MinIdleAfter, the
+// one setting it reads.
 func (s *settings) duration(key string, fallback time.Duration) time.Duration {
-	return s.durationUpTo(key, fallback, math.MaxInt64, `isn't a duration above zero, like "90m" or "2h"`)
+	return s.durationUpTo(key, fallback, v1alpha1.MinIdleAfter, math.MaxInt64,
+		`isn't a duration of at least 1m, like "90m" or "2h"`)
 }
 
-// durationUpTo accepts a Go duration above zero and at most limit. The
-// bounds must be the CRD's, or the spec written would be rejected.
-func (s *settings) durationUpTo(key string, fallback, limit time.Duration, invalid string) time.Duration {
+// durationUpTo accepts a Go duration above zero, of at least least and at
+// most limit. The bounds must be the CRD's, or the spec written would be
+// rejected.
+func (s *settings) durationUpTo(key string, fallback, least, limit time.Duration, invalid string) time.Duration {
 	d := fallback
 	s.resolve(key, invalid, func(v, _ string) bool {
 		parsed, err := time.ParseDuration(v)
-		if err != nil || parsed <= 0 || parsed > limit {
+		if err != nil || parsed <= 0 || parsed < least || parsed > limit {
 			return false
 		}
 		d = parsed
@@ -170,19 +176,8 @@ func (s *settings) dependencies(key string) []v1alpha1.DependencyRef {
 	const invalid = `isn't "kind/name" or "namespace/kind/name", with kind deployment or statefulset`
 	var deps []v1alpha1.DependencyRef
 	s.resolve(key, invalid, func(v, on string) bool {
-		deps = nil
 		var bad []string
-		for entry := range strings.SplitSeq(v, ",") {
-			entry = strings.TrimSpace(entry)
-			if entry == "" {
-				continue
-			}
-			if dep, ok := parseDependency(entry); ok {
-				deps = append(deps, dep)
-			} else {
-				bad = append(bad, entry)
-			}
-		}
+		deps, bad = parseDependencies(v)
 		if len(deps) == 0 && len(bad) > 0 {
 			return false
 		}
@@ -190,9 +185,32 @@ func (s *settings) dependencies(key string) []v1alpha1.DependencyRef {
 			s.problems = append(s.problems, settingProblem{annotation: key, value: entry, on: on, reason: invalid,
 				outcome: "the entry is skipped"})
 		}
+		if len(deps) > v1alpha1.MaxDependsOn {
+			s.problems = append(s.problems, settingProblem{annotation: key, value: v, on: on,
+				reason:  fmt.Sprintf("lists %d dependencies, more than the %d allowed", len(deps), v1alpha1.MaxDependsOn),
+				outcome: fmt.Sprintf("only the first %d are used", v1alpha1.MaxDependsOn)})
+			deps = deps[:v1alpha1.MaxDependsOn]
+		}
 		return true
 	})
 	return deps
+}
+
+// parseDependencies reads a depends-on value, returning the entries it
+// can't read apart.
+func parseDependencies(v string) (deps []v1alpha1.DependencyRef, bad []string) {
+	for entry := range strings.SplitSeq(v, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if dep, ok := parseDependency(entry); ok {
+			deps = append(deps, dep)
+		} else {
+			bad = append(bad, entry)
+		}
+	}
+	return deps, bad
 }
 
 func parseDependency(entry string) (v1alpha1.DependencyRef, bool) {
@@ -225,8 +243,10 @@ func parseDependency(entry string) (v1alpha1.DependencyRef, bool) {
 // and autoResume), which dependencies dependsOn lists, and wake. The rest
 // is the user's to set on the ManagedWorkload; see keepUserSettings.
 //
-// A namespace's depends-on, such as statefulset/postgres, also reaches the
-// dependency it names, which isn't given a dependency on itself.
+// A workload never depends on itself, whichever annotation names it. A
+// namespace's depends-on that must not reach this workload, because the
+// workload is one of the dependencies it names (see inheritsDependsOn), is
+// left out of nsAnnotations by the caller.
 func optInSpec(namespace string, target v1alpha1.WorkloadRef, workloadAnnotations, nsAnnotations map[string]string,
 	d OptInDefaults) (v1alpha1.ManagedWorkloadSpec, []settingProblem) {
 	s := &settings{workload: workloadAnnotations, namespace: nsAnnotations}
@@ -245,7 +265,7 @@ func optInSpec(namespace string, target v1alpha1.WorkloadRef, workloadAnnotation
 		Wake: &v1alpha1.WakeSpec{
 			OnRequest: ptr.To(s.boolean(v1alpha1.AnnotationWakeOnRequest, true)),
 			MaxWait: &metav1.Duration{Duration: s.durationUpTo(v1alpha1.AnnotationWakeMaxWait, 2*time.Minute,
-				v1alpha1.WakeMaxWaitLimit, `isn't a duration above zero and at most 1h, like "90s" or "5m"`)},
+				0, v1alpha1.WakeMaxWaitLimit, `isn't a duration above zero and at most 1h, like "90s" or "5m"`)},
 			Page: ptr.To(s.boolean(v1alpha1.AnnotationWakePage, true)),
 		},
 		// Every field the API server would default is set here, so the spec

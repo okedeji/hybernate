@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 	"time"
+	"unicode/utf8"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -70,10 +71,31 @@ const (
 	actionScan              = "Scan"
 )
 
+// The API server's limits on what an event's note and a condition's
+// message can hold. Past them, the event is refused, and so is every status
+// write while the condition is in it.
+const (
+	maxEventNote        = 1024
+	maxConditionMessage = 32768
+)
+
 func (r *Reconciler) emitEvent(workload *v1alpha1.ManagedWorkload, dryRun bool, eventType, reason, action, msgFmt string, args ...any) {
-	msg := fmt.Sprintf(msgFmt, args...)
-	r.Recorder.Eventf(workload, nil, eventType, reason, action,
-		"%s%s: %s", dryRunPrefix(dryRun), workload.Spec.Target.Name, msg)
+	note := fmt.Sprintf("%s%s: %s", dryRunPrefix(dryRun), workload.Spec.Target.Name, fmt.Sprintf(msgFmt, args...))
+	r.Recorder.Eventf(workload, nil, eventType, reason, action, "%s", truncated(note, maxEventNote))
+}
+
+// truncated cuts s to at most limit bytes, ending it with an ellipsis, and
+// never inside a character.
+func truncated(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	const ellipsis = "…"
+	cut := limit - len(ellipsis)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + ellipsis
 }
 
 func dryRunPrefix(dryRun bool) string {
@@ -131,11 +153,6 @@ func (r *Reconciler) updatePredictionStatus(ctx context.Context, workload *v1alp
 	opmetrics.PredictionConfidence.WithLabelValues("weekly", ns, name).Set(float64(engine.WeeklyConfidence()))
 	opmetrics.PredictionPhase.WithLabelValues(ns, name).Set(float64(phase))
 	opmetrics.PredictionDataPoints.WithLabelValues(ns, name).Set(float64(engine.GetDataPoints()))
-}
-
-// forgetForecast drops a deleted workload's engine and its metric series.
-func (r *Reconciler) forgetForecast(workload *v1alpha1.ManagedWorkload) {
-	r.engines.forget(workload.UID)
 }
 
 const (

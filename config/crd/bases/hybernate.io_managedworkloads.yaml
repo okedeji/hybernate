@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.20.1
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: managedworkloads.hybernate.io
 spec:
   group: hybernate.io
@@ -72,6 +72,9 @@ spec:
                         description: CPUPerHour is the cost per vCPU-hour.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: must not be negative
+                          rule: '!quantity(string(self)).isLessThan(quantity(''0''))'
                       memoryPerHour:
                         anyOf:
                         - type: integer
@@ -79,6 +82,9 @@ spec:
                         description: MemoryPerHour is the cost per GiB-hour.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: must not be negative
+                          rule: '!quantity(string(self)).isLessThan(quantity(''0''))'
                       storagePerMonth:
                         anyOf:
                         - type: integer
@@ -88,13 +94,17 @@ spec:
                           storage.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: must not be negative
+                          rule: '!quantity(string(self)).isLessThan(quantity(''0''))'
                     type: object
                 type: object
               dependsOn:
                 description: |-
                   DependsOn lists the workloads this one needs, such as a database or a
                   message broker. A dependency isn't paused while anything that depends
-                  on it is awake, and waking this workload wakes its dependencies.
+                  on it is awake, and waking this workload wakes its dependencies. At
+                  most 20.
                 items:
                   description: |-
                     DependencyRef names a workload this one needs. It refers to the
@@ -123,6 +133,7 @@ spec:
                   - kind
                   - name
                   type: object
+                maxItems: 20
                 type: array
                 x-kubernetes-list-type: atomic
               dryRun:
@@ -154,7 +165,7 @@ spec:
                         description: |-
                           Prometheus queries that measure activity, such as an ingress request
                           rate. A result above zero counts as activity; an empty result or zero
-                          doesn't. Requires the operator's --prometheus-url.
+                          doesn't. Requires the operator's --prometheus-url. At most 10.
                         items:
                           description: PrometheusActivity is a PromQL instant query
                             used as an activity source.
@@ -168,6 +179,7 @@ spec:
                           required:
                           - promQL
                           type: object
+                        maxItems: 10
                         type: array
                     type: object
                   autoResume:
@@ -179,11 +191,11 @@ spec:
                     default: 1h
                     description: |-
                       IdleAfter is how long the workload must go without any activity
-                      before the operator pauses it.
+                      before the operator pauses it, at least 1m.
                     type: string
                     x-kubernetes-validations:
-                    - message: must be a duration above zero, such as 90m or 2h
-                      rule: duration(self) > duration('0s')
+                    - message: must be a duration of at least 1m, such as 90m or 2h
+                      rule: duration(self) >= duration('1m')
                 type: object
               prediction:
                 default: {}
@@ -427,6 +439,9 @@ spec:
                         description: CPUPerHour is the cost per vCPU-hour.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: must not be negative
+                          rule: '!quantity(string(self)).isLessThan(quantity(''0''))'
                       memoryPerHour:
                         anyOf:
                         - type: integer
@@ -434,6 +449,9 @@ spec:
                         description: MemoryPerHour is the cost per GiB-hour.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: must not be negative
+                          rule: '!quantity(string(self)).isLessThan(quantity(''0''))'
                       storagePerMonth:
                         anyOf:
                         - type: integer
@@ -443,6 +461,9 @@ spec:
                           storage.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: must not be negative
+                          rule: '!quantity(string(self)).isLessThan(quantity(''0''))'
                     type: object
                   pausedCPUHours:
                     anyOf:
@@ -834,8 +855,8 @@ spec:
                     type: string
                   pausedAt:
                     description: |-
-                      PausedAt is when the workload was scaled to zero. Unset while the
-                      pause is under way.
+                      PausedAt is when the workload was scaled to zero. Unset until then.
+                      The pause waits from then for its pods to stop.
                     format: date-time
                     type: string
                   previousReplicas:
@@ -875,6 +896,13 @@ spec:
                     - replicas
                     - storageBytes
                     type: object
+                  resumedAt:
+                    description: |-
+                      ResumedAt is when the resume under way scaled the workload back up.
+                      Scaled to zero after it, by something other than Hybernate, the
+                      workload is left off rather than scaled up again.
+                    format: date-time
+                    type: string
                   scaledObject:
                     description: |-
                       ScaledObject is the KEDA ScaledObject held at zero while the workload
@@ -953,7 +981,6 @@ spec:
                 type: object
             type: object
         required:
-        - metadata
         - spec
         type: object
     served: true

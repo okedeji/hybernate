@@ -46,11 +46,21 @@ import (
 // leaves is noticed (see clientStream): up to maxBufferedPerConn each,
 // enough for most request bodies, and maxBuffered across them all, which
 // bounds the memory a flood of large uploads can take.
+//
+// A connection passed through to the workload costs more than a held one,
+// about 64KiB in goroutines and copy buffers, and once a workload is awake
+// any caller can open them as fast as it likes, so they're capped apart
+// from held ones: maxProxied overall, and half of that per source. A
+// caller over the cap is held until a place frees, as if the workload
+// weren't Ready yet.
 type limits struct {
 	maxHeld                  int
 	maxHeldPerWorkload       int
 	maxHeldPerSource         int
 	maxHeldPerSourceWorkload int
+
+	maxProxied          int
+	maxProxiedPerSource int
 
 	maxBufferedPerConn int
 	maxBuffered        int
@@ -66,6 +76,8 @@ var defaultLimits = limits{
 	maxHeldPerWorkload:       256,
 	maxHeldPerSource:         1024,
 	maxHeldPerSourceWorkload: 128,
+	maxProxied:               1024,
+	maxProxiedPerSource:      512,
 	maxBufferedPerConn:       1 << 20,
 	maxBuffered:              32 << 20,
 	sourceWakeEvery:          2 * time.Second,
@@ -80,6 +92,7 @@ const sourceIdle = 10 * time.Minute
 
 type source struct {
 	held       int
+	proxied    int
 	byWorkload map[types.NamespacedName]int
 	wakes      *rate.Limiter
 	seen       time.Time
@@ -92,6 +105,7 @@ type admission struct {
 	mu         sync.Mutex
 	held       int
 	byWorkload map[types.NamespacedName]int
+	proxied    int
 	buffered   int
 	sources    map[netip.Addr]*source
 	wakes      *rate.Limiter
@@ -151,6 +165,28 @@ func (a *admission) release(addr netip.Addr, workload types.NamespacedName, now 
 	}
 }
 
+// proxy admits one more connection from addr passed through to a
+// workload, unless a cap is reached.
+func (a *admission) proxy(addr netip.Addr, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.source(addr, now)
+	if a.proxied >= a.limits.maxProxied || s.proxied >= a.limits.maxProxiedPerSource {
+		return false
+	}
+	a.proxied++
+	s.proxied++
+	return true
+}
+
+// unproxy ends a proxied connection proxy admitted.
+func (a *admission) unproxy(addr netip.Addr, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.proxied--
+	a.source(addr, now).proxied--
+}
+
 // allowWake reports whether addr may start another wake now. Neither
 // allowance is spent unless both have room, so a wake refused overall
 // doesn't use up the source's.
@@ -182,12 +218,12 @@ func (a *admission) releaseBuffer(n int) {
 	a.buffered -= n
 }
 
-// prune forgets sources with nothing held that haven't been seen lately.
+// prune forgets sources with no connections that haven't been seen lately.
 func (a *admission) prune(now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for addr, s := range a.sources {
-		if s.held == 0 && now.Sub(s.seen) > sourceIdle {
+		if s.held == 0 && s.proxied == 0 && now.Sub(s.seen) > sourceIdle {
 			delete(a.sources, addr)
 		}
 	}

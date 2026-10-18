@@ -57,7 +57,7 @@ type forecaster interface {
 // counts the whole pod's requests, sidecars included, since that's what the
 // workload reserves and what pausing frees.
 type metricsReader interface {
-	WorkloadCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
+	WorkloadCPUMillis(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cpuMillis float64, pods int, err error)
 	CPURequestPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error)
 	PodRequestsPerReplica(ctx context.Context, workload *v1alpha1.ManagedWorkload) (cpuMillis, memBytes float64, err error)
 	Replicas(ctx context.Context, workload *v1alpha1.ManagedWorkload) (int32, error)
@@ -230,12 +230,15 @@ func (r *Reconciler) reconcileAutomation(ctx context.Context, workload *v1alpha1
 	// for the forecast to see each hour's busiest minutes.
 	var load cpuLoad
 	if r.metrics != nil {
-		usage, err := r.observedCPU(ctx, workload)
+		usage, pods, err := r.observedCPU(ctx, workload)
 		if err != nil {
 			r.clearIdleVeto(workload)
+			if workload.Spec.IdlePolicy != nil {
+				r.observeActivity(ctx, workload, target, cpuLoad{err: err})
+			}
 			return r.reportMetricsUnavailable(ctx, workload, err)
 		}
-		load.percent, load.err = r.utilization(ctx, workload, usage)
+		load.percent, load.err = r.utilization(ctx, workload, usage, pods)
 		if load.err == nil {
 			r.setCondition(workload, conditionMetricsAvailable, metav1.ConditionTrue, "MetricsReported", "")
 		}
@@ -269,12 +272,15 @@ type cpuLoad struct {
 }
 
 // utilization is CPU usage as a percentage of what the workload's own
-// containers request across its replicas. The activity threshold, the
+// containers request in the pods it was measured over. Divided by every
+// replica's request, the usage of one pod serving while the others are
+// Pending or crash-looping would read as a fraction of itself, and an
+// in-use workload as idle. The activity threshold, the
 // forecast and every decision made on it share this one measure, so a
 // forecast that holds an idle workload awake would wake it once paused.
 // A target scaled to zero by something else is idle, though its pods may
 // report usage for the seconds they take to terminate.
-func (r *Reconciler) utilization(ctx context.Context, workload *v1alpha1.ManagedWorkload, usage float64) (float64, error) {
+func (r *Reconciler) utilization(ctx context.Context, workload *v1alpha1.ManagedWorkload, usage float64, pods int) (float64, error) {
 	if usage == 0 {
 		return 0, nil
 	}
@@ -289,7 +295,7 @@ func (r *Reconciler) utilization(ctx context.Context, workload *v1alpha1.Managed
 	if err != nil {
 		return 0, fmt.Errorf("%w: %w", errNoCPURequests, err)
 	}
-	requested := perReplica * float64(replicas)
+	requested := perReplica * float64(pods)
 	if requested <= 0 {
 		return 0, errNoCPURequests
 	}
@@ -492,15 +498,15 @@ func (r *Reconciler) observeHour(ctx context.Context, workload *v1alpha1.Managed
 // observedCPU reads total CPU usage to feed the forecast. A target scaled to
 // zero has no pods and therefore no pod metrics, but that is a real
 // observation of zero demand, not missing data.
-func (r *Reconciler) observedCPU(ctx context.Context, workload *v1alpha1.ManagedWorkload) (float64, error) {
-	millis, err := r.metrics.WorkloadCPUMillis(ctx, workload)
+func (r *Reconciler) observedCPU(ctx context.Context, workload *v1alpha1.ManagedWorkload) (millis float64, pods int, err error) {
+	millis, pods, err = r.metrics.WorkloadCPUMillis(ctx, workload)
 	if !errors.Is(err, opmetrics.ErrNoPodMetrics) {
-		return millis, err
+		return millis, pods, err
 	}
 	if replicas, rerr := r.metrics.Replicas(ctx, workload); rerr == nil && replicas == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
-	return 0, err
+	return 0, 0, err
 }
 
 // reportMetricsUnavailable surfaces why CPU can't be read. Both idle

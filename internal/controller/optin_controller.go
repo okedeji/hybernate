@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -36,12 +38,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
+	"github.com/okedeji/hybernate/internal/metrics"
 )
 
 const (
@@ -89,7 +93,12 @@ type OptInReconciler struct {
 func (r *OptInReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, optInTimeout)
 	defer cancel()
-	defer func() { res, retErr = retryIfStale(ctx, res, retErr) }()
+	defer func() {
+		res, retErr = retryIfStale(ctx, res, retErr)
+		if retErr != nil {
+			metrics.ReconcileErrors.WithLabelValues("optin").Inc()
+		}
+	}()
 
 	obj := r.newWorkload()
 	if err := r.Get(ctx, req.NamespacedName, obj); err != nil {
@@ -114,7 +123,14 @@ func (r *OptInReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res 
 		return ctrl.Result{}, r.release(ctx, obj, existing.ours, existing.written)
 	}
 
-	spec, problems := optInSpec(req.Namespace, target, obj.GetAnnotations(), ns.GetAnnotations(), r.Defaults)
+	nsAnnotations := ns.GetAnnotations()
+	if inherits, err := r.inheritsDependsOn(ctx, &ns, target); err != nil {
+		return ctrl.Result{}, err
+	} else if !inherits {
+		nsAnnotations = maps.Clone(nsAnnotations)
+		delete(nsAnnotations, v1alpha1.AnnotationDependsOn)
+	}
+	spec, problems := optInSpec(req.Namespace, target, obj.GetAnnotations(), nsAnnotations, r.Defaults)
 	for _, p := range problems {
 		r.Recorder.Eventf(obj, nil, "Warning", ReasonInvalidSetting, actionOptIn, "%s", p)
 	}
@@ -130,10 +146,58 @@ func (r *OptInReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res 
 }
 
 func (r *OptInReconciler) newWorkload() client.Object {
-	if r.Kind == v1alpha1.TargetKindStatefulSet {
+	return emptyWorkload(r.Kind)
+}
+
+func emptyWorkload(kind v1alpha1.TargetKind) client.Object {
+	if kind == v1alpha1.TargetKindStatefulSet {
 		return &appsv1.StatefulSet{}
 	}
 	return &appsv1.Deployment{}
+}
+
+// inheritsDependsOn reports whether the target takes its namespace's
+// depends-on. One the list names is a dependency of the namespace's
+// workloads, not a dependent, and so is one a named workload depends on by
+// its own depends-on, directly or through others: inheriting the list,
+// each would depend on workloads that depend on it, and none of them could
+// ever pause.
+func (r *OptInReconciler) inheritsDependsOn(ctx context.Context, ns *corev1.Namespace, target v1alpha1.WorkloadRef) (
+	bool, error) {
+	value, ok := ns.Annotations[v1alpha1.AnnotationDependsOn]
+	if !ok {
+		return true, nil
+	}
+	queue, _ := parseDependencies(strings.TrimSpace(value))
+	visited := map[v1alpha1.WorkloadRef]bool{}
+	for len(queue) > 0 {
+		dep := queue[0]
+		queue = queue[1:]
+		if dep.Namespace != "" && dep.Namespace != ns.Name {
+			continue
+		}
+		ref := v1alpha1.WorkloadRef{Kind: dep.Kind, Name: dep.Name}
+		if ref == target {
+			return false, nil
+		}
+		if visited[ref] {
+			continue
+		}
+		visited[ref] = true
+		obj := emptyWorkload(ref.Kind)
+		err := r.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: ref.Name}, obj)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("reading the depends-on of %s %s: %w", ref.Kind, ref.Name, err)
+		}
+		if own, ok := obj.GetAnnotations()[v1alpha1.AnnotationDependsOn]; ok {
+			deps, _ := parseDependencies(strings.TrimSpace(own))
+			queue = append(queue, deps...)
+		}
+	}
+	return true, nil
 }
 
 // labelComponent is the label the Helm chart and the kustomize manifests
@@ -326,10 +390,13 @@ func kindQualifiedName(name string, kind v1alpha1.TargetKind) string {
 // SetupWithManager reconciles a workload when its labels or annotations
 // change, when its namespace's do, and when a ManagedWorkload for it is
 // created, deleted, or has its spec or labels changed. Replica changes,
-// which pausing makes, and status writes don't trigger it.
+// which pausing makes, and status writes don't trigger it. A workload's
+// own depends-on changing re-checks every workload beside it, since it
+// can change which of them take their namespace's (see inheritsDependsOn).
 func (r *OptInReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	metadataChanged := predicate.Or(predicate.LabelChangedPredicate{}, predicate.AnnotationChangedPredicate{})
 	specOrLabelsChanged := predicate.Or(predicate.GenerationChangedPredicate{}, predicate.LabelChangedPredicate{})
+	beside := handler.EnqueueRequestsFromMapFunc(r.workloadsBeside)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("optin-"+string(r.Kind)).
 		For(r.newWorkload(), builder.WithPredicates(metadataChanged)).
@@ -337,18 +404,60 @@ func (r *OptInReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(metadataChanged, inWatchedNamespaces(r.WatchNamespaces))).
 		Watches(&v1alpha1.ManagedWorkload{}, handler.EnqueueRequestsFromMapFunc(r.targetOf),
 			builder.WithPredicates(specOrLabelsChanged)).
+		Watches(&appsv1.Deployment{}, beside, builder.WithPredicates(dependsOnChanged())).
+		Watches(&appsv1.StatefulSet{}, beside, builder.WithPredicates(dependsOnChanged())).
 		Complete(r)
+}
+
+// dependsOnChanged passes a workload created or deleted with its own
+// depends-on, and one whose depends-on changed.
+func dependsOnChanged() predicate.Predicate {
+	has := func(obj client.Object) bool {
+		_, ok := obj.GetAnnotations()[v1alpha1.AnnotationDependsOn]
+		return ok
+	}
+	return predicate.Funcs{
+		CreateFunc:  func(e event.CreateEvent) bool { return has(e.Object) },
+		DeleteFunc:  func(e event.DeleteEvent) bool { return has(e.Object) },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			before, hadIt := e.ObjectOld.GetAnnotations()[v1alpha1.AnnotationDependsOn]
+			after, hasIt := e.ObjectNew.GetAnnotations()[v1alpha1.AnnotationDependsOn]
+			return before != after || hadIt != hasIt
+		},
+	}
+}
+
+// workloadsBeside re-checks the workloads in obj's namespace, when the
+// namespace has a depends-on for them to take.
+func (r *OptInReconciler) workloadsBeside(ctx context.Context, obj client.Object) []reconcile.Request {
+	ctx, cancel := context.WithTimeout(ctx, optInTimeout)
+	defer cancel()
+
+	var ns corev1.Namespace
+	if err := r.Get(ctx, client.ObjectKey{Name: obj.GetNamespace()}, &ns); err != nil {
+		log.FromContext(ctx).Error(err, "reading namespace for a depends-on change", "workload", obj.GetName(),
+			"namespace", obj.GetNamespace())
+		return nil
+	}
+	if _, ok := ns.Annotations[v1alpha1.AnnotationDependsOn]; !ok {
+		return nil
+	}
+	return r.workloadsIn(ctx, ns.Name)
 }
 
 func (r *OptInReconciler) workloadsInNamespace(ctx context.Context, obj client.Object) []reconcile.Request {
 	ctx, cancel := context.WithTimeout(ctx, optInTimeout)
 	defer cancel()
+	return r.workloadsIn(ctx, obj.GetName())
+}
 
+func (r *OptInReconciler) workloadsIn(ctx context.Context, namespace string) []reconcile.Request {
 	var names []string
 	if r.Kind == v1alpha1.TargetKindStatefulSet {
 		var list appsv1.StatefulSetList
-		if err := r.List(ctx, &list, client.InNamespace(obj.GetName())); err != nil {
-			log.FromContext(ctx).Error(err, "listing statefulsets for namespace change", "namespace", obj.GetName())
+		if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+			log.FromContext(ctx).Error(err, "listing statefulsets for namespace change", "namespace", namespace)
 			return nil
 		}
 		for _, w := range list.Items {
@@ -356,8 +465,8 @@ func (r *OptInReconciler) workloadsInNamespace(ctx context.Context, obj client.O
 		}
 	} else {
 		var list appsv1.DeploymentList
-		if err := r.List(ctx, &list, client.InNamespace(obj.GetName())); err != nil {
-			log.FromContext(ctx).Error(err, "listing deployments for namespace change", "namespace", obj.GetName())
+		if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+			log.FromContext(ctx).Error(err, "listing deployments for namespace change", "namespace", namespace)
 			return nil
 		}
 		for _, w := range list.Items {
@@ -366,7 +475,7 @@ func (r *OptInReconciler) workloadsInNamespace(ctx context.Context, obj client.O
 	}
 	requests := make([]reconcile.Request, 0, len(names))
 	for _, name := range names {
-		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKey{Namespace: obj.GetName(), Name: name}})
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKey{Namespace: namespace, Name: name}})
 	}
 	return requests
 }

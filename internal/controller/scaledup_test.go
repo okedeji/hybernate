@@ -46,7 +46,7 @@ func scaledBy(manager string, replicas int32) *appsv1.Deployment {
 	d := targetDeploymentWithReplicas("api", "default", replicas)
 	d.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: manager, Operation: metav1.ManagedFieldsOperationUpdate,
 		Time: &metav1.Time{Time: fixedTime.Add(-time.Minute)}, FieldsType: "FieldsV1",
-		FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:spec":{"f:replicas":{}}}`)}}}
+		FieldsV1: metav1.NewFieldsV1(`{"f:spec":{"f:replicas":{}}}`)}}
 	return d
 }
 
@@ -71,19 +71,20 @@ func TestWakeOnScaleUp_ByAPerson(t *testing.T) {
 	r := newTestReconcilerWithReplicas(t, workload, &stubPauser{}, 5)
 	w := getWorkload(t, r, "api")
 
-	require.NoError(t, r.wakeOnScaleUp(context.Background(), w, scaledBy("kubectl-scale", 5)))
+	require.NoError(t, r.wakeOnScaleUp(context.Background(), w, scaledBy("kubectl-edit", 5)))
 
 	w = getWorkload(t, r, "api")
 	assert.Equal(t, v1alpha1.PhaseRunning, w.Status.Phase)
 	assert.Nil(t, w.Status.Pause)
 	require.NotNil(t, w.Status.LastScaledUp)
-	assert.Equal(t, "kubectl-scale", w.Status.LastScaledUp.By)
+	assert.Equal(t, "kubectl-edit", w.Status.LastScaledUp.By)
 	assert.Empty(t, w.Status.LastScaledUp.GitOps)
 	assert.Equal(t, int32(5), w.Status.LastScaledUp.Replicas)
 	assert.Equal(t, v1alpha1.ActivitySourceScaledUp, w.Status.Activity.LastActivitySource, "the idle clock starts again")
 	assert.Nil(t, meta.FindStatusCondition(w.Status.Conditions, conditionGitOpsConflict))
 	assert.Equal(t, int32(5), targetReplicas(t, r), "left as they set it")
-	assert.Contains(t, drainEvents(t, r), "scaled up to 5 replicas by kubectl-scale outside Hybernate")
+	assert.Contains(t, drainEvents(t, r), "scaled up to 5 replicas by kubectl-edit outside Hybernate")
+	assert.Zero(t, r.awakeDemand(w, 80), "starting up after the scale-up isn't demand the forecast should learn")
 }
 
 // A GitOps tool undoing a pause is a setup problem: reported once with the
@@ -203,19 +204,32 @@ func TestGitOpsConflict_ClearsWhenAPauseHolds(t *testing.T) {
 
 		assert.NotNil(t, meta.FindStatusCondition(getWorkload(t, r, "api").Status.Conditions, conditionGitOpsConflict))
 	})
-	t.Run("until Hybernate woke it", func(t *testing.T) {
-		workload := conflicted(fixedTime.Add(-3 * time.Hour))
-		workload.Status.Phase = v1alpha1.PhasePaused
-		workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3,
-			PausedAt: &metav1.Time{Time: fixedTime.Add(-10 * time.Minute)}}
-		r := newTestReconcilerWithReplicas(t, workload, &stubPauser{resumeDone: true}, 0)
-		w := getWorkload(t, r, "api")
+	// A tool that syncs less often than Hybernate wakes the workload could
+	// still undo the next pause, so a wake only shows a pause held if it
+	// held for the hour.
+	for name, tt := range map[string]struct {
+		paused  time.Duration
+		cleared bool
+	}{
+		"woken by Hybernate within the hour": {paused: 10 * time.Minute},
+		"woken by Hybernate after it":        {paused: 61 * time.Minute, cleared: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			workload := conflicted(fixedTime.Add(-3 * time.Hour))
+			workload.Status.Phase = v1alpha1.PhasePaused
+			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 3,
+				PausedAt: &metav1.Time{Time: fixedTime.Add(-tt.paused)}}
+			r := newTestReconcilerWithReplicas(t, workload, &stubPauser{resumeDone: true}, 0)
+			w := getWorkload(t, r, "api")
 
-		_, err := r.handleResume(context.Background(), w, nil)
-		require.NoError(t, err)
+			_, err := r.handleResume(context.Background(), w, nil)
+			require.NoError(t, err)
 
-		assert.Nil(t, meta.FindStatusCondition(getWorkload(t, r, "api").Status.Conditions, conditionGitOpsConflict))
-	})
+			got := getWorkload(t, r, "api")
+			require.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+			assert.Equal(t, !tt.cleared, meta.IsStatusConditionTrue(got.Status.Conditions, conditionGitOpsConflict))
+		})
+	}
 }
 
 // A workload an autoscaler scales says so, and how Hybernate pauses it
@@ -394,6 +408,7 @@ func TestScaledToZero_BackUpIsActivity(t *testing.T) {
 	assert.Equal(t, int32(2), targetReplicas(t, r))
 	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionScaledToZero))
 	assert.Equal(t, v1alpha1.ActivitySourceScaledUp, got.Status.Activity.LastActivitySource)
+	assert.Zero(t, r.awakeDemand(got, 80), "starting up again isn't demand the forecast should learn")
 }
 
 // A pause recorded with zero replicas, as an earlier version made of a
@@ -440,4 +455,63 @@ func TestWakeOnScaleUp_StaleCacheDuringAResume(t *testing.T) {
 	got := getWorkload(t, r, "api")
 	assert.Equal(t, v1alpha1.PhaseResuming, got.Status.Phase)
 	assert.Nil(t, got.Status.LastScaledUp)
+}
+
+// Someone scaling a workload up once Hybernate has scaled it to zero, while
+// its pods are still stopping, wakes it as it would a paused one, rather
+// than having the pause scale it straight back down. Before that, the pause
+// hasn't scaled anything, so the replicas are still what it records.
+func TestWakeOnScaleUp_WhilePausing(t *testing.T) {
+	pausedAt := metav1.NewTime(fixedTime.Add(-10 * time.Second))
+	tests := []struct {
+		name     string
+		pausedAt *metav1.Time
+		woken    bool
+	}{
+		{name: "after the scale-down", pausedAt: &pausedAt, woken: true},
+		{name: "before the scale-down", pausedAt: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := pausedWorkload(v1alpha1.PhasePausing)
+			workload.Status.Pause.PausedAt = tt.pausedAt
+			r := lifecycleReconciler(t, workload, 2, interceptor.Funcs{})
+
+			_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+			require.NoError(t, err)
+
+			got := getWorkload(t, r, "api")
+			if !tt.woken {
+				assert.Equal(t, v1alpha1.PhasePaused, got.Status.Phase)
+				assert.Zero(t, targetReplicas(t, r))
+				return
+			}
+			assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+			assert.Equal(t, int32(2), targetReplicas(t, r), "not scaled back down")
+			require.NotNil(t, got.Status.LastScaledUp)
+			assert.Equal(t, int32(2), got.Status.LastScaledUp.Replicas)
+		})
+	}
+}
+
+// Someone scaling a resuming workload back to zero after Hybernate has
+// scaled it up means it to be off: it's left there, as a running workload
+// scaled to zero outside Hybernate is, rather than scaled up again.
+func TestResume_ScaledToZeroWhileResumingIsLeftOff(t *testing.T) {
+	workload := pausedWorkload(v1alpha1.PhaseResuming)
+	workload.Status.Pause.ScaledObject = apiScaler
+	workload.Status.Pause.ResumedAt = ptr.To(metav1.NewTime(fixedTime.Add(-30 * time.Second)))
+	r := lifecycleReconciler(t, workload, 0, interceptor.Funcs{}, apiScaledObject("3"))
+
+	for range 2 {
+		_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+		require.NoError(t, err)
+	}
+
+	got := getWorkload(t, r, "api")
+	assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+	assert.Zero(t, targetReplicas(t, r), "left off")
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionScaledToZero))
+	_, held := pausedScaledObject(t, r)
+	assert.False(t, held, "KEDA is released")
 }

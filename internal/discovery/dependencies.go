@@ -52,9 +52,9 @@ type Dependency struct {
 	// Source is how it was found: in the workload's environment, or, once
 	// Hybernate learns them, from a wake it saw the workload cause.
 	Source DependencySource `json:"source"`
-	// Connected means Hybernate has applied it, waking and holding the
-	// dependency with the workload. Hybernate doesn't apply the
-	// dependencies it finds yet, so this stays false until it does.
+	// Connected means Hybernate has learned it for the workload's
+	// ManagedWorkload, so it wakes and holds the dependency with the
+	// workload.
 	Connected bool `json:"connected,omitempty"`
 }
 
@@ -135,14 +135,21 @@ func findDependencies(ctx context.Context, workloads []Workload, sources map[wor
 // readConfigMaps reads the ConfigMaps a namespace's pods take variables
 // from, by name. One that doesn't exist is left out, as the pod would leave
 // it out if optional. It stops at the first it isn't allowed to read, since
-// the rest won't be either.
-func (s *Scanner) readConfigMaps(ctx context.Context, namespace string, workloads []workload) (
+// the rest won't be either. Those listed across the cluster are taken from
+// there.
+func (s *Scanner) readConfigMaps(ctx context.Context, reads *clusterReads, namespace string, workloads []workload) (
 	map[string]map[string]string, error) {
+	out := map[string]map[string]string{}
+	if listed := reads.configMaps.byNamespace; listed != nil {
+		for _, cm := range listed[namespace] {
+			out[cm.Name] = cm.Data
+		}
+		return out, nil
+	}
 	names := make([]string, 0, len(workloads))
 	for _, wl := range workloads {
 		names = append(names, ConfigMapsReferenced(wl.template.Spec)...)
 	}
-	out := map[string]map[string]string{}
 	var failed error
 	for _, name := range uniqueSorted(names) {
 		var cm corev1.ConfigMap
@@ -348,11 +355,7 @@ type resolved struct {
 // pod.service, with the same suffixes.
 func resolve(addr address, namespace string, services map[string]map[string]corev1.Service,
 	targets targetIndex) []resolved {
-	name := addr.host
-	if i := strings.Index(name+".", ".svc."); i >= 0 {
-		name = name[:i]
-	}
-	parts := strings.Split(name, ".")
+	parts := inCluster(strings.Split(addr.host, "."))
 	type candidate struct {
 		namespace, service string
 		pod                bool
@@ -374,6 +377,19 @@ func resolve(addr address, namespace string, services map[string]map[string]core
 		return behind(svc, c.pod || svc.Spec.ClusterIP == corev1.ClusterIPNone, targets)
 	}
 	return nil
+}
+
+// inCluster cuts .svc and the cluster domain, whatever it is, off a host's
+// labels, when the labels before .svc are service.namespace or
+// pod.service.namespace, as only those are cluster DNS names. Any other
+// host, such as api.svc.example.com, is left whole, and names no Service.
+func inCluster(host []string) []string {
+	for _, n := range []int{2, 3} {
+		if len(host) > n && host[n] == "svc" {
+			return host[:n]
+		}
+	}
+	return host
 }
 
 // behind returns the workloads whose pods a Service selects, by name.

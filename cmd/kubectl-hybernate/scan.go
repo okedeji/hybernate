@@ -362,6 +362,11 @@ func incompleteError(result scanResult) error {
 		why = append(why, fmt.Sprintf("%s couldn't be read in full, as the notes say; run it again, scan fewer "+
 			"namespaces with -n, or pass a longer --timeout", plural(len(in.Failed), "namespace", "namespaces")))
 	}
+	if len(in.Unscanned) > 0 {
+		why = append(why, fmt.Sprintf("it ran out of --timeout before it had scanned %s, which the report leaves "+
+			"out; pass a longer --timeout, or scan fewer namespaces with -n",
+			plural(len(in.Unscanned), "namespace", "namespaces")))
+	}
 	return fmt.Errorf("the scan of %s is incomplete: %s", result.Cluster, strings.Join(why, "; "))
 }
 
@@ -460,6 +465,7 @@ func scanCluster(ctx context.Context, window time.Duration, prom prometheusSetup
 		Window:          window,
 		IdleAfter:       opts.idleAfter,
 		NamedNamespaces: len(opts.namespaces.list()) > 0,
+		AllNamespaces:   len(opts.namespaces.list()) == 0 && namespaceNote == "",
 	})
 	if err != nil {
 		return scanResult{}, fmt.Errorf("scanning %s: %w", scan.Cluster, err)
@@ -470,10 +476,9 @@ func scanCluster(ctx context.Context, window time.Duration, prom prometheusSetup
 	if namespaceNote != "" {
 		report.Notes = append([]string{namespaceNote}, report.Notes...)
 	}
-	// The scan carries on past calls that fail, noting what it couldn't
-	// read; once the deadline passes they all fail, and what it has isn't
-	// the cluster.
-	if err := ctx.Err(); err != nil {
+	// Past the deadline, the report has the namespaces scanned in time;
+	// with none of them, there's nothing to report but the timeout.
+	if err := ctx.Err(); err != nil && report.Namespaces == 0 && len(namespaces) > 0 {
 		return scanResult{}, err
 	}
 	scan.ClusterReport = report
@@ -495,7 +500,12 @@ func historySource(ctx context.Context, c client.Client, config *rest.Config, na
 		}
 		prom = p
 	} else {
-		clientset, err := kubernetes.NewForConfig(config)
+		// A history query through the service proxy is bounded by the time
+		// the scan gives history, which --request-timeout, meant for the
+		// scan's many small requests, would otherwise cut short.
+		proxyConfig := rest.CopyConfig(config)
+		proxyConfig.Timeout = 0
+		clientset, err := kubernetes.NewForConfig(proxyConfig)
 		if err != nil {
 			return nil, fmt.Errorf("can't look for Prometheus: %w", err)
 		}
@@ -564,7 +574,7 @@ func writeTable(w io.Writer, result scanResult, limit int) error {
 	if len(notes) > 0 {
 		p.line("Notes:")
 		for _, n := range notes {
-			p.line("  - %s", n)
+			p.line("  - %s", oneLine(n))
 		}
 		p.line("")
 	}
@@ -821,7 +831,8 @@ func savedCell(wl Workload) string {
 // couldSaveCell is what pausing a workload Hybernate doesn't pause yet
 // would free a month, from what dry-run measured or history shows.
 func couldSaveCell(wl Workload) string {
-	if wl.ScaledByHand || (wl.Measured == nil && (wl.Managed || wl.Protected || wl.History == nil)) {
+	if wl.ScaledByHand || wl.WontPause != "" ||
+		(wl.Measured == nil && (wl.Managed || wl.Protected || wl.History == nil)) {
 		return "-"
 	}
 	return dollars(discovery.CouldSave(wl))
@@ -831,20 +842,22 @@ func couldSaveCell(wl Workload) string {
 // one Hybernate could manage, to measure, and the first already measuring
 // in dry-run, to go live. Workloads come sorted most savings first, so each
 // is the best example. Protected workloads are left out, as Hybernate won't
-// manage them, and so are those whose replicas are set from Git, whose
-// GitOps tool would revert a label put on by hand and undo every pause; the
-// notes say how to bring those in. Nor is the cluster's own
-// infrastructure, which the report keeps apart from the workloads anyway.
+// manage them, and those it refuses to pause, and so are those whose
+// replicas are set from Git, whose GitOps tool would revert a label put on
+// by hand and undo every pause; the notes say how to bring those in. Nor is the cluster's own
+// infrastructure, which the report keeps apart from the workloads anyway,
+// or a workload in dry-run someone scaled to zero, which going live frees
+// nothing more of.
 func nextStepTargets(workloads []Workload) (idle, measuring *Workload) {
 	for i := range workloads {
 		wl := &workloads[i]
-		if wl.Protected || wl.ReplicasFromGit != "" || wl.Platform != "" {
+		if wl.Protected || wl.WontPause != "" || wl.ReplicasFromGit != "" || wl.Platform != "" {
 			continue
 		}
 		if idle == nil && wl.State == discovery.StateIdle && !wl.Managed {
 			idle = wl
 		}
-		if measuring == nil && wl.Measured != nil {
+		if measuring == nil && wl.Measured != nil && !wl.ScaledByHand {
 			measuring = wl
 		}
 	}
@@ -852,13 +865,16 @@ func nextStepTargets(workloads []Workload) (idle, measuring *Workload) {
 }
 
 // nextStepCommands are the commands that measure the idle workload and then
-// take a workload live, which both the table and the report show.
+// take a workload live, which both the table and the report show. The
+// dry-run annotation comes before the label, which opts the workload in:
+// the chart's default is live, so the label alone would have it paused once
+// idle.
 func nextStepCommands(idle, measuring *Workload) (measure []string, enable string) {
 	if idle != nil {
 		kind := strings.ToLower(string(idle.Kind))
 		measure = []string{
-			fmt.Sprintf("kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace),
 			fmt.Sprintf("kubectl annotate %s %s -n %s hybernate.io/dry-run=true", kind, idle.Name, idle.Namespace),
+			fmt.Sprintf("kubectl label %s %s -n %s hybernate.io/managed=true", kind, idle.Name, idle.Namespace),
 		}
 	}
 	if measuring == nil {
@@ -1028,8 +1044,8 @@ func dependencyRef(namespace string, d discovery.Dependency) string {
 // hours is a length of time to the nearest hour, or minute under one,
 // rounded as hoursTotal rounds so a row and its total agree.
 func hours(h float64) string {
-	if h > 0 && h < 1 {
-		return fmt.Sprintf("%dm", int(h*60+0.5))
+	if minutes := int(math.Round(h * 60)); h > 0 && minutes < 60 {
+		return fmt.Sprintf("%dm", minutes)
 	}
 	return fmt.Sprintf("%dh", int(h+0.5))
 }

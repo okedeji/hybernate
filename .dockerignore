@@ -14,5 +14,9 @@
 !go.mod
 !go.sum
 
+# Re-include the licenses the image ships
+!LICENSE
+!NOTICE
+
 # AI instructions
 *.claude

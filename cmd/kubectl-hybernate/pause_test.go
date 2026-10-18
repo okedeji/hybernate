@@ -299,7 +299,7 @@ func TestPause_WarnsWhenGitOpsWillUndoIt(t *testing.T) {
 	}{
 		{manager: "argocd-controller", tool: "Argo CD", fix: "resource.customizations.ignoreDifferences.apps_Deployment"},
 		{manager: "kustomize-controller", tool: "Flux", fix: "Leave replicas out of the workload's manifest in Git"},
-		{manager: "kubectl-scale"},
+		{manager: "kubectl-edit"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.manager, func(t *testing.T) {
@@ -311,7 +311,7 @@ func TestPause_WarnsWhenGitOpsWillUndoIt(t *testing.T) {
 				if d, ok := obj.(*appsv1.Deployment); ok {
 					d.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: tt.manager,
 						Operation: metav1.ManagedFieldsOperationApply, FieldsType: "FieldsV1",
-						FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:spec":{"f:replicas":{}}}`)}}}
+						FieldsV1: metav1.NewFieldsV1(`{"f:spec":{"f:replicas":{}}}`)}}
 				}
 				return nil
 			}}
@@ -489,6 +489,55 @@ func TestPause_HeldAwake(t *testing.T) {
 			_, held := got[v1alpha1.AnnotationActiveUntil]
 			assert.Equal(t, tt.wantHold, held)
 			assert.Equal(t, tt.wantPause, got[v1alpha1.AnnotationPauseRequested] != "")
+		})
+	}
+}
+
+// The operator also honours an active-until hold on the workload itself, so
+// pause finds that one too, and clears whichever holds it.
+func TestPause_HeldAwakeByTheWorkload(t *testing.T) {
+	until := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	tests := []struct {
+		name      string
+		onManaged bool
+		args      []string
+		wantErr   string
+	}{
+		{name: "no one to ask", wantErr: "preview-42/api wasn't paused: the hybernate.io/active-until annotation on " +
+			"deployment api keeps it awake until " + until + "; pass --clear-hold to clear it and pause now"},
+		{name: "held by both", onManaged: true, wantErr: "preview-42/api wasn't paused: the hybernate.io/active-until " +
+			"annotation on its ManagedWorkload and deployment api keeps it awake until " + until +
+			"; pass --clear-hold to clear it and pause now"},
+		{name: "--clear-hold", onManaged: true, args: []string{"--clear-hold"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := managedWorkload(v1alpha1.PhaseRunning)
+			if tt.onManaged {
+				w.Annotations = map[string]string{v1alpha1.AnnotationActiveUntil: until}
+			}
+			api := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: apiKey.Namespace,
+				Annotations: map[string]string{v1alpha1.AnnotationActiveUntil: until}}}
+			c := newClient(t, operator(pauses), w, api)
+
+			out, err := runCLI(t, c, append([]string{"pause", "api"}, tt.args...)...)
+
+			var got appsv1.Deployment
+			require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(api), &got))
+			_, workloadHeld := got.Annotations[v1alpha1.AnnotationActiveUntil]
+			_, managedHeld := annotations(t, c)[v1alpha1.AnnotationActiveUntil]
+			if tt.wantErr != "" {
+				require.ErrorIs(t, err, errNotPaused)
+				assert.EqualError(t, err, tt.wantErr)
+				assert.True(t, workloadHeld, "nothing is cleared without asking")
+				assert.Empty(t, pauseRequested(t, c))
+				return
+			}
+			require.NoError(t, err)
+			assert.Contains(t, out, "cleared the hybernate.io/active-until hold on preview-42/api\n")
+			assert.Contains(t, out, "preview-42/api is Paused after")
+			assert.False(t, workloadHeld)
+			assert.False(t, managedHeld)
 		})
 	}
 }

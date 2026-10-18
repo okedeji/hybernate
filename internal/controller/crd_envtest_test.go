@@ -63,6 +63,10 @@ func TestCRD_DurationsAreThoseGoCanDecode(t *testing.T) {
 		{paths: [][]string{idleAfter, maxWait}, value: "-5m"},
 		{paths: [][]string{idleAfter, maxWait}, value: "soon"},
 		{paths: [][]string{idleAfter}, value: "168h", valid: true},
+		{paths: [][]string{idleAfter}, value: "1m", valid: true},
+		{paths: [][]string{idleAfter}, value: "59s"},
+		{paths: [][]string{idleAfter}, value: "1s"},
+		{paths: [][]string{maxWait}, value: "30s", valid: true},
 		{paths: [][]string{maxWait}, value: "1h", valid: true},
 		{paths: [][]string{maxWait}, value: "61m"},
 		{paths: [][]string{maxWait}, value: "10000h"},
@@ -94,6 +98,62 @@ func TestCRD_DurationsAreThoseGoCanDecode(t *testing.T) {
 
 	var list v1alpha1.ManagedWorkloadList
 	assert.NoError(t, c.List(ctx, &list, client.InNamespace("dev")), "every stored ManagedWorkload decodes")
+}
+
+// Cost rates can't be negative, which would price pausing as a loss, and
+// the lists a reconcile works through each time are bounded.
+func TestCRD_RatesAndLists(t *testing.T) {
+	cfg := startEnvtest(t)
+	c, err := client.New(cfg, client.Options{Scheme: testScheme(t)})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	require.NoError(t, c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "dev"}}))
+
+	listOf := func(n int, item func(i int) any) []any {
+		items := make([]any, n)
+		for i := range items {
+			items[i] = item(i)
+		}
+		return items
+	}
+	query := func(int) any { return map[string]any{"promQL": "up"} }
+	dependency := func(i int) any { return map[string]any{"kind": "Deployment", "name": fmt.Sprintf("dep-%d", i)} }
+	rates := []string{"costTracking", "rates"}
+	tests := []struct {
+		name  string
+		path  []string
+		value any
+		valid bool
+	}{
+		{name: "a rate", path: append(rates, "cpuPerHour"), value: "0.031611", valid: true},
+		{name: "a rate of zero", path: append(rates, "memoryPerHour"), value: "0", valid: true},
+		{name: "a whole-number rate", path: append(rates, "storagePerMonth"), value: int64(2), valid: true},
+		{name: "a negative CPU rate", path: append(rates, "cpuPerHour"), value: "-0.03"},
+		{name: "a negative memory rate", path: append(rates, "memoryPerHour"), value: "-1m"},
+		{name: "a negative storage rate", path: append(rates, "storagePerMonth"), value: int64(-1)},
+		{name: "10 queries", path: []string{"idlePolicy", "activity", "prometheus"}, value: listOf(10, query), valid: true},
+		{name: "11 queries", path: []string{"idlePolicy", "activity", "prometheus"}, value: listOf(11, query)},
+		{name: "20 dependencies", path: []string{"dependsOn"}, value: listOf(20, dependency), valid: true},
+		{name: "21 dependencies", path: []string{"dependsOn"}, value: listOf(21, dependency)},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mw := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "hybernate.io/v1alpha1", "kind": "ManagedWorkload",
+				"metadata": map[string]any{"name": fmt.Sprintf("w%d", i), "namespace": "dev"},
+				"spec":     map[string]any{"target": map[string]any{"kind": "Deployment", "name": "api"}},
+			}}
+			require.NoError(t, unstructured.SetNestedField(mw.Object, tt.value, append([]string{"spec"}, tt.path...)...))
+
+			err := c.Create(ctx, mw)
+			if tt.valid {
+				assert.NoError(t, err)
+			} else {
+				assert.True(t, apierrors.IsInvalid(err), "want the value rejected, got %v", err)
+			}
+		})
+	}
 }
 
 // The spec the opt-in controller writes is the one the API server stores,

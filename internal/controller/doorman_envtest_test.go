@@ -131,6 +131,14 @@ var _ = ginkgo.Describe("Doorman routing through the operator's cache", func() {
 			Ports: []discoveryv1.EndpointPort{{Name: ptr.To("http"), Port: ptr.To(int32(8080))}},
 		}
 		gomega.Expect(k8sClient.Create(ctx, stable)).To(gomega.Succeed())
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "stable-0", Namespace: ns},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "app"}}},
+		}
+		gomega.Expect(k8sClient.Create(ctx, pod)).To(gomega.Succeed())
+		pod.Status.PodIP = "10.244.1.9"
+		pod.Status.PodIPs = []corev1.PodIP{{IP: "10.244.1.9"}}
+		gomega.Expect(k8sClient.Status().Update(ctx, pod)).To(gomega.Succeed())
 		w, target := canary()
 
 		recheck := r.routeDoorman(ctx, w, target)

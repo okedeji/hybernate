@@ -19,7 +19,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -329,4 +332,71 @@ current-context: a
 			})
 		}
 	}
+}
+
+// A message from a server stays on one row, and can't restyle or rewrite
+// the terminal with escape sequences.
+func TestOneLine(t *testing.T) {
+	assert.Equal(t, "pod failed: [31mOOMKilled[0m [2K now",
+		oneLine("pod failed:\n\t\x1b[31mOOMKilled\x1b[0m\r\x1b[2K now"))
+	assert.Equal(t, "café ✓", oneLine("café ✓"))
+}
+
+// A request ends when the command's context does, and lets go of its hook
+// on that context once its response is read, or it fails, so they don't
+// pile up over a command's requests.
+func TestCancelWith(t *testing.T) {
+	var reqCtx context.Context
+	respond := func(err error) http.RoundTripper {
+		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			reqCtx = r.Context()
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+		})
+	}
+	request := func(t *testing.T) *http.Request {
+		t.Helper()
+		r, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.test", nil)
+		require.NoError(t, err)
+		return r
+	}
+
+	t.Run("let go once the body is closed", func(t *testing.T) {
+		command, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+
+		resp, err := cancelWith(command)(respond(nil)).RoundTrip(request(t))
+
+		require.NoError(t, err)
+		require.NoError(t, reqCtx.Err(), "the body is still to be read")
+		require.NoError(t, resp.Body.Close())
+		assert.Error(t, reqCtx.Err())
+		cancel(errors.New("--timeout"))
+		assert.Equal(t, context.Canceled, context.Cause(reqCtx), "the command's end no longer reaches it")
+	})
+
+	t.Run("let go when it fails", func(t *testing.T) {
+		_, err := cancelWith(context.Background())(respond(errors.New("refused"))).RoundTrip(request(t))
+
+		require.Error(t, err)
+		assert.Error(t, reqCtx.Err())
+	})
+
+	t.Run("ended with the command", func(t *testing.T) {
+		command, cancel := context.WithCancelCause(context.Background())
+		resp, err := cancelWith(command)(respond(nil)).RoundTrip(request(t))
+		require.NoError(t, err)
+
+		cancel(errors.New("--timeout"))
+
+		select {
+		case <-reqCtx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("the request outlived the command")
+		}
+		assert.EqualError(t, context.Cause(reqCtx), "--timeout")
+		require.NoError(t, resp.Body.Close())
+	})
 }

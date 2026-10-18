@@ -377,6 +377,60 @@ func TestPrometheus_MixedSources(t *testing.T) {
 	assert.Contains(t, note, `--prometheus-selector 'cluster="..."'`)
 }
 
+// A container's CPU scraped twice by one Prometheus, as from both of the
+// kubelet's /metrics/cadvisor and /metrics/resource, is one container's
+// CPU, not twice it, and isn't taken for a second Prometheus.
+func TestPrometheus_ScrapedTwice(t *testing.T) {
+	end := scanTime.Truncate(minStep)
+	var query string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query().Get("query")
+		at := float64(end.Unix())
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{
+			"resultType": "matrix", "result": []any{
+				map[string]any{"metric": map[string]string{"pod": "api-x", "container": "app", "job": "kubelet",
+					"metrics_path": "/metrics/cadvisor"}, "values": [][2]any{{at - 300, "0.25"}, {at, "0.25"}}},
+				map[string]any{"metric": map[string]string{"pod": "api-x", "container": "app", "job": "kubelet",
+					"metrics_path": "/metrics/resource"}, "values": [][2]any{{at, "0.24"}}},
+			}}})
+	}))
+	t.Cleanup(server.Close)
+	p, err := NewPrometheusURL(server.URL, server.Client(), nil)
+	require.NoError(t, err)
+
+	history, err := p.namespaceCPU(context.Background(), "dev", end.Add(-time.Hour), end, minStep)
+
+	require.NoError(t, err)
+	assert.Contains(t, query, "metrics_path", "each scrape is read apart, so copies can be told from each other")
+	require.Len(t, history, 1)
+	assert.InDelta(t, 0.25, history[0].samples[end.Unix()], 0.0001)
+	assert.InDelta(t, 0.25, history[0].samples[end.Unix()-300], 0.0001, "a step only one scrape has")
+	assert.Empty(t, p.mixedSourcesNote())
+}
+
+func TestSample_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want sample
+	}{
+		{raw: `[1727740800, "0.25"]`, want: sample{at: 1727740800, value: 0.25, ok: true}},
+		{raw: `[1727740800.781,"1e-3"]`, want: sample{at: 1727740800, value: 0.001, ok: true}},
+		{raw: `[1727740800, "NaN"]`},
+		{raw: `[1727740800, "+Inf"]`},
+		{raw: `[1727740800, 0.25]`},
+		{raw: `[1727740800]`},
+		{raw: `null`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			var got []sample
+			require.NoError(t, json.Unmarshal([]byte("["+tt.raw+"]"), &got), "a sample that isn't one is skipped")
+			require.Len(t, got, 1)
+			assert.Equal(t, tt.want, got[0])
+		})
+	}
+}
+
 func TestPrometheusURL_SendsHeaders(t *testing.T) {
 	var got http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -449,6 +503,14 @@ func TestPrometheusURL_HidesCredentials(t *testing.T) {
 
 // An error page says why, cut short; a response too large to hold is
 // refused rather than read.
+// An error page can't restyle or rewrite the terminal it's shown in.
+func TestErrorExcerpt_DropsWhatCantBePrinted(t *testing.T) {
+	got := errorExcerpt([]byte("\x1b[2J\x1b[31mno org id\x07\r\n\tfor you"))
+
+	assert.Equal(t, "[2J[31mno org id for you", got)
+	assert.Equal(t, `bad "query"[0m`, errorExcerpt([]byte(`{"error":"bad \"query\"\u001b[0m"}`)))
+}
+
 func TestPrometheusURL_ErrorBodiesAndLimits(t *testing.T) {
 	big := strings.Repeat("x", maxErrorShown*3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -498,7 +560,7 @@ func TestNewHTTPClient(t *testing.T) {
 	check := func(o HTTPOptions) error {
 		c, err := NewHTTPClient(o)
 		require.NoError(t, err)
-		assert.Equal(t, prometheusTimeout, c.Timeout, "a Prometheus that stops answering is given up on")
+		assert.Zero(t, c.Timeout, "each query's context bounds it, history's by the time the scan gives it")
 		p, err := NewPrometheusURL(server.URL, c, nil)
 		require.NoError(t, err)
 		return p.Check(context.Background())

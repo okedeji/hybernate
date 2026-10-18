@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,16 +48,20 @@ const (
 	// a workload is awake.
 	activityCheckInterval = 1 * time.Minute
 
-	// unobservedGap is how stale the last evaluation may be before the clock
-	// restarts. Evaluations are only written every statusFlushInterval, so a
-	// gap beyond that plus two missed checks means the operator wasn't
-	// watching, and it can't claim the workload was idle in the meantime.
+	// unobservedGap is the most a gap between evaluations may last before
+	// the clock restarts, since the operator wasn't watching and can't claim
+	// the workload was idle in the meantime. See unobservedAfter.
 	unobservedGap = 2*activityCheckInterval + statusFlushInterval
 
 	defaultIdleAfter    = 1 * time.Hour
 	defaultCPUThreshold = 10
 
 	conditionIdleVetoed = "IdleVetoed"
+
+	conditionPrometheusQueryEmpty = "PrometheusQueryEmpty"
+	ReasonPrometheusQueryEmpty    = "PrometheusQueryEmpty"
+
+	ReasonInvalidActivityAnnotation = "InvalidActivityAnnotation"
 )
 
 // activityMemo keeps each workload's latest clock between status writes.
@@ -155,7 +161,8 @@ func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.Man
 		r.resetActivity(workload, v1alpha1.ActivitySourceCreated)
 	}
 	status := workload.Status.Activity
-	if remembered, ok := r.activityMemo.get(workload.UID); ok {
+	remembered, inMemory := r.activityMemo.get(workload.UID)
+	if inMemory {
 		recordActivity(status, remembered.LastActivityTime.Time, remembered.LastActivitySource)
 		if remembered.LastEvaluatedTime != nil &&
 			(status.LastEvaluatedTime == nil || remembered.LastEvaluatedTime.After(status.LastEvaluatedTime.Time)) {
@@ -163,13 +170,13 @@ func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.Man
 		}
 	}
 
-	if last := status.LastEvaluatedTime; last != nil && now.Sub(last.Time) > unobservedGap {
+	if last := status.LastEvaluatedTime; last != nil && now.Sub(last.Time) > unobservedAfter(workload, inMemory) {
 		status.LastActivityTime = metav1.NewTime(now)
 		status.LastActivitySource = v1alpha1.ActivitySourceUnobserved
 	}
 
 	if target != nil {
-		if hash := podTemplateHash(target); hash != "" {
+		if hash := r.templateHashes.of(workload.UID, target); hash != "" {
 			if status.TemplateHash != "" && status.TemplateHash != hash {
 				recordActivity(status, now, v1alpha1.ActivitySourceRollout)
 			}
@@ -177,6 +184,7 @@ func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.Man
 		}
 	}
 
+	r.warnMalformedActivity(workload, target)
 	var obs activityObservation
 	for _, obj := range []client.Object{workload, target} {
 		if obj == nil {
@@ -197,20 +205,49 @@ func (r *Reconciler) observeActivity(ctx context.Context, workload *v1alpha1.Man
 		recordActivity(status, now, v1alpha1.ActivitySourceCPU)
 	}
 
-	active, err := r.prometheusActive(ctx, workload)
-	if err != nil {
-		obs.prometheusErr = err
-	} else if active {
-		recordActivity(status, now, v1alpha1.ActivitySourcePrometheus)
+	// With CPU unreadable nothing is decided this check, so Prometheus
+	// isn't asked.
+	if obs.cpuErr == nil {
+		active, err := r.prometheusActive(ctx, workload)
+		if err != nil {
+			obs.prometheusErr = err
+		} else if active {
+			recordActivity(status, now, v1alpha1.ActivitySourcePrometheus)
+		}
 	}
 
-	evaluated := metav1.NewTime(now)
-	status.LastEvaluatedTime = &evaluated
+	// A check where a source couldn't be read isn't an evaluation: the time
+	// since the last one keeps growing, and once it's longer than
+	// unobservedAfter the clock restarts as unobserved. Otherwise a source
+	// back from an outage that answers "nothing now" would find the whole
+	// outage idle and pause at once. A short blind spot, such as the minute
+	// before a woken workload's new pods have metrics, leaves what woke it
+	// as its last activity.
+	if obs.cpuErr == nil && obs.prometheusErr == nil {
+		evaluated := metav1.NewTime(now)
+		status.LastEvaluatedTime = &evaluated
+	}
 	pauseAt := metav1.NewTime(status.LastActivityTime.Add(idleAfterFor(workload)))
 	status.PauseAt = &pauseAt
 	r.activityMemo.put(workload.UID, *status.DeepCopy())
 	recordIdleSeconds(workload, now)
 	return obs
+}
+
+// unobservedAfter is how long since the last evaluation the operator is
+// taken not to have been watching. Counted as idle, a gap could bring a
+// pause forward by its whole length, so a short idleAfter tolerates a gap
+// of at most half of it, though never less than two missed checks, which a
+// busy operator's queue can delay. With no clock in memory, as after a
+// restart or a change of leader, what's written can be a flush interval
+// behind the last check, so the gap's start is unknown: anything beyond two
+// checks restarts the clock, which can delay a pause but never bring one
+// forward.
+func unobservedAfter(workload *v1alpha1.ManagedWorkload, inMemory bool) time.Duration {
+	if !inMemory {
+		return 2 * activityCheckInterval
+	}
+	return min(unobservedGap, max(2*activityCheckInterval, idleAfterFor(workload)/2))
 }
 
 // recordIdleSeconds publishes how long the workload has gone without
@@ -252,6 +289,84 @@ func (r *Reconciler) activityAnnotations(ctx context.Context, obj client.Object,
 		lastActivity = now
 	}
 	return lastActivity, parse(v1alpha1.AnnotationActiveUntil)
+}
+
+// wellFormedActivityTime reports whether an activity annotation's value is
+// an RFC 3339 time, the only form that counts as activity.
+func wellFormedActivityTime(raw string) bool {
+	_, err := time.Parse(time.RFC3339, raw)
+	return err == nil
+}
+
+// annotationWarnings remembers, for each workload, the malformed activity
+// annotation values it has been warned about, so each is reported once
+// rather than on every check.
+type annotationWarnings struct {
+	mu     sync.Mutex
+	warned map[types.UID]map[string]string
+}
+
+// first reports whether value is new for key, recording it.
+func (w *annotationWarnings) first(uid types.UID, key, value string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.warned == nil {
+		w.warned = make(map[types.UID]map[string]string)
+	}
+	if w.warned[uid] == nil {
+		w.warned[uid] = make(map[string]string)
+	}
+	if last, ok := w.warned[uid][key]; ok && last == value {
+		return false
+	}
+	w.warned[uid][key] = value
+	return true
+}
+
+func (w *annotationWarnings) clear(uid types.UID, key string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.warned[uid], key)
+}
+
+func (w *annotationWarnings) forget(uid types.UID) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.warned, uid)
+}
+
+// warnMalformedActivity reports each activity annotation on the workload or
+// its target that isn't an RFC 3339 time, once per value. Such a value is
+// ignored everywhere: it neither keeps an awake workload awake nor wakes a
+// paused one. A tool stamping epoch seconds, say, would otherwise wake the
+// workload only to see it pause again an idleAfter later, with nothing to
+// say why.
+func (r *Reconciler) warnMalformedActivity(workload *v1alpha1.ManagedWorkload, target client.Object) {
+	sources := []struct {
+		what string
+		obj  client.Object
+	}{
+		{what: "ManagedWorkload " + workload.Name, obj: workload},
+		{what: string(workload.Spec.Target.Kind) + " " + workload.Spec.Target.Name, obj: target},
+	}
+	for _, s := range sources {
+		if s.obj == nil {
+			continue
+		}
+		for _, key := range activityAnnotations {
+			id := s.what + "/" + key
+			raw, ok := s.obj.GetAnnotations()[key]
+			if !ok || raw == "" || wellFormedActivityTime(raw) {
+				r.activityWarned.clear(workload.UID, id)
+				continue
+			}
+			if r.activityWarned.first(workload.UID, id, raw) {
+				r.emitEvent(workload, false, "Warning", ReasonInvalidActivityAnnotation, actionEvaluateIdle,
+					"%s on %s is %q, not an RFC 3339 time such as %s, so it's ignored: it neither keeps the workload "+
+						"awake nor wakes it", key, s.what, raw, r.now().UTC().Format(time.RFC3339))
+			}
+		}
+	}
 }
 
 // wakeSource is what to record as the activity that woke a paused workload:
@@ -301,28 +416,39 @@ func activityAnnotationValues(obj client.Object) map[string]string {
 }
 
 // activityAnnotationChanged reports whether any of obj's activity
-// annotations was set to a value other than the one recorded.
+// annotations was set to a time other than the one recorded.
 func activityAnnotationChanged(obj client.Object, recorded map[string]string) bool {
 	for _, key := range activityAnnotations {
-		if v := obj.GetAnnotations()[key]; v != "" && v != recorded[key] {
+		if v := obj.GetAnnotations()[key]; v != "" && v != recorded[key] && wellFormedActivityTime(v) {
 			return true
 		}
 	}
 	return false
 }
 
+// prometheusBudget bounds all of one workload's Prometheus queries in a
+// check together, so a workload with many slow queries can't hold a
+// reconcile worker for a timeout each.
+const prometheusBudget = 5 * time.Second
+
 // prometheusActive reports whether any configured Prometheus activity query
 // returns a value above zero.
 func (r *Reconciler) prometheusActive(ctx context.Context, workload *v1alpha1.ManagedWorkload) (bool, error) {
 	p := workload.Spec.IdlePolicy
-	if p == nil || p.Activity == nil {
+	if p == nil || p.Activity == nil || len(p.Activity.Prometheus) == 0 {
 		return false, nil
 	}
+	if r.prometheus == nil {
+		return false, signal.ErrEndpointNotConfigured
+	}
+	ctx, cancel := context.WithTimeout(ctx, prometheusBudget)
+	defer cancel()
 	for _, q := range p.Activity.Prometheus {
-		res, err := signal.NewPrometheus(r.prometheusURL, q.PromQL).Check(ctx)
+		res, err := r.prometheus.Check(ctx, q.PromQL)
 		if err != nil {
 			return false, fmt.Errorf("evaluating %q: %w", q.PromQL, err)
 		}
+		r.querySeries.saw(workload.UID, q.PromQL, !res.NoSeries)
 		if res.Confirm {
 			return true, nil
 		}
@@ -333,6 +459,124 @@ func (r *Reconciler) prometheusActive(ctx context.Context, workload *v1alpha1.Ma
 func hasPrometheusActivity(workload *v1alpha1.ManagedWorkload) bool {
 	p := workload.Spec.IdlePolicy
 	return p != nil && p.Activity != nil && len(p.Activity.Prometheus) > 0
+}
+
+// querySeries remembers, for each workload's Prometheus activity queries,
+// whether each has matched any series since the operator started or the
+// query was written. A query that never has most likely names a metric or
+// label that doesn't exist, and would never keep the workload awake. A
+// query not yet evaluated, because one before it showed activity, is
+// neither.
+type querySeries struct {
+	mu     sync.Mutex
+	series map[types.UID]map[string]bool
+}
+
+func (s *querySeries) saw(uid types.UID, query string, matched bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.series == nil {
+		s.series = make(map[types.UID]map[string]bool)
+	}
+	if s.series[uid] == nil {
+		s.series[uid] = make(map[string]bool)
+	}
+	s.series[uid][query] = s.series[uid][query] || matched
+}
+
+// neverMatched is which of queries have been evaluated and have never
+// matched a series.
+func (s *querySeries) neverMatched(uid types.UID, queries []v1alpha1.PrometheusActivity) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var empty []string
+	for _, q := range queries {
+		if matched, evaluated := s.series[uid][q.PromQL]; evaluated && !matched {
+			empty = append(empty, q.PromQL)
+		}
+	}
+	return empty
+}
+
+func (s *querySeries) forget(uid types.UID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.series, uid)
+}
+
+// reportEmptyQueries points out activity queries that have never matched a
+// series. It's informational: the other sources still decide, as an empty
+// result from a query that's right says no one is using the workload. The
+// event marks the condition beginning.
+func (r *Reconciler) reportEmptyQueries(workload *v1alpha1.ManagedWorkload) {
+	var empty []string
+	if hasPrometheusActivity(workload) {
+		empty = r.querySeries.neverMatched(workload.UID, workload.Spec.IdlePolicy.Activity.Prometheus)
+	}
+	if len(empty) == 0 {
+		r.clearCondition(workload, conditionPrometheusQueryEmpty, "QueriesMatchSeries")
+		return
+	}
+	began := !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionPrometheusQueryEmpty)
+	msg := fmt.Sprintf("Prometheus activity queries have matched no series since they were first evaluated: %s; "+
+		"check their metric and label names in Prometheus, since until a query matches, it can't keep the workload awake",
+		strings.Join(quoted(empty), ", "))
+	r.setCondition(workload, conditionPrometheusQueryEmpty, metav1.ConditionTrue, "NoSeries", msg)
+	if began {
+		r.emitEvent(workload, false, "Warning", ReasonPrometheusQueryEmpty, actionEvaluateIdle, "%s", msg)
+	}
+}
+
+func quoted(values []string) []string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = strconv.Quote(v)
+	}
+	return out
+}
+
+// templateHashes keeps each workload's target's pod template hash, for the
+// version of the target it was worked out from. The clock and learning
+// dependencies both need it on every check, and working it out encodes the
+// whole template.
+type templateHashes struct {
+	mu     sync.Mutex
+	hashes map[types.UID]templateHash
+}
+
+type templateHash struct {
+	target          types.UID
+	resourceVersion string
+	hash            string
+}
+
+// of is the hash of target, the workload's target. A target never written
+// to the API server, with no resource version, is hashed every time.
+func (h *templateHashes) of(workload types.UID, target client.Object) string {
+	version := templateHash{target: target.GetUID(), resourceVersion: target.GetResourceVersion()}
+	if version.resourceVersion == "" {
+		return podTemplateHash(target)
+	}
+	h.mu.Lock()
+	cached, ok := h.hashes[workload]
+	h.mu.Unlock()
+	if ok && cached.target == version.target && cached.resourceVersion == version.resourceVersion {
+		return cached.hash
+	}
+	version.hash = podTemplateHash(target)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.hashes == nil {
+		h.hashes = make(map[types.UID]templateHash)
+	}
+	h.hashes[workload] = version
+	return version.hash
+}
+
+func (h *templateHashes) forget(workload types.UID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.hashes, workload)
 }
 
 // podTemplateHash fingerprints the target's pod template. Scaling changes
@@ -379,6 +623,7 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 	if hasPrometheusActivity(workload) {
 		r.setCondition(workload, conditionPrometheusAvailable, metav1.ConditionTrue, "QueriesEvaluated", "")
 	}
+	r.reportEmptyQueries(workload)
 
 	if obs.activeUntil.After(now) || activeSinceClockRanOut(workload, now, pauseAt) {
 		if workload.Status.Phase == v1alpha1.PhaseIdle {
@@ -437,10 +682,16 @@ func (r *Reconciler) reconcileIdleClock(ctx context.Context, workload *v1alpha1.
 // pause it's in, or would be in under dry-run, began at the move to Idle,
 // and only activity after that ends it, as only that wakes a paused
 // workload: a pause request runs the clock out early, with the activity seen
-// before it still within idleAfter.
+// before it still within idleAfter. An activity annotation is stamped to
+// the second, so one in the second the clock ran out counts: it can't be
+// told from one just before, and counting it only keeps the workload awake.
 func activeSinceClockRanOut(workload *v1alpha1.ManagedWorkload, now, pauseAt time.Time) bool {
 	if began := workload.Status.LastTransitionTime; workload.Status.Phase == v1alpha1.PhaseIdle && began != nil {
-		return workload.Status.Activity.LastActivityTime.After(began.Time)
+		activity := workload.Status.Activity
+		if activity.LastActivitySource == v1alpha1.ActivitySourceAnnotation {
+			return !activity.LastActivityTime.Time.Before(began.Truncate(time.Second))
+		}
+		return activity.LastActivityTime.After(began.Time)
 	}
 	return now.Before(pauseAt)
 }
@@ -516,6 +767,7 @@ func nextCheck(now, pauseAt, activeUntil time.Time) time.Duration {
 // set before a requested pause, which ran the clock out early, doesn't undo
 // it.
 func (r *Reconciler) wokenByActivity(workload *v1alpha1.ManagedWorkload, target client.Object) bool {
+	r.warnMalformedActivity(workload, target)
 	var recorded v1alpha1.WakeAnnotations
 	if pause := workload.Status.Pause; pause != nil && pause.WakeAnnotations != nil {
 		recorded = *pause.WakeAnnotations

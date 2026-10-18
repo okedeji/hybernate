@@ -10,8 +10,8 @@ Hybernate is installed in namespace {{ .Release.Namespace }}.
 
 3. Opt a workload in, measuring it first so nothing is paused yet:
 
-   kubectl label deployment my-app -n my-namespace hybernate.io/managed=true
    kubectl annotate deployment my-app -n my-namespace hybernate.io/dry-run=true
+   kubectl label deployment my-app -n my-namespace hybernate.io/managed=true
 
    Label a namespace instead to opt in everything in it. When you're ready,
    let Hybernate pause it while idle:
@@ -22,9 +22,15 @@ Hybernate is installed in namespace {{ .Release.Namespace }}.
 
    kubectl get managedworkloads -A
 
-{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
 
-5. Metrics are scraped through a ServiceMonitor; check Prometheus's targets for the hybernate endpoints.
+5. Metrics are scraped through ServiceMonitors; check Prometheus's targets for the hybernate endpoints.
+{{- if and .Values.metrics.secure (not .Values.metrics.readerSubjects) }}
+   They're served over HTTPS only to callers allowed to get /metrics, and
+   metrics.readerSubjects is empty: until your Prometheus's ServiceAccount
+   is listed there, or bound to the {{ include "hybernate.fullname" . }}-metrics-reader ClusterRole,
+   its scrapes are refused with 401 or 403{{ if .Values.metrics.prometheusRule.enabled }}, and HybernateDown{{ if .Values.doorman.enabled }} and HybernateDoormanDown fire{{ else }} fires{{ end }}{{ end }}.
+{{- end }}
 {{- end }}
 
 Docs: https://okedeji.io/hybernate

@@ -1,9 +1,9 @@
 # Holds the doorman's ServiceAccount to the two annotations that record a
 # request on ManagedWorkloads, though its role may patch them, as the Helm
-# chart's doorman.admissionPolicy does. Kustomize can't rewrite the
-# ServiceAccount's name inside the expression, so it names the default
-# install's, hybernate-system/hybernate-doorman: change it with the
-# namespace or name prefix.
+# chart's doorman.admissionPolicy does. config/default writes the
+# ServiceAccount's namespace and name into the matchCondition, each its own
+# quoted string, and the binding names the policy through kustomizeconfig,
+# so both follow the namespace and name prefix.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -22,7 +22,7 @@ spec:
         resources: [managedworkloads]
   matchConditions:
     - name: doorman
-      expression: request.userInfo.username == "system:serviceaccount:hybernate-system:hybernate-doorman"
+      expression: request.userInfo.username == "system:serviceaccount:" + "system" + ":" + "doorman"
   variables:
     - name: allowed
       expression: "['hybernate.io/last-request', 'hybernate.io/last-request-from']"
@@ -60,5 +60,5 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     control-plane: doorman
 spec:
-  policyName: hybernate-doorman
+  policyName: doorman
   validationActions: [Deny]

@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,8 +45,8 @@ func TestPrometheus_Confirms(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewPrometheus(srv.URL, `rate(http_requests_total[5m])`)
-	res, err := p.Check(context.Background())
+	p := NewPrometheus(srv.URL)
+	res, err := p.Check(context.Background(), `rate(http_requests_total[5m])`)
 
 	require.NoError(t, err)
 	assert.True(t, res.Confirm)
@@ -64,8 +65,8 @@ func TestPrometheus_DeniesZeroValue(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewPrometheus(srv.URL, `rate(http_requests_total[5m])`)
-	res, err := p.Check(context.Background())
+	p := NewPrometheus(srv.URL)
+	res, err := p.Check(context.Background(), `rate(http_requests_total[5m])`)
 
 	require.NoError(t, err)
 	assert.False(t, res.Confirm)
@@ -84,12 +85,13 @@ func TestPrometheus_DeniesEmptyResult(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewPrometheus(srv.URL, `rate(http_requests_total[5m])`)
-	res, err := p.Check(context.Background())
+	p := NewPrometheus(srv.URL)
+	res, err := p.Check(context.Background(), `rate(http_requests_total[5m])`)
 
 	require.NoError(t, err)
 	assert.False(t, res.Confirm)
 	assert.Contains(t, res.Reason, "empty result")
+	assert.True(t, res.NoSeries)
 }
 
 func TestPrometheus_QueryError(t *testing.T) {
@@ -98,8 +100,8 @@ func TestPrometheus_QueryError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewPrometheus(srv.URL, `bad{`)
-	_, err := p.Check(context.Background())
+	p := NewPrometheus(srv.URL)
+	_, err := p.Check(context.Background(), `bad{`)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prometheus query failed")
@@ -111,24 +113,24 @@ func TestPrometheus_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewPrometheus(srv.URL, `up`)
-	_, err := p.Check(context.Background())
+	p := NewPrometheus(srv.URL)
+	_, err := p.Check(context.Background(), `up`)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "returned status 500")
 }
 
 func TestPrometheus_Unreachable(t *testing.T) {
-	p := NewPrometheus("http://localhost:1", `up`)
-	_, err := p.Check(context.Background())
+	p := NewPrometheus("http://localhost:1")
+	_, err := p.Check(context.Background(), `up`)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "querying prometheus")
 }
 
 func TestPrometheus_EndpointNotConfigured(t *testing.T) {
-	p := NewPrometheus("", `up`)
-	_, err := p.Check(context.Background())
+	p := NewPrometheus("")
+	_, err := p.Check(context.Background(), `up`)
 
 	require.ErrorIs(t, err, ErrEndpointNotConfigured)
 }
@@ -140,8 +142,8 @@ func TestPrometheus_PreservesEndpointPathPrefix(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewPrometheus(srv.URL+"/prometheus", `up`)
-	_, err := p.Check(context.Background())
+	p := NewPrometheus(srv.URL + "/prometheus")
+	_, err := p.Check(context.Background(), `up`)
 
 	require.NoError(t, err)
 }
@@ -152,8 +154,8 @@ func TestPrometheus_InvalidJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewPrometheus(srv.URL, `up`)
-	_, err := p.Check(context.Background())
+	p := NewPrometheus(srv.URL)
+	_, err := p.Check(context.Background(), `up`)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decoding prometheus response")
@@ -165,7 +167,7 @@ func serving(t *testing.T, body string) *Prometheus {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return NewPrometheus(srv.URL, `sum by (pod) (rate(http_requests_total[5m]))`)
+	return NewPrometheus(srv.URL)
 }
 
 func vectorOf(values ...string) string {
@@ -197,10 +199,11 @@ func TestPrometheus_Results(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res, err := serving(t, tt.body).Check(context.Background())
+			res, err := serving(t, tt.body).Check(context.Background(), `sum by (pod) (rate(http_requests_total[5m]))`)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantConfirm, res.Confirm)
 			assert.Contains(t, res.Reason, tt.wantReason)
+			assert.False(t, res.NoSeries, "every case has a series or a scalar")
 		})
 	}
 }
@@ -208,7 +211,7 @@ func TestPrometheus_Results(t *testing.T) {
 func TestPrometheus_RejectsRangeVectors(t *testing.T) {
 	body := `{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":[[1,"5"]]}]}}`
 
-	_, err := serving(t, body).Check(context.Background())
+	_, err := serving(t, body).Check(context.Background(), `up`)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"matrix"`)
@@ -221,7 +224,7 @@ func TestPrometheus_ReportsTheQueryErrorOnABadRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewPrometheus(srv.URL, `bad{`).Check(context.Background())
+	_, err := NewPrometheus(srv.URL).Check(context.Background(), `bad{`)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse error at char 4")
@@ -235,7 +238,7 @@ func TestPrometheus_BoundsTheResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewPrometheus(srv.URL, `up`).Check(context.Background())
+	_, err := NewPrometheus(srv.URL).Check(context.Background(), `up`)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "larger than")
@@ -254,9 +257,12 @@ func TestPrometheus_HonoursTheCallersDeadline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := NewPrometheus(srv.URL, `up`).Check(ctx)
+	p := NewPrometheus(srv.URL)
+	_, err := p.Check(ctx, `up`)
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	_, err = p.Check(ctx, `up`)
+	assert.NotErrorIs(t, err, ErrBackingOff, "the caller's deadline running out isn't the endpoint failing")
 }
 
 func TestPrometheus_EncodesTheQuery(t *testing.T) {
@@ -268,6 +274,126 @@ func TestPrometheus_EncodesTheQuery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewPrometheus(srv.URL, query).Check(context.Background())
+	_, err := NewPrometheus(srv.URL).Check(context.Background(), query)
 	require.NoError(t, err)
+}
+
+// A Prometheus that fails isn't asked again for a minute: every workload's
+// check would otherwise wait out its own timeout to learn of the outage,
+// holding the reconcile workers that wakes queue behind.
+func TestPrometheus_BacksOffAFailingEndpoint(t *testing.T) {
+	tests := []struct {
+		name    string
+		handle  func(w http.ResponseWriter, r *http.Request)
+		timeout time.Duration
+	}{
+		{name: "a server error", handle: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}},
+		{name: "overloaded", handle: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+		}},
+		{
+			name:    "too slow to answer, query after query",
+			handle:  func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() },
+			timeout: 50 * time.Millisecond,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			var healthy atomic.Bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if healthy.Load() {
+					_, _ = w.Write([]byte(vectorOf("1")))
+					return
+				}
+				tt.handle(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			now := time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
+			p := NewPrometheus(srv.URL)
+			p.now = func() time.Time { return now }
+			if tt.timeout > 0 {
+				p.timeout = tt.timeout
+			}
+			check := func() error {
+				_, err := p.Check(context.Background(), `up`)
+				return err
+			}
+
+			tripsAfter := int32(1)
+			if tt.timeout > 0 {
+				tripsAfter = timeoutsToTrip
+			}
+			for range tripsAfter {
+				require.Error(t, check())
+			}
+			require.Equal(t, tripsAfter, calls.Load())
+			calls.Store(1)
+
+			now = now.Add(backoff - time.Second)
+			require.ErrorIs(t, check(), ErrBackingOff)
+			assert.Equal(t, int32(1), calls.Load(), "not asked again within the backoff")
+
+			now = now.Add(time.Second)
+			require.Error(t, check(), "still failing when asked again")
+			assert.Equal(t, int32(2), calls.Load())
+			require.ErrorIs(t, check(), ErrBackingOff, "and backing off again")
+
+			healthy.Store(true)
+			now = now.Add(backoff)
+			res, err := p.Check(context.Background(), `up`)
+			require.NoError(t, err)
+			assert.True(t, res.Confirm)
+			_, err = p.Check(context.Background(), `up`)
+			require.NoError(t, err, "answered, it's asked every time again")
+			assert.Equal(t, int32(4), calls.Load())
+		})
+	}
+}
+
+// One query too slow to answer is that query's problem while others are
+// answered: a tenant's expensive PromQL mustn't hold off everyone's.
+func TestPrometheus_DoesNotBackOffForOneSlowQuery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("query") == "slow" {
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write([]byte(vectorOf("1")))
+	}))
+	t.Cleanup(srv.Close)
+	p := NewPrometheus(srv.URL)
+	p.timeout = 50 * time.Millisecond
+
+	for range 2 * timeoutsToTrip {
+		_, err := p.Check(context.Background(), "slow")
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrBackingOff)
+		res, err := p.Check(context.Background(), "up")
+		require.NoError(t, err, "other queries still go to Prometheus")
+		assert.True(t, res.Confirm)
+	}
+}
+
+// A query Prometheus rejects is that query's problem: the endpoint answered,
+// and other workloads' queries still go to it.
+func TestPrometheus_DoesNotBackOffForABadQuery(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"status":"error","errorType":"bad_data","error":"parse error"}`))
+	}))
+	defer srv.Close()
+	p := NewPrometheus(srv.URL)
+
+	for range 3 {
+		_, err := p.Check(context.Background(), `bad{`)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrBackingOff)
+	}
+	assert.Equal(t, int32(3), calls.Load())
 }

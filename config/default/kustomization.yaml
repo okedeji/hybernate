@@ -18,3 +18,34 @@ patches:
   target:
     kind: Deployment
     name: controller-manager
+
+# The doorman's admission policy matches its ServiceAccount by username,
+# which no transformer rewrites, so its namespace and name are written into
+# the policy's matchCondition here, after the namespace and prefix.
+replacements:
+- source:
+    kind: ServiceAccount
+    name: doorman
+    fieldPath: metadata.namespace
+  targets:
+  - select:
+      kind: ValidatingAdmissionPolicy
+      name: doorman
+    fieldPaths:
+    - spec.matchConditions.[name=doorman].expression
+    options:
+      delimiter: '"'
+      index: 3
+- source:
+    kind: ServiceAccount
+    name: doorman
+    fieldPath: metadata.name
+  targets:
+  - select:
+      kind: ValidatingAdmissionPolicy
+      name: doorman
+    fieldPaths:
+    - spec.matchConditions.[name=doorman].expression
+    options:
+      delimiter: '"'
+      index: 7

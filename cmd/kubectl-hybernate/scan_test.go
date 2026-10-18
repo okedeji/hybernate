@@ -84,9 +84,10 @@ func TestWriteTable(t *testing.T) {
 	assert.Contains(t, got, "last deployed 23 days ago")
 	assert.Contains(t, got, "statefulset/postgres")
 	assert.Contains(t, got, "  - skipped namespace locked: forbidden")
-	assert.Contains(t, got, "kubectl label deployment checkout-api -n preview-42 hybernate.io/managed=true",
-		"next steps name a real idle workload")
-	assert.Contains(t, got, "kubectl annotate deployment checkout-api -n preview-42 hybernate.io/dry-run=true")
+	assert.Contains(t, got, "kubectl annotate deployment checkout-api -n preview-42 hybernate.io/dry-run=true\n"+
+		"       kubectl label deployment checkout-api -n preview-42 hybernate.io/managed=true\n",
+		"next steps name a real idle workload, putting it in dry-run before opting it in, which alone would "+
+			"have it paused")
 	assert.NotContains(t, got, "Hybernate Hub", "it has no page to send anyone to yet")
 }
 
@@ -684,6 +685,45 @@ func TestNextSteps_SkipGitOpsAndKnowHybernateIsInstalled(t *testing.T) {
 	assert.NotContains(t, got, "helm install", "Hybernate's own Deployment shows it's installed")
 }
 
+// A workload in dry-run that someone scaled to zero has nothing for going
+// live to free, so next steps take the next one measuring instead.
+func TestNextSteps_SkipDryRunScaledByHand(t *testing.T) {
+	scaled := Workload{Namespace: "dev", Kind: v1alpha1.TargetKindDeployment, Name: "parked", State: discovery.StatePaused,
+		Managed: true, DryRun: true, ScaledByHand: true, Measured: &discovery.Measured{MonthlyFreed: 40}}
+	measuring := Workload{Namespace: "dev", Kind: v1alpha1.TargetKindDeployment, Name: "preview",
+		State: discovery.StateIdle, Managed: true, DryRun: true, Measured: &discovery.Measured{MonthlyFreed: 10}}
+
+	idle, got := nextStepTargets([]Workload{scaled, measuring})
+
+	assert.Nil(t, idle)
+	require.NotNil(t, got)
+	assert.Equal(t, "preview", got.Name)
+}
+
+// A workload Hybernate refuses to pause isn't suggested, and could save
+// nothing, however idle it is.
+func TestNextSteps_SkipWhatWontPause(t *testing.T) {
+	postgres := Workload{Namespace: "dev", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres",
+		State: discovery.StateIdle, WontPause: "PVCs deleted on scale-down",
+		History: &discovery.History{MonthlyFreed: 90}}
+	api := Workload{Namespace: "dev", Kind: v1alpha1.TargetKindDeployment, Name: "api", State: discovery.StateIdle}
+
+	idle, _ := nextStepTargets([]Workload{postgres, api})
+
+	require.NotNil(t, idle)
+	assert.Equal(t, "api", idle.Name)
+	assert.Equal(t, "-", couldSaveCell(postgres))
+}
+
+// Under an hour is shown in minutes, rounded first, so what rounds to an
+// hour says so.
+func TestHours(t *testing.T) {
+	for h, want := range map[float64]string{0: "0h", 0.004: "0m", 0.5: "30m", 0.99: "59m", 0.995: "1h", 1: "1h",
+		1.4: "1h", 1.5: "2h", 167.9: "168h"} {
+		assert.Equal(t, want, hours(h), "%v hours", h)
+	}
+}
+
 func TestParseHeaders(t *testing.T) {
 	got, err := parseHeaders([]string{"X-Scope-OrgID: team-a", "x-extra:  two words  "})
 	require.NoError(t, err)
@@ -707,7 +747,6 @@ func TestPrometheusFrom(t *testing.T) {
 	assert.Equal(t, "Bearer s3cret", setup.header.Get("Authorization"))
 	assert.Equal(t, "team-a", setup.header.Get("X-Scope-OrgID"))
 	require.NotNil(t, setup.client)
-	assert.NotZero(t, setup.client.Timeout)
 
 	tests := []struct {
 		name string
@@ -743,6 +782,13 @@ func TestIncompleteError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "the scan of staging is incomplete: 2 namespaces couldn't be read in full")
 	assert.Contains(t, err.Error(), "pass a longer --timeout")
+
+	result.Incomplete = &discovery.Incomplete{Unscanned: []string{"team-z"}}
+	err = incompleteError(result)
+
+	require.Error(t, err)
+	assert.EqualError(t, err, "the scan of staging is incomplete: it ran out of --timeout before it had scanned "+
+		"1 namespace, which the report leaves out; pass a longer --timeout, or scan fewer namespaces with -n")
 }
 
 // A namespace named with -n that doesn't exist, or that the user can't

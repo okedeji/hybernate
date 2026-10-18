@@ -30,7 +30,7 @@ import (
 // it caches every slice in the namespaces it serves. To keep that small, it
 // holds only the slices it trusts, those the EndpointSlice controller wrote
 // (see trusted), cut down to the fields it reads: a slice's ports, and
-// each endpoint's first address, readiness and pod reference kind.
+// each endpoint's first address, readiness and pod reference.
 func EndpointSliceCache() cache.ByObject {
 	return cache.ByObject{
 		Label:     labels.SelectorFromSet(labels.Set{discoveryv1.LabelManagedBy: endpointSliceController}),
@@ -66,7 +66,11 @@ func trimEndpointSlice(in any) (any, error) {
 			trimmed.Addresses = []string{ep.Addresses[0]}
 		}
 		if ep.TargetRef != nil {
-			trimmed.TargetRef = &corev1.ObjectReference{Kind: ep.TargetRef.Kind}
+			trimmed.TargetRef = &corev1.ObjectReference{
+				Kind:      ep.TargetRef.Kind,
+				Namespace: ep.TargetRef.Namespace,
+				Name:      ep.TargetRef.Name,
+			}
 		}
 		out.Endpoints = append(out.Endpoints, trimmed)
 	}

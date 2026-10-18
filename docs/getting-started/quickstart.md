@@ -4,13 +4,13 @@ This guide takes one workload from "idle and costing money" to "paused while idl
 
 It assumes Hybernate is [installed](installation.md) and you have the [kubectl plugin](kubectl-plugin.md).
 
-Hybernate reads CPU from metrics-server, and while it can't read a workload's CPU it doesn't pause it, since a busy workload would look idle. Most managed clusters have it; kind and a new minikube don't. Check that the Metrics API is there:
+Hybernate reads CPU from metrics-server, and while it can't read a workload's CPU it doesn't pause it, since a busy workload would look idle. GKE and AKS run it by default; EKS, kind and a new minikube don't. Check that the Metrics API is there:
 
 ```bash
 kubectl get apiservice v1beta1.metrics.k8s.io
 ```
 
-If it's missing or not `Available`, install it. On minikube, run `minikube addons enable metrics-server`. Elsewhere:
+If it's missing or not `Available`, install it. On minikube, run `minikube addons enable metrics-server`; on EKS, add the `metrics-server` add-on, or apply the manifest below. Elsewhere:
 
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
@@ -48,11 +48,11 @@ The scan shows each workload, whether it's idle right now and why, and what it c
 ## 3. Opt it in, measuring first
 
 ```bash
-kubectl label deployment my-api -n dev hybernate.io/managed=true
 kubectl annotate deployment my-api -n dev hybernate.io/dry-run=true hybernate.io/idle-after=5m
+kubectl label deployment my-api -n dev hybernate.io/managed=true
 ```
 
-The label opts the workload in; the annotations are its settings. Here, dry-run means it's measured and never paused, and `idle-after: 5m` makes the example quick (the default is an hour). In real use, these usually go in the workload's manifest or Helm values, or on its namespace to cover everything in it. See [Opting In](../guides/opt-in.md).
+The annotations are the workload's settings, set first so it starts in dry-run; the label opts it in. Here, dry-run means it's measured and never paused, and `idle-after: 5m` makes the example quick (the default is an hour). In real use, these usually go in the workload's manifest or Helm values, or on its namespace to cover everything in it. See [Opting In](../guides/opt-in.md).
 
 Hybernate creates a ManagedWorkload for it:
 

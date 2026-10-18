@@ -19,5 +19,8 @@ package signal
 // Result is the outcome of evaluating a signal.
 type Result struct {
 	Confirm bool
-	Reason  string
+	// NoSeries is set when a query matched no series at all, as a query
+	// naming a metric or label that doesn't exist does.
+	NoSeries bool
+	Reason   string
 }

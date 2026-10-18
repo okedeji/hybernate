@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -162,4 +163,56 @@ func TestReconcile_UnprotectedClearsTheCondition(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, meta.IsStatusConditionTrue(fetch(t, r, "api").Status.Conditions, conditionProtected))
+}
+
+// A StatefulSet whose controller deletes its claims as it scales down would
+// lose its data to a pause, so it's never paused, and one paused before its
+// policy changed is handed back.
+func TestReconcile_StatefulSetThatDeletesItsClaimsIsNeverPaused(t *testing.T) {
+	tests := []struct {
+		name       string
+		whenScaled appsv1.PersistentVolumeClaimRetentionPolicyType
+		phase      v1alpha1.WorkloadPhase
+		protected  bool
+	}{
+		{name: "running, pause requested", whenScaled: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+			phase: v1alpha1.PhaseRunning, protected: true},
+		{name: "paused before the policy changed", whenScaled: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+			phase: v1alpha1.PhasePaused, protected: true},
+		{name: "claims retained", whenScaled: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			phase: v1alpha1.PhaseRunning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := withPauseRequested(depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, tt.phase))
+			target := postgresTarget(2, 2)
+			if tt.phase == v1alpha1.PhasePaused {
+				workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 2}
+				target = postgresTarget(0, 0)
+			}
+			target.Spec.PersistentVolumeClaimRetentionPolicy = &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType, WhenScaled: tt.whenScaled}
+			pauser := &stubPauser{pauseDone: true}
+			r := depReconciler(t, pauser, workload, target)
+
+			_, err := r.Reconcile(context.Background(), reconcileFor("postgres"))
+			require.NoError(t, err)
+
+			got := fetch(t, r, "postgres")
+			c := meta.FindStatusCondition(got.Status.Conditions, conditionProtected)
+			if !tt.protected {
+				assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionProtected))
+				assert.Equal(t, 1, pauser.pauseCalls)
+				return
+			}
+			assert.Zero(t, pauser.pauseCalls, "never paused")
+			assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+			assert.Nil(t, got.Status.Pause)
+			assert.Equal(t, tt.phase == v1alpha1.PhasePaused, pauser.restoreCalls > 0, "handed back if it was paused")
+			require.NotNil(t, c)
+			assert.Equal(t, reasonPVCsDeletedOnScaleDown, c.Reason)
+			assert.Contains(t, c.Message, "set whenScaled to Retain")
+			assert.Contains(t, drainEvents(t, r), "pausing it would delete its data")
+		})
+	}
 }

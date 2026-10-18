@@ -53,10 +53,10 @@ limitations under the License.
 //
 // The doorman proxies only to Ready pod addresses in the routed Service's
 // EndpointSlices that are labelled as the EndpointSlice controller's, never
-// to a hostname, a loopback or a link-local address. Anyone who can write
-// EndpointSlices in a namespace can forge that label, so an egress policy
-// limiting the doorman to pod addresses is what makes it unable to reach
-// anything else. It caps held connections, overall and per source address,
+// to a hostname, a loopback or a link-local address, and only to an address
+// the pod the endpoint names, in the Service's namespace, really has.
+// Anyone who can write EndpointSlices in a namespace can forge that label,
+// but can then send the doorman only to that namespace's own pods. It caps held connections, overall and per source address,
 // and how often one source can wake workloads, which slows a scan of the
 // doorman's ports but doesn't stop one.
 package doorman

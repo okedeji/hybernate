@@ -14,7 +14,7 @@ When that was Argo CD, Flux, Rancher Fleet, kapp or Kluctl, the workload also re
 GitOpsConflict=True   Argo CD set the replicas from Git, undoing the pause; Hybernate pauses it again from 14:20 UTC. ...
 ```
 
-along with a `GitOpsConflict` warning event. Hybernate waits an hour before pausing again, so it doesn't restart the workload in a loop with the tool. Pausing again is also how it finds out the fix is in: once a pause holds for an hour, or until Hybernate wakes it, the condition clears with a `GitOpsConflictResolved` event.
+along with a `GitOpsConflict` warning event. Hybernate waits an hour before pausing again, so it doesn't restart the workload in a loop with the tool. Pausing again is also how it finds out the fix is in: once a pause holds for an hour, the condition clears with a `GitOpsConflictResolved` event. A pause Hybernate wakes sooner doesn't show the tool has stopped, so the condition stays until a later pause holds for the hour.
 
 Before you opt anything in, [`kubectl hybernate scan`](../getting-started/kubectl-plugin.md#scan-a-cluster) lists the workloads whose replicas are set from Git, by tool.
 
@@ -84,7 +84,7 @@ rebaseRules:
 
 ## Kluctl
 
-Kluctl overwrites replicas another manager set only when it force-applies. Annotate the workload in Git with `kluctl.io/ignore-conflicts-manager: hybernate` so it leaves them even then, or leave `replicas` out of its manifest.
+Leave `replicas` out of the workload's manifest in Git. For a Helm chart that always sets them, remove them with a patch in the deployment item's `kustomization.yaml`. Kluctl's conflict settings, such as `kluctl.io/ignore-conflicts-manager`, can't help: a scale through the scale subresource leaves the replicas with no field manager, so Kluctl's next deploy sets them back without a conflict to ignore.
 
 ## Ending dry-run
 

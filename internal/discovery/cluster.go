@@ -104,6 +104,9 @@ type Incomplete struct {
 	Denied []string `json:"denied,omitempty"`
 	// Failed couldn't be read for another reason, such as a timeout.
 	Failed []string `json:"failed,omitempty"`
+	// Unscanned weren't scanned, or not to the end, before the scan ran
+	// out of time, so their workloads aren't in the report at all.
+	Unscanned []string `json:"unscanned,omitempty"`
 }
 
 // Workload is one Deployment or StatefulSet as a scan sees it.
@@ -146,6 +149,10 @@ type Workload struct {
 	// Protected means its namespace is labelled protected, so Hybernate
 	// won't manage it whatever its labels.
 	Protected bool `json:"protected,omitempty"`
+	// WontPause says why Hybernate refuses to pause it however idle it is,
+	// as for a StatefulSet that deletes its PVCs when scaled down, so it's
+	// left out of what pausing could save.
+	WontPause string `json:"wontPause,omitempty"`
 	// Platform is the part of the cluster's own infrastructure it runs, such
 	// as Kubernetes, Hybernate or cert-manager, for one the scan leaves out
 	// of what pausing could save.
@@ -268,6 +275,10 @@ type ClusterOptions struct {
 	// access doesn't let the scan read is a failure to scan what was asked,
 	// not a limit to note.
 	NamedNamespaces bool
+	// AllNamespaces says Namespaces are every namespace the user can see,
+	// so each kind of object is listed across the cluster at once, where
+	// the user's access allows, rather than in each namespace.
+	AllNamespaces bool
 }
 
 // ScanCluster scans every Deployment and StatefulSet in the namespaces and
@@ -275,7 +286,8 @@ type ClusterOptions struct {
 // With History, it also replays the activity clock over each workload's
 // recorded CPU. It only reads, and carries on past what it can't read,
 // saying so in the report's notes, and listing in Incomplete the namespaces
-// it should have been able to read but couldn't.
+// it should have been able to read but couldn't. Once ctx ends, it reports
+// the namespaces it had scanned, listing the rest as unscanned.
 func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*ClusterReport, error) {
 	report := &ClusterReport{Mode: ModeSnapshot, Namespaces: len(opts.Namespaces), Workloads: []Workload{}}
 	if opts.History != nil {
@@ -285,21 +297,18 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 	pricing, nodePrices := s.readNodePrices(ctx)
 	report.NodePrices = nodePrices
 
+	reads := &clusterReads{}
+	if opts.AllNamespaces {
+		reads = s.readAcross(ctx, opts.Namespaces)
+	}
 	historyCtx, cancel := historyBudget(ctx)
 	defer cancel()
-	scans := make([]namespaceScan, len(opts.Namespaces))
-	var g errgroup.Group
-	g.SetLimit(namespaceWorkers)
-	for i, namespace := range opts.Namespaces {
-		g.Go(func() error {
-			scans[i] = s.scanNamespace(ctx, historyCtx, namespace, pricing, opts)
-			return nil
-		})
-	}
-	_ = g.Wait() // each namespace's problems are in its scan; none is returned
+	scans, unscanned := s.scanNamespaces(ctx, historyCtx, reads, pricing, opts)
+	report.Namespaces -= len(unscanned)
 
 	var since time.Time
-	var historyOutOfTime []string
+	var historyOutOfTime, historyGaveUp []string
+	var gaveUpAfter time.Duration
 	noHistory := make([]string, 0, len(scans))
 	problems := make([]readProblem, 0, len(scans))
 	metricsUnavailable := false
@@ -312,6 +321,10 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 		noHistory = append(noHistory, scan.noHistory...)
 		if scan.historyOutOfTime {
 			historyOutOfTime = append(historyOutOfTime, scan.namespace)
+		}
+		if scan.historyGaveUp > 0 {
+			historyGaveUp = append(historyGaveUp, scan.namespace)
+			gaveUpAfter = max(gaveUpAfter, scan.historyGaveUp)
 		}
 		metricsUnavailable = metricsUnavailable || scan.metricsUnavailable
 		maps.Copy(sources, scan.sources)
@@ -336,6 +349,15 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 	}
 	problemNotes, incomplete := problemNotes(problems, opts.NamedNamespaces)
 	report.Notes = append(report.Notes, problemNotes...)
+	if len(unscanned) > 0 {
+		report.Notes = append(report.Notes, fmt.Sprintf("the scan ran out of time before it had scanned %s, so "+
+			"their workloads aren't in this report: %s", plural(len(unscanned), "namespace", "namespaces"),
+			listSome(unscanned)))
+		if incomplete == nil {
+			incomplete = &Incomplete{}
+		}
+		incomplete.Unscanned = unscanned
+	}
 	report.Incomplete = incomplete
 	if len(report.Platform) > 0 {
 		report.Notes = append(report.Notes, platformNote(report.Platform))
@@ -356,6 +378,12 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 			"workloads there are judged from CPU right now: %s. A longer --timeout gives history more time; "+
 			"--window 0 skips it and judges every namespace from CPU right now",
 			plural(len(historyOutOfTime), "namespace", "namespaces"), listSome(historyOutOfTime)))
+	}
+	if len(historyGaveUp) > 0 {
+		report.Notes = append(report.Notes, fmt.Sprintf("Prometheus, or the API server's proxy in front of it, gave "+
+			"up on the CPU history of %s after up to %s, with time left, so workloads there are judged from CPU "+
+			"right now: %s. A shorter --window asks it for less",
+			plural(len(historyGaveUp), "namespace", "namespaces"), gaveUpAfter.Round(time.Second), listSome(historyGaveUp)))
 	}
 	if opts.History != nil {
 		if note := opts.History.mixedSourcesNote(); note != "" {
@@ -383,6 +411,36 @@ func (s *Scanner) ScanCluster(ctx context.Context, opts ClusterOptions) (*Cluste
 	})
 	report.Totals = totals(report.Workloads)
 	return report, nil
+}
+
+// scanNamespaces scans the namespaces a few at a time. Once ctx ends, those
+// not yet scanned, and those it cut short, are returned as unscanned rather
+// than with what little was read of them.
+func (s *Scanner) scanNamespaces(ctx, historyCtx context.Context, reads *clusterReads, pricing nodePricing,
+	opts ClusterOptions) (scanned []namespaceScan, unscanned []string) {
+	scans := make([]namespaceScan, len(opts.Namespaces))
+	var g errgroup.Group
+	g.SetLimit(namespaceWorkers)
+	for i, namespace := range opts.Namespaces {
+		g.Go(func() error {
+			scans[i] = namespaceScan{namespace: namespace, unscanned: true}
+			if ctx.Err() != nil {
+				return nil
+			}
+			scan := s.scanNamespace(ctx, historyCtx, namespace, reads, pricing, opts)
+			if ctx.Err() == nil || !scan.cutShort() {
+				scans[i] = scan
+			}
+			return nil
+		})
+	}
+	_ = g.Wait() // each namespace's problems are in its scan; none is returned
+	for _, scan := range scans {
+		if scan.unscanned {
+			unscanned = append(unscanned, scan.namespace)
+		}
+	}
+	return slices.DeleteFunc(scans, func(scan namespaceScan) bool { return scan.unscanned }), unscanned
 }
 
 // gitOpsNotes say which workloads have replicas set from Git, which their
@@ -608,6 +666,9 @@ func plural(n int, one, many string) string {
 
 func clues(w Workload, now time.Time) []string {
 	var out []string
+	if w.WontPause != "" {
+		out = append(out, "won't pause: "+w.WontPause)
+	}
 	if w.LastDeployed != nil {
 		if age := now.Sub(*w.LastDeployed); age >= staleAfter {
 			out = append(out, fmt.Sprintf("last deployed %d days ago", int(age.Hours()/24)))
@@ -628,6 +689,8 @@ func totals(workloads []Workload) Totals {
 		t.Workloads++
 		t.SavedThisMonth += w.SavedThisMonth
 		switch {
+		case w.Measured != nil && (w.ScaledByHand || w.WontPause != ""):
+			t.DryRun++
 		case w.Measured != nil:
 			t.DryRun++
 			t.Measured.Pauses += w.Measured.Pauses
@@ -638,7 +701,7 @@ func totals(workloads []Workload) Totals {
 			t.Live++
 		}
 		judged := w.State != StateUnknown
-		replayed := w.History != nil && !w.Managed && !w.Protected && judged
+		replayed := w.History != nil && !w.Managed && !w.Protected && w.WontPause == "" && judged
 		if h := w.History; replayed {
 			t.Replayed.Workloads++
 			if h.SleepHours > 0 {

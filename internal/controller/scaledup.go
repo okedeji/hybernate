@@ -44,11 +44,13 @@ const conditionGitOpsConflict = "GitOpsConflict"
 const gitOpsRetryAfter = time.Hour
 
 // wakeOnScaleUp treats a paused workload scaled up outside Hybernate as
-// woken: whoever did it wants it running. A GitOps tool doing it means it
-// sets the replicas from Git and will undo every pause, which the workload
-// reports with the fix. A pause that holds clears that report.
+// woken: whoever did it wants it running. One still pausing counts once
+// Hybernate has scaled it to zero, rather than being scaled back down. A
+// GitOps tool doing it means it sets the replicas from Git and will undo
+// every pause, which the workload reports with the fix. A pause that holds
+// clears that report.
 func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.ManagedWorkload, target client.Object) error {
-	if workload.Status.Phase != v1alpha1.PhasePaused {
+	if !scaledDownByHybernate(workload) {
 		return nil
 	}
 	if replicasFromTarget(target) == 0 {
@@ -65,11 +67,11 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 		return nil
 	}
 	// Hybernate's own resume scales it up too, and the cache can still hold
-	// the workload as Paused once that has begun. Releasing KEDA then would
-	// let it scale the workload back down while it starts.
+	// the workload as Paused, or Pausing, once that has begun. Releasing
+	// KEDA then would let it scale the workload back down while it starts.
 	if phase, err := r.livePhase(ctx, workload); err != nil {
 		return err
-	} else if phase != v1alpha1.PhasePaused {
+	} else if phase != workload.Status.Phase {
 		return nil
 	}
 
@@ -86,6 +88,7 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 	now := r.clockTime()
 	workload.Status.LastScaledUp = &v1alpha1.ScaledUp{At: now, By: by, GitOps: string(writer.Tool), Replicas: replicas}
 	r.resetActivity(workload, v1alpha1.ActivitySourceScaledUp)
+	r.stampLastActed(workload)
 	var conflict string
 	if writer.FromGit() {
 		conflict = fmt.Sprintf("%s set the replicas from Git, undoing the pause; Hybernate pauses it again from %s. %s",
@@ -93,9 +96,7 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 		r.setCondition(workload, conditionGitOpsConflict, metav1.ConditionTrue, "PauseUndone", conflict)
 	}
 
-	if err := r.wakeDependencies(ctx, workload); err != nil {
-		return err
-	}
+	r.wakeDependencies(ctx, workload)
 	if err := r.transition(ctx, workload, v1alpha1.PhaseRunning, "ScaledUp"); err != nil {
 		return err
 	}
@@ -109,6 +110,20 @@ func (r *Reconciler) wakeOnScaleUp(ctx context.Context, workload *v1alpha1.Manag
 		r.emitEvent(workload, false, "Warning", ReasonGitOpsConflict, actionCheckReplicas, "%s", conflict)
 	}
 	return nil
+}
+
+// scaledDownByHybernate reports whether Hybernate has scaled the workload to
+// zero for a pause: it's Paused, or Pausing past the scale-down, so any
+// replicas it has were set by someone else.
+func scaledDownByHybernate(workload *v1alpha1.ManagedWorkload) bool {
+	switch workload.Status.Phase {
+	case v1alpha1.PhasePaused:
+		return true
+	case v1alpha1.PhasePausing:
+		return workload.Status.Pause != nil && workload.Status.Pause.PausedAt != nil
+	default:
+		return false
+	}
 }
 
 const (
@@ -145,6 +160,7 @@ func (r *Reconciler) scaledToZero(ctx context.Context, workload *v1alpha1.Manage
 	if !atZero && meta.IsStatusConditionTrue(workload.Status.Conditions, conditionScaledToZero) {
 		r.setCondition(workload, conditionScaledToZero, metav1.ConditionFalse, "HasReplicas", "")
 		r.resetActivity(workload, v1alpha1.ActivitySourceScaledUp)
+		r.stampLastActed(workload)
 	}
 	return atZero, nil
 }
@@ -230,10 +246,6 @@ func gitOpsHold(workload *v1alpha1.ManagedWorkload, now time.Time) (time.Time, b
 // has held for as long as Hybernate waits to retry: the tool now leaves the
 // replicas alone.
 func (r *Reconciler) clearGitOpsConflictIfHeld(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	pause := workload.Status.Pause
-	if pause == nil || pause.PausedAt == nil || r.now().Sub(pause.PausedAt.Time) < gitOpsRetryAfter {
-		return nil
-	}
 	tool, cleared := r.clearGitOpsConflict(workload)
 	if !cleared {
 		return nil
@@ -245,12 +257,17 @@ func (r *Reconciler) clearGitOpsConflictIfHeld(ctx context.Context, workload *v1
 	return nil
 }
 
-// clearGitOpsConflict removes the conflict, which a pause holding shows is
-// over, and returns the GitOps tool it was with, or false if there was none.
-// Scaling up clears the pause, so any pause since began after the conflict.
+// clearGitOpsConflict removes the conflict once the workload's pause has
+// held for as long as Hybernate waits to retry, which shows it's over, and
+// returns the GitOps tool it was with, or false if it's not cleared. Scaling
+// up clears the pause, so any pause since began after the conflict.
 func (r *Reconciler) clearGitOpsConflict(workload *v1alpha1.ManagedWorkload) (string, bool) {
 	s := workload.Status.LastScaledUp
 	if s == nil || !meta.IsStatusConditionTrue(workload.Status.Conditions, conditionGitOpsConflict) {
+		return "", false
+	}
+	pause := workload.Status.Pause
+	if pause == nil || pause.PausedAt == nil || r.now().Sub(pause.PausedAt.Time) < gitOpsRetryAfter {
 		return "", false
 	}
 	meta.RemoveStatusCondition(&workload.Status.Conditions, conditionGitOpsConflict)

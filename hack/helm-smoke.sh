@@ -7,7 +7,8 @@
 # left alone. A StatefulSet opted in with dry-run, as the README's
 # quickstart does, is measured but not paused until kubectl hybernate
 # enable ends dry-run. Neither the operator nor the doorman logs an error.
-# Last, helm uninstall is refused while ManagedWorkloads are left, and goes
+# An upgrade that stops watching the namespace is refused. Last, helm
+# uninstall is refused while ManagedWorkloads are left, and goes
 # ahead once the workloads are no longer opted in, which restores the
 # paused StatefulSet. The e2e suite installs through kustomize, with a
 # ClusterRole, so this is what tests the chart.
@@ -28,11 +29,16 @@ DB=db
 WEB_IMAGE=registry.k8s.io/e2e-test-images/agnhost:2.52
 CURL_IMAGE=curlimages/curl:8.7.1
 METRICS_SERVER_IMAGE=registry.k8s.io/metrics-server/metrics-server:v0.7.2
-# The uninstall guard's image, preloaded so a slow pull doesn't outlast the
-# uninstall's timeout. A preloaded image keeps no registry digest, so the
-# chart is installed with the tag alone.
-GUARD_IMAGE=registry.k8s.io/kubectl:$(helm show values charts/hybernate | awk '/^uninstallGuard:/{g=1} g&&/tag:/{print $2; exit}')
 METRICS_SERVER_MANIFEST="$(dirname "$0")/../test/e2e/testdata/metrics-server-v0.7.2.yaml"
+# A ManagedWorkload that routed through the doorman is deleted only once its
+# ports have drained, twice the doorman's RouteDrain, so its deletion is
+# given that plus a minute for the requeue and the finalizer's write.
+ROUTE_DRAIN=$(awk '/^\tRouteDrain = [0-9]+ \* time\.Second$/ {print $3}' "$(dirname "$0")/../internal/doorman/routes.go")
+if [ -z "$ROUTE_DRAIN" ]; then
+  echo "can't read RouteDrain from internal/doorman/routes.go" >&2
+  exit 1
+fi
+DELETE_TIMEOUT=$((2 * ROUTE_DRAIN + 60))
 
 if "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   echo "kind cluster $CLUSTER already exists; set KIND_CLUSTER to a new name" >&2
@@ -123,7 +129,7 @@ unrouted() {
 
 "$KIND" create cluster --name "$CLUSTER" --wait 2m
 make docker-build IMG="$IMG"
-make load-test-e2e-images KIND_CLUSTER="$CLUSTER" E2E_IMAGES="$WEB_IMAGE $CURL_IMAGE $METRICS_SERVER_IMAGE $GUARD_IMAGE"
+make load-test-e2e-images KIND_CLUSTER="$CLUSTER" E2E_IMAGES="$WEB_IMAGE $CURL_IMAGE $METRICS_SERVER_IMAGE"
 "$KIND" load docker-image "$IMG" --name "$CLUSTER"
 PLUGIN="$PLUGIN_DIR/kubectl-hybernate"
 go build -o "$PLUGIN" ./cmd/kubectl-hybernate
@@ -138,7 +144,7 @@ kubectl create namespace "$WATCHED"
 kubectl create namespace "$UNWATCHED"
 helm install hybernate charts/hybernate --namespace "$RELEASE_NAMESPACE" --create-namespace --wait --timeout 5m \
   --set image.repository=hybernate --set image.tag=smoke --set image.pullPolicy=Never \
-  --set "watchNamespaces={$WATCHED}" --set uninstallGuard.image.digest=
+  --set "watchNamespaces={$WATCHED}"
 kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=3m
 
 for ns in "$WATCHED" "$UNWATCHED"; do
@@ -281,6 +287,27 @@ if [ -n "$errors" ]; then
   exit 1
 fi
 
+echo "checking helm upgrade is refused when it would stop watching $WATCHED"
+if refusal=$(helm upgrade hybernate charts/hybernate --namespace "$RELEASE_NAMESPACE" --reuse-values \
+  --set "watchNamespaces={$UNWATCHED}" --wait --timeout 5m 2>&1); then
+  echo "$refusal" >&2
+  echo "helm upgrade stopped watching $WATCHED, leaving its ManagedWorkloads with no operator" >&2
+  exit 1
+fi
+if ! grep -q 'Hybernate refuses this upgrade' <<<"$refusal" || ! grep -qF "$WATCHED/$APP" <<<"$refusal"; then
+  echo "$refusal" >&2
+  echo "the refused upgrade didn't say why, or name the ManagedWorkloads it would leave" >&2
+  exit 1
+fi
+kubectl get deployment hybernate -n "$RELEASE_NAMESPACE" -o 'jsonpath={.spec.template.spec.containers[0].args}' |
+  grep -qF -- "--watch-namespaces=$WATCHED" || {
+  echo "the refused upgrade changed the operator's namespaces" >&2
+  exit 1
+}
+
+# The release's last revision is now the refused upgrade's, which Helm
+# uninstalls with, so the guard must still find the ManagedWorkloads the
+# operator took on in a namespace those values don't watch.
 echo "checking helm uninstall is refused while ManagedWorkloads are left"
 if refusal=$(helm uninstall hybernate --namespace "$RELEASE_NAMESPACE" --wait --timeout 5m 2>&1); then
   echo "$refusal" >&2
@@ -298,8 +325,8 @@ is deployment/hybernate "$RELEASE_NAMESPACE" '{.status.readyReplicas}' 1
 echo "stopping managing the workloads, which restores the paused StatefulSet, then uninstalling"
 kubectl label deployment "$APP" -n "$WATCHED" hybernate.io/managed-
 kubectl label statefulset "$DB" -n "$WATCHED" hybernate.io/managed-
-eventually 60 "the Deployment's ManagedWorkload to be deleted" gone managedworkload/$APP "$WATCHED"
-eventually 120 "the StatefulSet's ManagedWorkload to be deleted" gone managedworkload/$DB "$WATCHED"
+eventually "$DELETE_TIMEOUT" "the Deployment's ManagedWorkload to be deleted" gone managedworkload/$APP "$WATCHED"
+eventually "$DELETE_TIMEOUT" "the StatefulSet's ManagedWorkload to be deleted" gone managedworkload/$DB "$WATCHED"
 is statefulset/$DB "$WATCHED" '{.spec.replicas}' 1
 helm uninstall hybernate --namespace "$RELEASE_NAMESPACE" --wait --timeout 5m
 echo "ok"

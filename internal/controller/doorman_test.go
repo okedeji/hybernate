@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +108,14 @@ func servingSlice() *discoveryv1.EndpointSlice {
 			TargetRef:  &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: svc + "-pod"},
 		}},
 		Ports: []discoveryv1.EndpointPort{{Name: ptr.To("http"), Port: ptr.To(int32(8080))}},
+	}
+}
+
+// servingPod is the pod servingSlice names, with the address it gives.
+func servingPod() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "shop-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "10.244.1.9", PodIPs: []corev1.PodIP{{IP: "10.244.1.9"}}},
 	}
 }
 
@@ -454,12 +463,53 @@ func TestReconcileDoorman_LeavesASliceItDoesNotOwn(t *testing.T) {
 	}
 	r := doormanReconciler(t, workload, theirs, doormanEndpoints("10.0.0.7"),
 		service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
+	withOperatorCache(r)
 
-	require.Error(t, doormanErr(context.Background(), r, workload, appTarget()))
+	retry := r.routeDoorman(context.Background(), workload, appTarget())
 
+	assert.Equal(t, doormanRetryMin, retry, "backed off, not retried as a stale cache would be")
+	assert.True(t, conditionFalseWith(workload, conditionWakeOnRequest, reasonRoutingFailed))
+	assert.Contains(t, wakeCondition(t, workload).Message, "isn't the doorman's")
 	var got discoveryv1.EndpointSlice
-	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(theirs), &got))
+	require.NoError(t, r.PodReader.Get(context.Background(), client.ObjectKeyFromObject(theirs), &got))
 	assert.Equal(t, []string{"10.1.1.1"}, got.Endpoints[0].Addresses, "another controller's slice is never overwritten")
+}
+
+// withOperatorCache makes r.Client see EndpointSlices as the operator's
+// cache does (see EndpointSliceCache): outside the doorman's namespace,
+// only the doorman's own. r.PodReader, the API server, sees every one.
+func withOperatorCache(r *Reconciler) {
+	api := r.Client.(client.WithWatch)
+	r.PodReader = api
+	cached := func(obj client.Object) bool {
+		return obj.GetNamespace() == r.DoormanNamespace || obj.GetLabels()[discoveryv1.LabelManagedBy] == doorman.ManagedBy
+	}
+	r.Client = interceptor.NewClient(api, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*discoveryv1.EndpointSlice); ok && !cached(obj) {
+				return apierrors.NewNotFound(discoveryv1.Resource("endpointslices"), key.Name)
+			}
+			return nil
+		},
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if l, ok := list.(*discoveryv1.EndpointSliceList); ok {
+				var kept []discoveryv1.EndpointSlice
+				for i := range l.Items {
+					if cached(&l.Items[i]) {
+						kept = append(kept, l.Items[i])
+					}
+				}
+				l.Items = kept
+			}
+			return nil
+		},
+	})
 }
 
 func TestReconcileDoorman_CopiesTheServiceProxyName(t *testing.T) {
@@ -615,6 +665,7 @@ func TestReconcileDoorman_SharedService(t *testing.T) {
 	stable.Status.Phase = v1alpha1.PhaseRunning
 	require.NoError(t, doormanErr(ctx, r, stable, target("stable")))
 	require.NoError(t, r.Create(ctx, servingSlice()))
+	require.NoError(t, r.Create(ctx, servingPod()))
 	require.NoError(t, doormanErr(ctx, r, canary, target("canary")))
 
 	assert.Empty(t, doormanSlices(t, r), "stable is running, so the Service's traffic goes to it")
@@ -816,26 +867,14 @@ func TestReconcile_OrphaningDeleteRemovesDoormanSlices(t *testing.T) {
 // an orphaning delete would leave them sending traffic to the doorman.
 func TestReconcile_OrphaningDeleteRemovesSlicesTheCacheMissed(t *testing.T) {
 	r, _ := pausedRouted(t)
-	apiServer := r.Client.(client.WithWatch)
-	r.PodReader = apiServer
-	r.Client = interceptor.NewClient(apiServer, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch,
-		list client.ObjectList, opts ...client.ListOption) error {
-		if _, ok := list.(*discoveryv1.EndpointSliceList); ok {
-			var all client.ListOptions
-			all.ApplyOptions(opts)
-			if all.LabelSelector != nil && strings.Contains(all.LabelSelector.String(), doorman.ManagedBy) {
-				return nil
-			}
-		}
-		return c.List(ctx, list, opts...)
-	}})
+	missDoormanSlices(r)
 	require.NoError(t, r.Delete(context.Background(), fetch(t, r, "api"), client.PropagationPolicy(metav1.DeletePropagationOrphan)))
 
 	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
 	require.NoError(t, err)
 
 	var left discoveryv1.EndpointSliceList
-	require.NoError(t, apiServer.List(context.Background(), &left, client.MatchingLabels{discoveryv1.LabelManagedBy: doorman.ManagedBy}))
+	require.NoError(t, r.PodReader.List(context.Background(), &left, client.MatchingLabels{discoveryv1.LabelManagedBy: doorman.ManagedBy}))
 	assert.Empty(t, left.Items)
 }
 
@@ -1002,7 +1041,7 @@ func TestRouteDoorman_RechecksAServiceLeftToOtherPods(t *testing.T) {
 	target := appTarget()
 	target.Spec.Template.Labels = map[string]string{"app": "shop", "track": "canary"}
 	shop := service("shop", map[string]string{"app": "shop"}, corev1.ServicePort{Name: "http", Port: 80})
-	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"), shop, servingSlice())
+	r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"), shop, servingSlice(), servingPod())
 
 	assert.Equal(t, servedRecheck, r.routeDoorman(context.Background(), workload, target))
 	assert.Empty(t, doormanSlices(t, r))
@@ -1010,6 +1049,39 @@ func TestRouteDoorman_RechecksAServiceLeftToOtherPods(t *testing.T) {
 	require.NoError(t, r.Delete(context.Background(), servingSlice()))
 	assert.Zero(t, r.routeDoorman(context.Background(), workload, target), "routed: nothing to wait for")
 	assert.Len(t, doormanSlices(t, r), 1)
+}
+
+// A slice anyone may write can claim the EndpointSlice controller wrote it.
+// Its endpoints count as serving the Service only when the pods they name
+// have their addresses, or a forged slice could keep a paused workload's
+// Service from being routed, so requests through it would wake nothing.
+func TestRouteDoorman_RoutesAServiceWhoseServingPodsAreForged(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+	}{
+		{name: "no such pod"},
+		{name: "a pod without that address", pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "shop-pod", Namespace: "default"},
+			Status:     corev1.PodStatus{PodIPs: []corev1.PodIP{{IP: "10.244.7.7"}}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := lifecycleWorkload("canary", v1alpha1.PhasePaused)
+			target := appTarget()
+			target.Spec.Template.Labels = map[string]string{"app": "shop", "track": "canary"}
+			shop := service("shop", map[string]string{"app": "shop"}, corev1.ServicePort{Name: "http", Port: 80})
+			objs := []client.Object{workload, doormanEndpoints("10.0.0.7"), shop, servingSlice()}
+			if tt.pod != nil {
+				objs = append(objs, tt.pod)
+			}
+			r := doormanReconciler(t, objs...)
+
+			assert.Zero(t, r.routeDoorman(context.Background(), workload, target))
+			assert.Len(t, doormanSlices(t, r), 1, "routed: the slice's pod isn't there to serve it")
+		})
+	}
 }
 
 // A reconcile that applies the slices but fails before status is written
@@ -1102,4 +1174,150 @@ func TestReconcileDoorman_AllocatesWithOnlyNamespacedAccess(t *testing.T) {
 	require.NoError(t, doormanErr(context.Background(), r, workload, appTarget()))
 
 	assert.Len(t, workload.Status.Doorman, 1)
+}
+
+// A port in a slice whose workload's status write failed is still in use.
+// A leader that takes over learns of it from the slice, and gives it to no
+// other workload.
+func TestReconcileDoorman_ANewLeaderHonoursPortsOnlyInASlice(t *testing.T) {
+	r, first, second, billing := twoPausedWorkloads(t)
+	ctx := context.Background()
+	require.NoError(t, doormanErr(ctx, r, first, appTarget()))
+	port := first.Status.Doorman[0].DoormanPort
+	require.Empty(t, fetch(t, r, "api").Status.Doorman, "the status write failed")
+
+	newLeader(r)
+	require.NoError(t, doormanErr(ctx, r, second, billing))
+
+	assert.NotEqual(t, port, second.Status.Doorman[0].DoormanPort)
+}
+
+// Reading every workload's routes spans the cluster, so it doesn't hold up
+// other workloads' routing while it's under way.
+func TestReconcileDoorman_LoadingPortsDoesNotSerializeReconciles(t *testing.T) {
+	r, first, second, billing := twoPausedWorkloads(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var listing atomic.Int32
+	bothListing := make(chan struct{})
+	r.PodReader = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		List: func(listCtx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*v1alpha1.ManagedWorkloadList); ok {
+				if listing.Add(1) == 2 {
+					close(bothListing)
+				}
+				select {
+				case <-bothListing:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return c.List(listCtx, list, opts...)
+		}})
+
+	var reconciles sync.WaitGroup
+	errs := make([]error, 2)
+	reconciles.Go(func() { errs[0] = doormanErr(ctx, r, first, appTarget()) })
+	reconciles.Go(func() { errs[1] = doormanErr(ctx, r, second, billing) })
+	done := make(chan struct{})
+	go func() {
+		reconciles.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("one reconcile's read of the ports in use held up the other's")
+	}
+
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+	assert.NotEqual(t, first.Status.Doorman[0].DoormanPort, second.Status.Doorman[0].DoormanPort)
+}
+
+// missDoormanSlices makes r.Client's cache not have the doorman's slices
+// yet, as just after they're written; r.PodReader, the API server, has them.
+func missDoormanSlices(r *Reconciler) {
+	apiServer := r.Client.(client.WithWatch)
+	r.PodReader = apiServer
+	r.Client = interceptor.NewClient(apiServer, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch,
+		list client.ObjectList, opts ...client.ListOption) error {
+		if _, ok := list.(*discoveryv1.EndpointSliceList); ok {
+			var all client.ListOptions
+			all.ApplyOptions(opts)
+			if all.LabelSelector != nil && strings.Contains(all.LabelSelector.String(), doorman.ManagedBy) {
+				return nil
+			}
+		}
+		return c.List(ctx, list, opts...)
+	}})
+}
+
+// A workload leaving routing removes slices the cache doesn't have yet,
+// whenever one may have been written moments ago: while status names its
+// routes, or just after its phase changed, as when the status write that
+// would have named them failed.
+func TestReconcileDoorman_LeavingRemovesSlicesTheCacheMissed(t *testing.T) {
+	tests := []struct {
+		name         string
+		keepRoutes   bool
+		transitioned time.Duration
+	}{
+		{name: "status names its routes", keepRoutes: true, transitioned: time.Hour},
+		{name: "its phase just changed", transitioned: time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := lifecycleWorkload("api", v1alpha1.PhasePaused)
+			r := doormanReconciler(t, workload, doormanEndpoints("10.0.0.7"),
+				service("api", map[string]string{"app": "api"}, corev1.ServicePort{Name: "http", Port: 80}))
+			ctx := context.Background()
+			require.NoError(t, doormanErr(ctx, r, workload, appTarget()))
+			require.Len(t, doormanSlices(t, r), 1)
+			missDoormanSlices(r)
+
+			if !tt.keepRoutes {
+				workload.Status.Doorman = nil
+			}
+			workload.Status.Phase = v1alpha1.PhaseRunning
+			workload.Status.LastTransitionTime = &metav1.Time{Time: fixedTime.Add(-tt.transitioned)}
+			require.NoError(t, doormanErr(ctx, r, workload, appTarget()))
+
+			var left discoveryv1.EndpointSliceList
+			require.NoError(t, r.PodReader.List(ctx, &left, client.MatchingLabels{discoveryv1.LabelManagedBy: doorman.ManagedBy}))
+			assert.Empty(t, left.Items)
+		})
+	}
+}
+
+// Every routed Service port takes one of the doorman ports the whole
+// cluster shares, so a workload, or a namespace, over its cap isn't
+// routed, and says why.
+func TestReconcileDoorman_CapsPortsPerWorkloadAndNamespace(t *testing.T) {
+	tests := []struct {
+		name         string
+		perWorkload  int
+		perNamespace int
+		want         string
+	}{
+		{name: "per workload", perWorkload: 1, perNamespace: 10, want: "the workload would hold 2 doorman ports, more than its limit of 1"},
+		{name: "per namespace", perWorkload: 10, perNamespace: 2, want: "namespace default would hold 3 doorman ports, more than its limit of 2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, first, second, billing := twoPausedWorkloads(t)
+			ctx := context.Background()
+			require.NoError(t, doormanErr(ctx, r, first, appTarget()))
+			require.NoError(t, r.Update(ctx, service("billing", map[string]string{"app": "billing"},
+				corev1.ServicePort{Name: "http", Port: 80}, corev1.ServicePort{Name: "grpc", Port: 9090})))
+			r.DoormanPortsPerWorkload, r.DoormanPortsPerNamespace = tt.perWorkload, tt.perNamespace
+
+			require.NoError(t, doormanErr(ctx, r, second, billing))
+
+			assert.Empty(t, second.Status.Doorman)
+			cond := wakeCondition(t, second)
+			assert.Equal(t, "TooManyPorts", cond.Reason)
+			assert.Contains(t, cond.Message, tt.want)
+		})
+	}
 }

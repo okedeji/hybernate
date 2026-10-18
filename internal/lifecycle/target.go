@@ -72,21 +72,23 @@ func getTarget(ctx context.Context, c client.Client, workload *v1alpha1.ManagedW
 	return obj, nil
 }
 
-func scaleTo(ctx context.Context, scaler WorkloadScaler, target client.Object, n int32) error {
+// scaleTo sets the target's replicas to n, and returns its scale as of
+// then, whose status still counts the pods from before.
+func scaleTo(ctx context.Context, scaler WorkloadScaler, target client.Object, n int32) (*autoscalingv1.Scale, error) {
 	scale, err := scaler.GetScale(ctx, target)
 	if err != nil {
-		return fmt.Errorf("getting scale subresource: %w", err)
+		return nil, fmt.Errorf("getting scale subresource: %w", err)
 	}
 
 	if scale.Spec.Replicas == n {
-		return nil
+		return scale, nil
 	}
 
 	scale.Spec.Replicas = n
 	if err := scaler.UpdateScale(ctx, target, scale); err != nil {
-		return fmt.Errorf("updating scale to %d: %w", n, err)
+		return nil, fmt.Errorf("updating scale to %d: %w", n, err)
 	}
-	return nil
+	return scale, nil
 }
 
 // readyOf re-reads the target and returns how many of the desired replicas
@@ -127,6 +129,18 @@ func ReadyReplicas(target client.Object) int32 {
 		return t.Status.ReadyReplicas
 	case *appsv1.StatefulSet:
 		return t.Status.ReadyReplicas
+	default:
+		return 0
+	}
+}
+
+// Pods returns how many pods the target has, Ready or not.
+func Pods(target client.Object) int32 {
+	switch t := target.(type) {
+	case *appsv1.Deployment:
+		return t.Status.Replicas
+	case *appsv1.StatefulSet:
+		return t.Status.Replicas
 	default:
 		return 0
 	}

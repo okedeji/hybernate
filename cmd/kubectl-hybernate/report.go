@@ -18,7 +18,6 @@ package main
 
 import (
 	"cmp"
-	"context"
 	_ "embed"
 	"fmt"
 	"html/template"
@@ -217,23 +216,42 @@ func canBrowseOn(goos string, getenv func(string) string) bool {
 	return goos == "darwin" || goos == "windows"
 }
 
-// browserTimeout bounds the opener, which hands the file to the browser and
-// returns at once; one still running after this is stuck.
-const browserTimeout = 10 * time.Second
+// openerWait is how long the opener has to say it failed. Most hand the
+// file to the browser and exit at once, but xdg-open without a desktop
+// environment runs the browser itself, in the foreground, until it's closed.
+const openerWait = 3 * time.Second
 
 func openInBrowser(path string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), browserTimeout)
-	defer cancel()
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.CommandContext(ctx, "open", path)
+		cmd = exec.Command("open", path)
 	case "windows":
-		cmd = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", path)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
 	default:
-		cmd = exec.CommandContext(ctx, "xdg-open", path)
+		cmd = exec.Command("xdg-open", path)
 	}
-	return cmd.Run()
+	return startOpener(cmd, openerWait)
+}
+
+// startOpener starts the opener, and returns its error if it exits within
+// wait. One still running then is the browser itself, which is left
+// running: its exit is waited for in the background, and the plugin exits
+// without it.
+func startOpener(cmd *exec.Cmd, wait time.Duration) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-exited:
+		return err
+	case <-timer.C:
+		return nil
+	}
 }
 
 // writeHTMLFile writes the report to path, or, without one, to a new

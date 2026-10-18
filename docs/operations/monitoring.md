@@ -35,7 +35,7 @@ kubectl create clusterrolebinding hybernate-metrics-reader \
   --clusterrole=hybernate-metrics-reader --serviceaccount=monitoring:prometheus-k8s
 ```
 
-Without that binding, the targets show as down with `401` or `403`, and the `HybernateDown` alert fires. With `metrics.secure: false` in the chart, metrics are plain HTTP and need no binding, but anyone who can reach the port can read them.
+Without that binding, the targets show as down with `401` or `403`, and the `HybernateDown` and `HybernateDoormanDown` alerts fire. With `metrics.secure: false` in the chart, metrics are plain HTTP and need no binding, but anyone who can reach the port can read them.
 
 **Prometheus must select the ServiceMonitors.** A Prometheus picks up only the ServiceMonitors that match its `serviceMonitorSelector` (and `serviceMonitorNamespaceSelector`). The chart's carry no label a Prometheus selects by default, so targets that never appear usually mean the selector doesn't match. [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) selects `release: <its release name>`, and its Prometheus runs as the `<its release name>-kube-prometheus-prometheus` ServiceAccount. For a stack installed as `kube-prometheus-stack` in `monitoring`:
 
@@ -99,13 +99,15 @@ The Helm chart creates these rules when `metrics.prometheusRule.enabled` is `tru
 | `HybernateTargetUnavailable` | A ManagedWorkload's target goes missing more than 3 times in an hour | warning |
 | `HybernateDoormanWakesFailing` | More than 3 requests to one paused workload timed out or failed (`result` `timeout` or `error`) in 15 minutes, for 5 minutes | warning |
 
-`HybernateDown` and `HybernateDoormanDown` match the scrape job of the operator's and the doorman's metrics Service, so they need the ServiceMonitors above.
+`HybernateDown` and `HybernateDoormanDown` match the scrape job of the operator's and the doorman's metrics Service that the ServiceMonitors above make, so the chart creates them only with `metrics.serviceMonitor.enabled`: with no such job, they'd fire forever. If you scrape Hybernate some other way, write them on your own job's `up` series.
 
 ## Health Checks
 
-The operator and the doorman expose health endpoints on port 8081, which the chart and the kustomize manifests already use as liveness and readiness probes:
+The operator and the doorman expose health endpoints on port 8081, which the chart and the kustomize manifests already use as liveness and readiness probes. To check them yourself, forward the port first, here the operator's, from a Helm install named `hybernate`:
 
 ```bash
+kubectl port-forward -n hybernate-system deployment/hybernate 8081:8081
+
 # Liveness
 curl http://localhost:8081/healthz
 

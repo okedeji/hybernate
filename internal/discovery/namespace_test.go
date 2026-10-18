@@ -252,6 +252,55 @@ func TestScanCluster_CPUOverPodsMeasured(t *testing.T) {
 	assert.Equal(t, StateActive, got["api"].State)
 }
 
+// CPU is measured against what the running pod requests, as the operator
+// measures it: admission can set a request the template doesn't have, from
+// a LimitRange default or a limit, or change it, as a Vertical Pod
+// Autoscaler does. The history replay measures against the same.
+func TestScanCluster_MeasuresAgainstWhatThePodRequests(t *testing.T) {
+	cpu := func(q string) corev1.ResourceList {
+		return corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(q)}
+	}
+	tests := []struct {
+		name        string
+		template    corev1.ResourceRequirements
+		pod         corev1.ResourceList
+		wantPercent int
+		wantSleeps  bool
+	}{
+		{name: "a LimitRange default", pod: cpu("200m"), wantPercent: 10},
+		{name: "a limit only", template: corev1.ResourceRequirements{Limits: cpu("200m")}, pod: cpu("200m"),
+			wantPercent: 10},
+		{name: "a Vertical Pod Autoscaler's request", template: corev1.ResourceRequirements{Requests: cpu("100m")},
+			pod: cpu("400m"), wantPercent: 5, wantSleeps: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := map[string]string{"app": "api"}
+			objs := running("api", testNamespace, &metav1.LabelSelector{MatchLabels: labels}, labels, 1, "20m")
+			objs[0].(*appsv1.Deployment).Spec.Template.Spec.Containers[0].Resources = tt.template
+			objs[2].(*corev1.Pod).Spec.Containers[0].Resources = corev1.ResourceRequirements{Requests: tt.pod}
+			f := &fakePrometheus{from: scanTime.Add(-7 * 24 * time.Hour), byNamespace: map[string][]series{
+				testNamespace: {{pod: "api-7d9f8c6b5-bcdfg", container: "main",
+					cores: func(time.Time) float64 { return 0.03 }}},
+			}}
+			opts := scanOptions(testNamespace)
+			opts.History, opts.Window = newFakePrometheus(t, f), 7*24*time.Hour
+			c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+
+			report, err := NewScanner(c, c).ScanCluster(context.Background(), opts)
+
+			require.NoError(t, err)
+			got := byName(report)["api"]
+			assert.Empty(t, got.Unmeasured)
+			require.NotNil(t, got.CPUPercent)
+			assert.Equal(t, tt.wantPercent, *got.CPUPercent)
+			require.NotNil(t, got.History, "the replay has a request to measure against")
+			assert.Equal(t, tt.wantSleeps, got.History.SleepHours > 0,
+				"30m all week is 15%% of a 200m request, and 7.5%% of a 400m one")
+		})
+	}
+}
+
 func forbidden(what string) error {
 	return apierrors.NewForbidden(schema.GroupResource{Resource: what}, "", errors.New("denied"))
 }

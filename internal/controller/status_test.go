@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,19 +107,6 @@ func TestReconcile_UnwrittenActivityIsRemembered(t *testing.T) {
 		"last activity %s, want the unwritten busy check at %s", activity.LastActivityTime, busySince)
 }
 
-// Status is written every statusFlushInterval, so after a restart the last
-// written evaluation is normally a few minutes old. That's not an outage.
-func TestActivityClock_FlushLagIsNotAnOutage(t *testing.T) {
-	target := clockTarget("app:v1", nil)
-	workload := clockWorkload(fixedTime.Add(-59*time.Minute), target)
-	evaluated := metav1.NewTime(fixedTime.Add(-statusFlushInterval))
-	workload.Status.Activity.LastEvaluatedTime = &evaluated
-
-	runClock(t, workload, target, clockOpts{metrics: idleCPU})
-
-	assert.NotEqual(t, v1alpha1.ActivitySourceUnobserved, workload.Status.Activity.LastActivitySource)
-}
-
 func TestWithoutVolatile(t *testing.T) {
 	evaluated := metav1.NewTime(fixedTime)
 	status := &v1alpha1.ManagedWorkloadStatus{
@@ -163,4 +152,25 @@ func TestReconcile_ActivitySurvivesARestart(t *testing.T) {
 
 	assert.Zero(t, pauser.pauseCalls, "busy until a minute in, so not idle for 5m until 6m")
 	assert.Equal(t, v1alpha1.PhaseRunning, getWorkload(t, restarted, "busy-app").Status.Phase)
+}
+
+// No message, however much it lists, can outgrow what the API server takes:
+// a condition's would fail every status write while it's set, and an
+// event's would be dropped.
+func TestMessages_FitTheAPIServersLimits(t *testing.T) {
+	long := "dependent-" + strings.Repeat("é", 20000)
+	workload := lifecycleWorkload("api", v1alpha1.PhaseRunning)
+	r := newTestReconciler(t, workload, &stubPauser{})
+
+	r.setCondition(workload, conditionProtected, metav1.ConditionTrue, "ProtectedNamespace", long)
+	r.emitEvent(workload, false, "Warning", ReasonProtected, actionCheckNamespace, "%s", long)
+
+	message := workload.Status.Conditions[0].Message
+	assert.LessOrEqual(t, len(message), maxConditionMessage)
+	assert.True(t, utf8.ValidString(message), "never cut inside a character")
+	assert.True(t, strings.HasSuffix(message, "…"))
+	require.NoError(t, r.Status().Update(context.Background(), workload))
+	note := strings.TrimPrefix(drainEvents(t, r), "Warning Protected ")
+	assert.LessOrEqual(t, len(note), maxEventNote)
+	assert.True(t, strings.HasPrefix(note, "api: dependent-é"))
 }

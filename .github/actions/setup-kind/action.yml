@@ -8,12 +8,14 @@ inputs:
   sha256:
     description: The SHA-256 of that release's kind-linux-amd64.
     required: true
+  # kubectl supports one minor version of skew either side, so each caller
+  # names the one matching its cluster's Kubernetes.
   kubectl-version:
-    description: The kubectl release, such as v1.35.9.
-    default: v1.35.9
+    description: The kubectl release, such as v1.37.0.
+    required: true
   kubectl-sha256:
     description: The SHA-256 of that release's linux/amd64 kubectl.
-    default: 3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
+    required: true
 
 runs:
   using: composite

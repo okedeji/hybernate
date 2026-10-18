@@ -17,6 +17,7 @@ limitations under the License.
 package discovery
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/tls"
@@ -36,6 +37,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -44,9 +46,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// prometheusTimeout bounds each query. A week of one namespace's CPU at
-// five-minute steps is a large but routine range query; one that takes
-// longer than this is better reported than waited on.
+// prometheusTimeout bounds a query made without a deadline of its own, such
+// as the check that a Prometheus answers. A history query gets what's left
+// of the time the scan gives history instead: a week of a large namespace
+// can take a slow Thanos longer than this, and a fixed limit would never
+// let it finish, however long --timeout is.
 const prometheusTimeout = 30 * time.Second
 
 // maxResponseBytes bounds what one query may return. A week of a namespace
@@ -120,8 +124,9 @@ type HTTPOptions struct {
 	InsecureSkipVerify bool
 }
 
-// NewHTTPClient returns a client for a Prometheus outside the cluster, which
-// gives up on one that stops answering.
+// NewHTTPClient returns a client for a Prometheus outside the cluster. It
+// sets no timeout of its own: every query is bounded by its context, which
+// for history is the time the scan gives it.
 func NewHTTPClient(o HTTPOptions) (*http.Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if o.CAFile != "" {
@@ -141,8 +146,7 @@ func NewHTTPClient(o HTTPOptions) (*http.Client, error) {
 	tlsConfig.InsecureSkipVerify = o.InsecureSkipVerify //nolint:gosec // only when the user asks for it by flag
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = tlsConfig
-	transport.ResponseHeaderTimeout = prometheusTimeout
-	return &http.Client{Transport: transport, Timeout: prometheusTimeout}, nil
+	return &http.Client{Transport: transport}, nil
 }
 
 // NewPrometheusURL reads from a Prometheus API at baseURL, such as Thanos,
@@ -231,7 +235,9 @@ func readLimited(r io.Reader) ([]byte, error) {
 }
 
 // errorExcerpt is what an error response says: a Prometheus API's own error
-// message, or the start of whatever else came back, on one line.
+// message, or the start of whatever else came back, on one line. What can't
+// be printed, such as a terminal escape sequence's ESC, is dropped, as the
+// excerpt is shown in the terminal.
 func errorExcerpt(body []byte) string {
 	var resp struct {
 		Error string `json:"error"`
@@ -240,9 +246,15 @@ func errorExcerpt(body []byte) string {
 	if json.Unmarshal(body, &resp) == nil && resp.Error != "" {
 		text = resp.Error
 	}
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) || unicode.IsSpace(r) {
+			return r
+		}
+		return -1
+	}, text)
 	text = strings.Join(strings.Fields(text), " ")
-	if len(text) > maxErrorShown {
-		text = text[:maxErrorShown] + "..."
+	if runes := []rune(text); len(runes) > maxErrorShown {
+		text = string(runes[:maxErrorShown]) + "..."
 	}
 	if text == "" {
 		return "no body"
@@ -481,30 +493,76 @@ type rangeResponse struct {
 		ResultType string `json:"resultType"`
 		Result     []struct {
 			Metric map[string]string `json:"metric"`
-			Values [][2]any          `json:"values"`
+			Values []sample          `json:"values"`
 		} `json:"result"`
 	} `json:"data"`
 }
 
+// sample is one of a range query's [time, "value"] pairs. It's decoded into
+// fields rather than [2]any, which would box both halves of every sample of
+// a response, millions for a week of a large namespace, all at once.
+type sample struct {
+	at    int64
+	value float64
+	// ok is false for a value that isn't a finite number, which is skipped.
+	ok bool
+}
+
+func (s *sample) UnmarshalJSON(b []byte) error {
+	*s = sample{}
+	inner, isArray := bytes.CutPrefix(bytes.TrimSpace(b), []byte("["))
+	inner, closed := bytes.CutSuffix(inner, []byte("]"))
+	at, value, paired := bytes.Cut(inner, []byte(","))
+	if !isArray || !closed || !paired {
+		return nil
+	}
+	t, err := strconv.ParseFloat(string(bytes.TrimSpace(at)), 64)
+	if err != nil {
+		return nil
+	}
+	raw, err := strconv.Unquote(string(bytes.TrimSpace(value)))
+	if err != nil {
+		return nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil
+	}
+	*s = sample{at: int64(t), value: v, ok: true}
+	return nil
+}
+
+// scrapeLabels tell apart scrapes of the same container's CPU by the same
+// Prometheus, as when cAdvisor's counter is scraped from both the kubelet's
+// /metrics/cadvisor and /metrics/resource, or by two jobs. They're copies,
+// so only one of them counts.
+var scrapeLabels = []string{"job", "metrics_path", "service", "endpoint", "instance"}
+
 // namespaceCPU returns the CPU each container in the namespace used over
 // the window, from cAdvisor's counters, which every common Prometheus setup
-// scrapes. Steps are keyed by Unix time. The series are kept apart by the
-// labels that tell one Prometheus from another, so a store mixing several
-// is noticed, and then summed per container as before.
+// scrapes. Steps are keyed by Unix time. Copies of a container's CPU that
+// one Prometheus scraped twice count once, the highest at each step. The
+// series of different Prometheus are kept apart by the labels that tell
+// them apart, so a store mixing several is noticed, and then summed per
+// container.
 func (p *Prometheus) namespaceCPU(ctx context.Context, namespace string, start, end time.Time, step time.Duration) (
 	[]containerCPU, error) {
 	matchers := append([]string{"namespace=" + strconv.Quote(namespace), `container!=""`, `container!="POD"`},
 		p.Selector...)
 	query := fmt.Sprintf(`sum by (pod, container, %s) (rate(container_cpu_usage_seconds_total{%s}[%s]))`,
-		strings.Join(sourceLabels, ", "), strings.Join(matchers, ", "), promDuration(step))
+		strings.Join(slices.Concat(sourceLabels, scrapeLabels), ", "), strings.Join(matchers, ", "),
+		promDuration(step))
 	params := url.Values{
 		"query": {query},
 		"start": {strconv.FormatInt(start.Unix(), 10)},
 		"end":   {strconv.FormatInt(end.Unix(), 10)},
 		"step":  {strconv.FormatInt(int64(step.Seconds()), 10)},
 	}
-	ctx, cancel := context.WithTimeout(ctx, prometheusTimeout)
-	defer cancel()
+	if _, bounded := ctx.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, prometheusTimeout)
+		defer cancel()
+	}
 	body, err := p.get(ctx, "api/v1/query_range", params)
 	if err != nil {
 		return nil, fmt.Errorf("querying %s: %w", p.Source, err)
@@ -516,36 +574,48 @@ func (p *Prometheus) namespaceCPU(ctx context.Context, namespace string, start, 
 	if resp.Status != "success" {
 		return nil, fmt.Errorf("%s: query failed: %s", p.Source, resp.Error)
 	}
-	type key struct{ pod, container string }
-	byContainer := map[key]*containerCPU{}
-	var order []key
+	type fromSource struct{ pod, container, source string }
+	scraped := map[fromSource]map[int64]float64{}
+	var order []fromSource
 	for _, series := range resp.Data.Result {
 		p.noteSource(series.Metric)
-		k := key{series.Metric["pod"], series.Metric["container"]}
-		c := byContainer[k]
-		if c == nil {
-			c = &containerCPU{pod: k.pod, container: k.container, samples: make(map[int64]float64, len(series.Values))}
-			byContainer[k] = c
+		k := fromSource{series.Metric["pod"], series.Metric["container"], sourceOf(series.Metric)}
+		samples := scraped[k]
+		if samples == nil {
+			samples = make(map[int64]float64, len(series.Values))
+			scraped[k] = samples
 			order = append(order, k)
 		}
 		for _, v := range series.Values {
-			at, ok := v[0].(float64)
-			raw, isString := v[1].(string)
-			if !ok || !isString {
-				continue
+			if have, seen := samples[v.at]; v.ok && (!seen || v.value > have) {
+				samples[v.at] = v.value
 			}
-			value, err := strconv.ParseFloat(raw, 64)
-			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
-				continue
-			}
-			c.samples[int64(at)] += value
 		}
 	}
+	type key struct{ pod, container string }
+	index := map[key]int{}
 	out := make([]containerCPU, 0, len(order))
 	for _, k := range order {
-		out = append(out, *byContainer[k])
+		i, ok := index[key{k.pod, k.container}]
+		if !ok {
+			index[key{k.pod, k.container}] = len(out)
+			out = append(out, containerCPU{pod: k.pod, container: k.container, samples: scraped[k]})
+			continue
+		}
+		for at, cores := range scraped[k] {
+			out[i].samples[at] += cores
+		}
 	}
 	return out, nil
+}
+
+// sourceOf is which Prometheus a series came from, by its sourceLabels.
+func sourceOf(metric map[string]string) string {
+	values := make([]string, len(sourceLabels))
+	for i, label := range sourceLabels {
+		values[i] = metric[label]
+	}
+	return strings.Join(values, "\x00")
 }
 
 func (p *Prometheus) noteSource(metric map[string]string) {

@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026.
@@ -664,7 +663,8 @@ data:
 
 			table, err := utils.Run(exec.Command(pluginBinary, "scan", "-n", depsScanNamespace, "--window", "0"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(table).To(MatchRegexp(`deployment/e2e-app\s+->\s+statefulset/e2e-db\s+PGHOST\s+connected once Hybernate manages it`))
+			Expect(table).To(MatchRegexp(
+				`deployment/e2e-app\s+->\s+statefulset/e2e-db\s+PGHOST\s+connected once Hybernate manages it`))
 		})
 
 		It("writes the HTML report, without dependency addresses", func() {

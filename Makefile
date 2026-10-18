@@ -61,6 +61,7 @@ fmt: ## Run go fmt against code.
 .PHONY: vet
 vet: ## Run go vet against code.
 	go vet ./...
+	go vet -tags e2e ./test/...
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
@@ -134,7 +135,7 @@ test-alerts: ## Unit-test the chart's and config/prometheus's alert rules with p
 	@dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; \
 	cp tests/prometheus/*_test.yaml "$$dir"; \
 	go run ./hack/promrules < config/prometheus/alerts.yaml > "$$dir/kustomize.rules.yaml"; \
-	helm template hybernate charts/hybernate --set metrics.prometheusRule.enabled=true \
+	helm template hybernate charts/hybernate --set metrics.prometheusRule.enabled=true --set metrics.serviceMonitor.enabled=true \
 		--show-only templates/prometheusrule.yaml | go run ./hack/promrules > "$$dir/chart.rules.yaml"; \
 	$(CONTAINER_TOOL) run --rm --user "$$(id -u):$$(id -g)" -v "$$dir:/rules" -w /rules --entrypoint promtool $(PROMETHEUS_IMAGE) \
 		test rules $$(cd "$$dir" && ls *_test.yaml)
@@ -142,17 +143,24 @@ test-alerts: ## Unit-test the chart's and config/prometheus's alert rules with p
 .PHONY: check-chart
 check-chart: ## Lint the Helm chart, render it for each provider's Kubernetes versions, and check its RBAC matches config/rbac
 	helm lint charts/hybernate --strict
-	@for v in v1.30.0 v1.30.2-eks-1552ad0 v1.31.1-gke.1678000 v1.32.5 v1.34.1; do \
+	@for v in v1.30.0 v1.30.2-eks-1552ad0 v1.31.1-gke.1678000 v1.32.5 v1.34.1 v1.37.0; do \
 		echo "rendering for Kubernetes $$v"; \
 		helm template hybernate charts/hybernate --kube-version $$v >/dev/null || exit 1; \
 	done
 	@! helm template hybernate charts/hybernate --kube-version v1.29.9 >/dev/null 2>&1 || { \
 		echo "the chart installs on Kubernetes 1.29, below the 1.30 it supports"; exit 1; }
-	@for d in 0s 0.0m 0h0m0s; do \
+	@for d in 0s 0.0m 0h0m0s 59s 0.5m 500ms; do \
 		! helm template hybernate charts/hybernate --set defaults.idleAfter=$$d >/dev/null 2>&1 || { \
-			echo "the chart accepts defaults.idleAfter=$$d, which the operator refuses to start with"; exit 1; }; \
+			echo "the chart accepts defaults.idleAfter=$$d, under a minute, which the operator refuses to start with"; exit 1; }; \
 	done
-	@for d in 1h30m 0.5s 0h5m; do \
+	@! helm template hybernate charts/hybernate --set 'metrics.readerSubjects[0].kind=ServiceAccount' \
+		--set 'metrics.readerSubjects[0].name=prometheus' >/dev/null 2>&1 || { \
+		echo "the chart accepts a ServiceAccount in metrics.readerSubjects without its namespace, which the API server refuses"; exit 1; }
+	@for v in 'watchNamespace={staging}' doorman.enabeld=false metrics.serviceMonitor.enable=true; do \
+		! helm template hybernate charts/hybernate --set "$$v" >/dev/null 2>&1 || { \
+			echo "the chart accepts $$v, a value it doesn't have, and would ignore it"; exit 1; }; \
+	done
+	@for d in 1h30m 1m 90s 0h5m 1.5h; do \
 		helm template hybernate charts/hybernate --set defaults.idleAfter=$$d >/dev/null || exit 1; \
 	done
 	@helm template hybernate charts/hybernate --set networkPolicy.enabled=true \
@@ -182,31 +190,79 @@ check-chart: ## Lint the Helm chart, render it for each provider's Kubernetes ve
 	@out=$$(helm template hybernate charts/hybernate --set-string podLabels.team=checkout \
 		--set-string podLabels.control-plane=other --set priorityClassName=hybernate-critical \
 		--set 'doorman.extraEnv[0].name=GOMAXPROCS' --set-string 'doorman.extraEnv[0].value=2'); \
-	[ "$$(grep -c 'team: checkout' <<<"$$out")" = 2 ] && [ "$$(grep -c 'priorityClassName: hybernate-critical' <<<"$$out")" = 2 ] && \
+	[ "$$(grep -c 'team: checkout' <<<"$$out")" = 2 ] && [ "$$(grep -c 'priorityClassName: hybernate-critical' <<<"$$out")" = 3 ] && \
 		grep -q 'name: GOMAXPROCS' <<<"$$out" && ! grep -q 'control-plane: other' <<<"$$out" || { \
-		echo "podLabels, priorityClassName or doorman.extraEnv don't reach both pods, or podLabels replaced a selector label"; exit 1; }
+		echo "podLabels, priorityClassName or doorman.extraEnv don't reach the operator's, the doorman's and the guard's pods, or podLabels replaced a selector label"; exit 1; }
+	@out=$$(helm template hybernate charts/hybernate --set 'doorman.healthCheckUserAgents={Bot #1,Probe: v2}' \
+		--set 'protectedNamespaces={*-prod}' --set timezone=Europe/London); \
+	grep -qF -- '- "--doorman-health-check-user-agents=Bot #1,Probe: v2"' <<<"$$out" && \
+		grep -qF -- '- "--protected-namespaces=*-prod"' <<<"$$out" && grep -qF -- '- "--timezone=Europe/London"' <<<"$$out" || { \
+		echo "the chart doesn't quote a container argument, so a # starts a YAML comment, or a ': ' makes it a map"; exit 1; }
+	@! helm template hybernate charts/hybernate | grep -q -- '--guard=upgrade' && \
+		helm template hybernate charts/hybernate --set 'watchNamespaces={shop}' | grep -q -- '--guard=upgrade' || { \
+		echo "the upgrade guard doesn't run exactly when watchNamespaces is set, so narrowing it can strand paused workloads"; exit 1; }
+	@out=$$(helm template hybernate charts/hybernate --show-only templates/guard.yaml --set-string guard.podAnnotations.team=checkout \
+		--set-string guard.podLabels.control-plane=other --set 'tolerations[0].operator=Exists'); \
+	grep -q 'sidecar.istio.io/inject: "false"' <<<"$$out" && grep -q 'linkerd.io/inject: disabled' <<<"$$out" && \
+		grep -q 'team: checkout' <<<"$$out" && grep -q 'operator: Exists' <<<"$$out" && \
+		! grep -q 'control-plane: other' <<<"$$out" && ! grep -q 'runAsUser' <<<"$$out" || { \
+		echo "the guard's pod lets a mesh's sidecar in, which never exits, ignores guard.* or the operator's scheduling, or fixes a UID OpenShift refuses"; exit 1; }
 	@for field in terminationGracePeriodSeconds: seconds: minReadySeconds:; do \
 		chart=$$(helm template hybernate charts/hybernate --show-only templates/doorman.yaml | awk -v f="$$field" '$$1 == f {print $$2}'); \
 		kustomize=$$(awk -v f="$$field" '$$1 == f {print $$2}' config/manager/doorman.yaml); \
 		[ -n "$$chart" ] && [ "$$chart" = "$$kustomize" ] || { \
 			echo "config/manager's doorman has $$field '$$kustomize', the chart's '$$chart', so one drops connections on shutdown"; exit 1; }; \
 	done
+	@chart=$$(helm template hybernate charts/hybernate --show-only templates/deployment.yaml | awk '$$1 == "terminationGracePeriodSeconds:" {print $$2}'); \
+	kustomize=$$(awk '$$1 == "terminationGracePeriodSeconds:" {print $$2}' config/manager/manager.yaml); \
+	[ "$$chart" -gt 30 ] && [ "$$chart" = "$$kustomize" ] || { \
+		echo "the operator's grace period, the chart's '$$chart' and config/manager's '$$kustomize', isn't over the 30s its reconciles get to finish"; exit 1; }
+	@! helm template hybernate charts/hybernate --set metrics.prometheusRule.enabled=true | grep -q 'alert: Hybernate.*Down' && \
+		[ "$$(helm template hybernate charts/hybernate --set metrics.prometheusRule.enabled=true --set metrics.serviceMonitor.enabled=true | \
+			grep -c 'alert: Hybernate.*Down')" = 2 ] || { \
+		echo "HybernateDown and HybernateDoormanDown aren't created exactly with the ServiceMonitors whose jobs they match, so they fire forever"; exit 1; }
+	@! helm template hybernate charts/hybernate --set metrics.enabled=false | grep -q 'system:auth-delegator' || { \
+		echo "the chart lets the operator and the doorman review tokens with metrics disabled, when nothing checks one"; exit 1; }
+	@[ "$$(helm template hybernate charts/hybernate --show-only templates/user-roles.yaml | grep -c 'aggregate-to-view: "true"')" = 1 ] && \
+		grep -q 'aggregate-to-view: "true"' config/rbac/managedworkload_viewer_role.yaml && \
+		grep -q 'aggregate-to-edit: "true"' config/rbac/managedworkload_editor_role.yaml || { \
+		echo "ManagedWorkloads aren't in the built-in view and edit roles, so namespace users can't see or pause them"; exit 1; }
+	@helm template hybernate charts/hybernate --set leaderElection.enabled=false --show-only templates/deployment.yaml | grep -q 'type: Recreate' && \
+		! helm template hybernate charts/hybernate --show-only templates/deployment.yaml | grep -q 'type: Recreate' || { \
+		echo "without leader election, a rolling update runs two operators at once"; exit 1; }
 
 .PHONY: test-doorman-policy
-test-doorman-policy: setup-envtest ## Check against envtest that the chart's admission policy holds the doorman to stamping requests
+test-doorman-policy: setup-envtest kustomize ## Check against envtest that the chart's and kustomize's admission policies hold the doorman to stamping requests
 	@dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; \
 	helm template hybernate charts/hybernate --namespace hybernate-system > "$$dir/chart.yaml"; \
-	CHART_MANIFEST="$$dir/chart.yaml" \
+	cp -R config "$$dir/config"; \
+	sed -e 's/^namespace: hybernate-system$$/namespace: staging-system/' -e 's/^namePrefix: hybernate-$$/namePrefix: staging-/' \
+		config/default/kustomization.yaml > "$$dir/config/default/kustomization.yaml"; \
+	"$(KUSTOMIZE)" build "$$dir/config/default" > "$$dir/kustomize.yaml"; \
+	grep -q 'namePrefix: staging-' "$$dir/config/default/kustomization.yaml" || { \
+		echo "couldn't rename the kustomize install to check its admission policy follows"; exit 1; }; \
+	CHART_MANIFEST="$$dir/chart.yaml" KUSTOMIZE_MANIFEST="$$dir/kustomize.yaml" \
 	KUBEBUILDER_ASSETS="$$("$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" \
 		go test -count=1 ./hack/doormanpolicy
 
 .PHONY: verify-generated
-verify-generated: manifests generate ## Fail if generated code or manifests, or go.mod, aren't up to date
+verify-generated: manifests generate verify-go-version ## Fail if generated code or manifests, or go.mod, aren't up to date
 	@git diff --exit-code -- api config charts || { \
 		echo "Generated files are out of date; run make manifests generate and commit the result."; exit 1; }
 	@test -z "$$(git status --porcelain -- api config charts)" || { \
 		git status --porcelain -- api config charts; echo "Generated files are untracked; commit them."; exit 1; }
 	go mod tidy -diff
+
+# CI tests and scans with go.mod's toolchain, so the image must be built
+# with the same Go, and the devcontainer develops with it.
+.PHONY: verify-go-version
+verify-go-version: ## Fail unless the Dockerfile and the devcontainer use go.mod's toolchain
+	@want=$$(awk '$$1 == "toolchain" {sub(/^go/, "", $$2); print $$2}' go.mod); \
+	[ -n "$$want" ] || { echo "go.mod names no toolchain"; exit 1; }; \
+	for f in Dockerfile .devcontainer/devcontainer.json; do \
+		grep -qE "golang:$${want//./\\.}@sha256:" "$$f" || { \
+			echo "$$f doesn't use golang:$$want, go.mod's toolchain; bump them together"; exit 1; }; \
+	done
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
@@ -236,35 +292,58 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 # docs/operations/upgrading.md isn't one: its versions are history.
 VERSIONED_DOCS = README.md docs/getting-started/installation.md docs/reference/helm-values.md docs/reference/security.md
 
+# Versioning recipes read VERSION from the environment rather than having
+# make expand it into them, and check its form first, so a tag can't run as
+# shell. A pre-release, such as 0.2.0-rc.1, rehearses its version's release:
+# its notes are that version's changelog section, which needn't be dated yet.
+CHECK_VERSION = [[ "$$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$$ ]] || { \
+	echo "VERSION must be a version without a v, such as 0.2.0 or 0.2.0-rc.1, not '$$VERSION'" >&2; exit 1; }
+
 .PHONY: bump
-bump: ## Bump the version in the chart, the kustomize image, and docs. Usage: make bump VERSION=0.1.2
-	@if [ -z "$(VERSION)" ]; then echo "VERSION is required. Usage: make bump VERSION=0.1.2"; exit 1; fi
-	@old=$$(awk '/^version:/ {print $$2}' charts/hybernate/Chart.yaml); \
-	OLD="$$old" NEW="$(VERSION)" perl -pi -e 's/(?<![\d.])\Q$$ENV{OLD}\E(?!\.?[\w-])/$$ENV{NEW}/g' $(VERSIONED_DOCS)
-	@perl -pi -e 's/^version:.*/version: $(VERSION)/' charts/hybernate/Chart.yaml
-	@perl -pi -e 's/^appVersion:.*/appVersion: "v$(VERSION)"/' charts/hybernate/Chart.yaml
-	@perl -pi -e 's/^  newTag:.*/  newTag: v$(VERSION)/' config/manager/kustomization.yaml
-	@echo "Bumped to $(VERSION)"
+bump: ## Bump the version in the chart, the kustomize image, and docs, and date a release's changelog. Usage: make bump VERSION=0.1.2
+	@$(CHECK_VERSION)
+	@OLD="$$(awk '/^version:/ {print $$2}' charts/hybernate/Chart.yaml)" \
+		perl -pi -e 's/(?<![\d.])\Q$$ENV{OLD}\E(?!\.?[\w-])/$$ENV{VERSION}/g' $(VERSIONED_DOCS)
+	@perl -pi -e 's/^version:.*/version: $$ENV{VERSION}/' charts/hybernate/Chart.yaml
+	@perl -pi -e 's/^appVersion:.*/appVersion: "v$$ENV{VERSION}"/' charts/hybernate/Chart.yaml
+	@perl -pi -e 's/^  newTag:.*/  newTag: v$$ENV{VERSION}/' config/manager/kustomization.yaml
+	@[[ "$$VERSION" == *-* ]] || TODAY="$$(date -u +%F)" \
+		perl -pi -e 's/^## \[\Q$$ENV{VERSION}\E\] - Unreleased$$/## [$$ENV{VERSION}] - $$ENV{TODAY}/' CHANGELOG.md
+	@echo "Bumped to $$VERSION"
 
 .PHONY: verify-version
-verify-version: ## Fail unless the chart, the kustomize image, and the docs name VERSION. Usage: make verify-version VERSION=0.1.2
-	@if [ -z "$(VERSION)" ]; then echo "VERSION is required. Usage: make verify-version VERSION=0.1.2"; exit 1; fi
-	@grep -qx 'version: $(VERSION)' charts/hybernate/Chart.yaml || { echo "Chart.yaml's version isn't $(VERSION)"; exit 1; }
-	@grep -qx 'appVersion: "v$(VERSION)"' charts/hybernate/Chart.yaml || { echo "Chart.yaml's appVersion isn't v$(VERSION)"; exit 1; }
-	@grep -qx '  newTag: v$(VERSION)' config/manager/kustomization.yaml || { echo "config/manager's image isn't v$(VERSION)"; exit 1; }
-	@for f in $(VERSIONED_DOCS); do \
-		grep -qF -- '$(VERSION)' "$$f" || { echo "$$f doesn't name $(VERSION); run make bump VERSION=$(VERSION)"; exit 1; }; \
+verify-version: ## Fail unless the chart, the kustomize image, the docs and the changelog name VERSION. Usage: make verify-version VERSION=0.1.2
+	@$(CHECK_VERSION)
+	@grep -qxF "version: $$VERSION" charts/hybernate/Chart.yaml || { echo "Chart.yaml's version isn't $$VERSION"; exit 1; }
+	@grep -qxF "appVersion: \"v$$VERSION\"" charts/hybernate/Chart.yaml || { echo "Chart.yaml's appVersion isn't v$$VERSION"; exit 1; }
+	@grep -qxF "  newTag: v$$VERSION" config/manager/kustomization.yaml || { echo "config/manager's image isn't v$$VERSION"; exit 1; }
+	@# The install and verify commands name the version whole: after
+	@# --version, or as the image's or the chart's tag.
+	@pattern="(--version |hybernate:v?)$${VERSION//./\\.}([^0-9A-Za-z.-]|$$)"; \
+	for f in $(VERSIONED_DOCS); do \
+		grep -qE -- "$$pattern" "$$f" || { echo "$$f doesn't name $$VERSION; run make bump VERSION=$$VERSION"; exit 1; }; \
 	done
+	@base="$${VERSION%%-*}"; heading="^## \[$${base//./\\.}\] - "; \
+	if [[ "$$VERSION" == *-* ]]; then \
+		grep -qE -- "$$heading" CHANGELOG.md || { echo "CHANGELOG.md has no section for $$base"; exit 1; }; \
+	else \
+		grep -qE -- "$$heading[0-9]{4}-[0-9]{2}-[0-9]{2}$$" CHANGELOG.md || { \
+			echo "CHANGELOG.md's section for $$base isn't dated; run make bump VERSION=$$VERSION"; exit 1; }; \
+	fi
 
 .PHONY: release
 release: bump ## Bump version, commit, and tag. Usage: make release VERSION=0.1.2
-	@$(MAKE) --no-print-directory verify-version VERSION=$(VERSION)
-	@git add charts/hybernate/Chart.yaml config/manager/kustomization.yaml $(VERSIONED_DOCS)
+	@$(MAKE) --no-print-directory verify-version
+	@git add charts/hybernate/Chart.yaml config/manager/kustomization.yaml CHANGELOG.md $(VERSIONED_DOCS)
 	@# Versions bumped in an earlier commit leave nothing to commit, and the
 	@# release is tagged as it stands.
-	@git diff --cached --quiet || git commit -m "chore(release): bump version to v$(VERSION)"
-	@git tag -a v$(VERSION) -m "v$(VERSION)"
-	@echo "Tagged v$(VERSION). Run 'git push origin main v$(VERSION)' to release."
+	@git diff --cached --quiet || git commit -m "chore(release): bump version to v$$VERSION"
+	@git tag -a "v$$VERSION" -m "v$$VERSION"
+	@if [[ "$$VERSION" == *-* ]]; then \
+		echo "Tagged v$$VERSION. Run 'git push origin v$$VERSION' to rehearse the release."; \
+	else \
+		echo "Tagged v$$VERSION. Run 'git push origin main v$$VERSION' to release."; \
+	fi
 
 ##@ Build
 
@@ -285,7 +364,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build --build-arg VERSION=$(if $(VERSION),v$(VERSION),dev) -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -300,10 +379,12 @@ docker-push: ## Push docker image with the manager.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	- $(CONTAINER_TOOL) buildx create --name hybernate-builder
-	$(CONTAINER_TOOL) buildx use hybernate-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} .
-	- $(CONTAINER_TOOL) buildx rm hybernate-builder
+	@# A builder left by an interrupted run would make create fail.
+	@$(CONTAINER_TOOL) buildx rm hybernate-builder >/dev/null 2>&1 || true
+	$(CONTAINER_TOOL) buildx create --name hybernate-builder --use
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg VERSION=$(if $(VERSION),v$(VERSION),dev) --tag ${IMG} . || { \
+		$(CONTAINER_TOOL) buildx rm hybernate-builder; exit 1; }
+	$(CONTAINER_TOOL) buildx rm hybernate-builder
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
@@ -353,7 +434,7 @@ GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
-CONTROLLER_TOOLS_VERSION ?= v0.20.1
+CONTROLLER_TOOLS_VERSION ?= v0.22.0
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \

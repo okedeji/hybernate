@@ -202,6 +202,10 @@ func TestResolve(t *testing.T) {
 		{host: "nats"},
 		{host: "external"},
 		{host: "api.stripe.com"},
+		{host: "postgres.dev.svc.corp.internal", want: &postgres},
+		{host: "postgres-0.postgres-hl.dev.svc", want: &postgres, headless: true},
+		{host: "postgres.svc.example.com"},
+		{host: "postgres.svc"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {

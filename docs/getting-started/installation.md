@@ -117,9 +117,9 @@ Stop managing workloads while the operator is still running, so it can scale any
 
     `make undeploy`, and `kubectl delete -f install.yaml`, delete the CRD along with the operator.
 
-`helm uninstall` refuses to go ahead while any ManagedWorkload is left. A pre-delete hook, the `<fullname>-uninstall-guard` Job, lists them and fails, so the uninstall stops with `job hybernate-uninstall-guard failed` before removing anything. Above that error, Helm prints the ManagedWorkloads left and the steps above; older Helm releases, such as 3.16, don't print a hook's output, and `kubectl logs job/hybernate-uninstall-guard -n hybernate-system --all-containers` shows it, for an hour. A ManagedWorkload deleted just before you uninstall doesn't hold it up: the hook waits two and a half minutes for the operator to restore it, and for its doorman ports to drain, up to a minute. The hook runs the `registry.k8s.io/kubectl` image, which `uninstallGuard.image` can point at a mirror. Pass `--no-hooks` to skip it, or set `uninstallGuard.enabled: false` to drop it.
+`helm uninstall` refuses to go ahead while any ManagedWorkload is left. A pre-delete hook, the `<fullname>-uninstall-guard` Job, first waits up to two and a half minutes for ManagedWorkloads being deleted, so the operator can restore them and drain their doorman ports, which takes up to a minute; then, if any are left, it lists them and fails, so the uninstall stops with `job hybernate-uninstall-guard failed` before removing anything. A ManagedWorkload deleted just before you uninstall doesn't hold it up. Above that error, Helm prints the ManagedWorkloads left, as they are after the wait, and the steps above; older Helm releases, such as 3.16, don't print a hook's output, and `kubectl logs job/hybernate-uninstall-guard -n hybernate-system` shows it, for an hour. With `watchNamespaces`, it counts those in the watched namespaces, and any elsewhere that the operator took on, with its `hybernate.io/cleanup` finalizer. The hook runs the operator's own image. Pass `--no-hooks` to skip it, or set `guard.uninstall: false` to drop it.
 
-A refused uninstall leaves the release marked `uninstalling`, though everything still runs. Uninstalling again, once the ManagedWorkloads are gone, finishes it. Until then `helm upgrade` fails with `has no deployed releases`; `helm rollback hybernate <revision>`, with the last revision `helm history hybernate` lists, marks it deployed again. Argo CD 3.3 and later runs the guard as a PreDelete hook: deleting the Application while ManagedWorkloads are left is blocked, with a `DeletionError` condition, and Argo CD retries the hook until they're gone. To delete it anyway, set `uninstallGuard.enabled: false` in Git and sync first. Earlier versions of Argo CD don't run Helm's pre-delete hooks, so deleting the Application isn't guarded: stop managing the workloads before deleting it.
+A refused uninstall leaves the release marked `uninstalling`, though everything still runs. Uninstalling again, once the ManagedWorkloads are gone, finishes it. Until then `helm upgrade` fails with `has no deployed releases`; `helm rollback hybernate <revision>`, with the last revision `helm history hybernate` lists, marks it deployed again. Argo CD 3.3 and later runs the guard as a PreDelete hook: deleting the Application while ManagedWorkloads are left is blocked, with a `DeletionError` condition, and Argo CD retries the hook until they're gone. To delete it anyway, set `guard.uninstall: false` in Git and sync first. Earlier versions of Argo CD don't run Helm's pre-delete hooks, so deleting the Application isn't guarded: stop managing the workloads before deleting it.
 
 !!! warning
     Removing the operator or the CRD first skips step 2's restore: workloads that were paused stay at zero replicas, and their Services still send traffic to the doorman's deleted pods. Restore them by hand, as below.
@@ -138,6 +138,12 @@ If the operator was removed while ManagedWorkloads were left, with `helm uninsta
     ```
 
     A workload scaled by KEDA was held at zero through its ScaledObject, named in the ManagedWorkload's `status.pause.scaledObject`. Remove that ScaledObject's `autoscaling.keda.sh/paused-replicas` annotation, or set it back to `status.pause.scaledObjectPausedReplicas` if that's set.
+
+    Each paused workload also carries the same record in its `hybernate.io/paused-from` annotation, which you can read when its ManagedWorkload is gone. Remove the annotation once the workload is restored:
+
+    ```bash
+    kubectl annotate deployments,statefulsets --all -A hybernate.io/paused-from-
+    ```
 
 2. Delete the EndpointSlices that route paused workloads' Services to the doorman, so the Services use their own pods again:
 

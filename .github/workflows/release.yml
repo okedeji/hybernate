@@ -13,15 +13,17 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # The chart's version and appVersion, the kustomize image, and the docs'
-  # install and verify commands are committed with the release (make release
-  # does it), so installing from the tagged source gets the image the tag
-  # publishes.
+  # The chart's version and appVersion, the kustomize image, the docs'
+  # install and verify commands, and the changelog's date are committed with
+  # the release (make release does it), so installing from the tagged source
+  # gets the image the tag publishes. make verify-version refuses a tag that
+  # isn't a version first, before any step puts it in a command.
   versions:
     name: Versions match the tag
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - env:
           TAG: ${{ github.ref_name }}
         run: make verify-version VERSION="${TAG#v}"
@@ -38,8 +40,8 @@ jobs:
     needs: [versions]
     uses: ./.github/workflows/lint.yml
 
-  # Scanned before anything is pushed: once the release job pushes, the
-  # version's tag already points at the image.
+  # Scanned before anything is pushed: once the release job tags the image,
+  # users can pull it.
   security:
     name: Security
     needs: [versions]
@@ -55,10 +57,17 @@ jobs:
     needs: [versions]
     uses: ./.github/workflows/helm-smoke.yml
 
+  # Everything that can fail is done before anything users install from
+  # changes: the files are built, the image is pushed by digest alone, where
+  # nothing pulls it, and signed, and the GitHub release is drafted with
+  # every file. Only then is the image tagged, the chart pushed, latest
+  # moved and the release published, so a failure leaves at most a draft
+  # and an untagged image, and the workflow can be run again.
   release:
     name: Build and Release
     needs: [test, lint, security, e2e, helm-smoke]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write # the GitHub release
       packages: write # the image and chart in GHCR
@@ -67,77 +76,47 @@ jobs:
     env:
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          version: v3.22.1
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+        with:
+          version: 1.3.4
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-
-      # A pre-release, such as v0.3.0-rc.1, has a hyphen. It isn't tagged
-      # latest, so it's installed only by asking for it.
-      - name: Pick the image's tags
-        id: tags
+      # A pre-release, such as v0.3.0-rc.1, has a hyphen. It rehearses the
+      # release: everything is published but latest, so it's installed only
+      # by asking for it, and the docs site stays on the last release.
+      - name: Read the release's version
+        id: version
         run: |
-          image="${REGISTRY}/${IMAGE_NAME}"
-          {
-            echo "list<<EOF"
-            echo "${image}:${TAG}"
-            if [[ "$TAG" != *-* ]]; then echo "${image}:latest"; fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
           if [[ "$TAG" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "chart=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push multi-arch image
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.tags.outputs.list }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=${{ env.TAG }}
-            org.opencontainers.image.revision=${{ github.sha }}
-
-      - name: Attest the image's build provenance
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
-      - name: Sign container image
+      # A pre-release's notes are those of the version it rehearses.
+      - name: Extract the changelog for the release
         run: |
-          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-
-      - name: Install syft
-        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
-      - name: Generate SBOM
-        run: |
-          syft ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }} -o spdx-json=sbom.spdx.json
-
-      - name: Attach SBOM to image
-        run: |
-          cosign attest --yes --predicate sbom.spdx.json --type spdxjson ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          base="${TAG#v}"
+          base="${base%%-*}"
+          awk -v heading="## [${base}]" 'index($0, heading) == 1 {found = 1; next} /^## \[/ {if (found) exit} found' \
+            CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md's section for ${base} is empty or missing" >&2
+            exit 1
+          fi
 
       # Static, so the Linux binaries run on Alpine and Amazon Linux as well
-      # as glibc distributions, and krew-index requires the LICENSE in each.
+      # as glibc distributions. krew-index requires the LICENSE in each, and
+      # NOTICE credits the price data the plugin embeds.
       - name: Build kubectl-hybernate plugin binaries
         run: |
           for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
@@ -148,13 +127,15 @@ jobs:
             bin=kubectl-hybernate-${os}-${arch}${ext}
             CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=${TAG}" \
               -o "$bin" ./cmd/kubectl-hybernate
-            tar czf "kubectl-hybernate-${os}-${arch}.tar.gz" "$bin" LICENSE
+            tar czf "kubectl-hybernate-${os}-${arch}.tar.gz" "$bin" LICENSE NOTICE
           done
 
       - name: Generate and validate the Krew manifest
+        env:
+          REPOSITORY: ${{ github.repository }}
         run: |
           mkdir -p krew
-          ./hack/krew-manifest.sh "$TAG" "${{ github.repository }}" > krew/hybernate.yaml
+          ./hack/krew-manifest.sh "$TAG" "$REPOSITORY" > krew/hybernate.yaml
           # The release's archives aren't uploaded yet, so installing from
           # the manifest's URIs is left to krew-index's own checks.
           GOBIN="$PWD/krew" go install sigs.k8s.io/krew/cmd/validate-krew-manifest@v0.5.0
@@ -162,17 +143,80 @@ jobs:
           cp krew/hybernate.yaml krew-hybernate.yaml
 
       - name: Generate install manifest
-        run: |
-          make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+        run: make build-installer IMG="${REGISTRY}/${IMAGE_NAME}:${TAG}"
 
-      # The chart's version is the tag without its v, as Chart.yaml has it.
-      - name: Package, push, and sign Helm chart
+      - name: Package the Helm chart
+        env:
+          CHART_VERSION: ${{ steps.version.outputs.chart }}
+        run: helm package charts/hybernate --version "$CHART_VERSION" --app-version "$TAG"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Pushed by digest, untagged, so nothing pulls it until it's tagged.
+      - name: Build and push the multi-arch image by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          build-args: VERSION=${{ env.TAG }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.TAG }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Attest the image's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          # Storage records are for organizations' artifact metadata, which
+          # a personal account's repository has none of.
+          create-storage-record: false
+
+      - name: Sign the image, and attach an SBOM for each platform
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          helm package charts/hybernate --version "${TAG#v}" --app-version "${TAG}"
-          helm push hybernate-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts 2>&1 | tee helm-push.log
-          digest=$(awk '/^Digest:/ {print $2}' helm-push.log)
-          test -n "$digest"
-          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/hybernate@${digest}
+          image="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          cosign sign --yes "$image"
+          for platform in linux/amd64 linux/arm64; do
+            sbom="sbom-${platform//\//-}.spdx.json"
+            syft scan "registry:${image}" --platform "$platform" -o "spdx-json=${sbom}"
+            cosign attest --yes --predicate "$sbom" --type spdxjson "$image"
+          done
+
+      # A report, not a gate: security.yml fails the release on fixable
+      # vulnerabilities before this job runs, so a flaky download of Trivy's
+      # database mustn't stop it here.
+      - name: Report the amd64 image's vulnerabilities
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: table
+          output: vulnerabilities-linux-amd64.txt
+      - name: Report the arm64 image's vulnerabilities
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: table
+          output: vulnerabilities-linux-arm64.txt
 
       # The release uploads each file under its base name, so they're hashed
       # from one directory: checksums.txt then names them as users download
@@ -180,7 +224,7 @@ jobs:
       - name: Collect the release files
         run: |
           mkdir release
-          cp dist/install.yaml hybernate-*.tgz kubectl-hybernate-*.tar.gz krew-hybernate.yaml sbom.spdx.json release/
+          cp dist/install.yaml hybernate-*.tgz kubectl-hybernate-*.tar.gz krew-hybernate.yaml sbom-*.spdx.json release/
 
       - name: Sign the release files' checksums
         working-directory: release
@@ -189,29 +233,60 @@ jobs:
           cosign sign-blob --yes --bundle ../checksums.txt.sigstore.json ../checksums.txt
 
       - name: Attest the release files' build provenance
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: checksums.txt
 
-      - name: Report the image's vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          format: table
-          output: vulnerabilities.txt
-
-      - name: Extract changelog for release
+      # A draft left by an earlier, failed run of this release is replaced;
+      # a published release never is.
+      - name: Draft the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
-          VERSION="${TAG#v}"
-          awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found" CHANGELOG.md > release-notes.md
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "$TAG is already released" >&2
+              exit 1
+            fi
+            gh release delete "$TAG" --yes
+          fi
+          flags=(--draft --verify-tag --title "$TAG" --notes-file release-notes.md)
+          if [ "$PRERELEASE" = true ]; then
+            flags+=(--prerelease)
+          fi
+          shopt -s nullglob
+          reports=(vulnerabilities-*.txt)
+          gh release create "$TAG" "${flags[@]}" release/* checksums.txt checksums.txt.sigstore.json "${reports[@]}"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          body_path: release-notes.md
-          prerelease: ${{ steps.tags.outputs.prerelease }}
-          files: |
-            release/*
-            checksums.txt
-            checksums.txt.sigstore.json
-            vulnerabilities.txt
+      # From here on, users can install the release.
+      - name: Tag the image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: oras tag "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" "$TAG"
+
+      # The chart's digest is read back from the registry: helm push's
+      # output isn't an interface.
+      - name: Push and sign the Helm chart
+        env:
+          CHART_VERSION: ${{ steps.version.outputs.chart }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          charts="${REGISTRY}/${OWNER}/charts"
+          helm push "hybernate-${CHART_VERSION}.tgz" "oci://${charts}"
+          digest=$(oras resolve "${charts}/hybernate:${CHART_VERSION}")
+          cosign sign --yes "${charts}/hybernate@${digest}"
+
+      - name: Tag the image latest
+        if: steps.version.outputs.prerelease == 'false'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: oras tag "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" latest
+
+      # Publishing a release, not a pre-release, moves releases/latest, which
+      # the install docs and the krew manifest download from. The docs
+      # workflow publishes the site once this run succeeds.
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --draft=false

@@ -487,7 +487,7 @@ func TestEnable_GitOpsManaged(t *testing.T) {
 func appliedAs(manager, fields string) interceptor.Funcs {
 	set := func(d *appsv1.Deployment) {
 		d.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: manager, Operation: metav1.ManagedFieldsOperationApply,
-			FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(fields)}}}
+			FieldsType: "FieldsV1", FieldsV1: metav1.NewFieldsV1(fields)}}
 	}
 	return interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
@@ -732,6 +732,54 @@ func TestEnable_NamespaceFromGit(t *testing.T) {
 Not changed, because their manifests come from Git; change them there:
   namespace dev (Argo CD application platform): set the annotation hybernate.io/dry-run: "false"
 `, out.String())
+}
+
+// A user who may edit the namespace's workloads but not the namespace, as
+// with edit or admin bound in it, still ends dry-run for all of them: each
+// gets its own "false", which wins over the namespace's annotation, left
+// alone. With nothing but the namespace to change, that's refused.
+func TestEnable_NamespaceNotEditable(t *testing.T) {
+	denied := interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object,
+		patch client.Patch, opts ...client.PatchOption) error {
+		if _, ok := obj.(*corev1.Namespace); ok {
+			return apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, obj.GetName(), nil)
+		}
+		return c.Patch(ctx, obj, patch, opts...)
+	}}
+	measuringNamespace := map[string]string{v1alpha1.AnnotationDryRun: "true"}
+
+	t.Run("workloads to change", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(denied).WithObjects(
+			enableNamespaceObj(optedIn, measuringNamespace),
+			enableDeployment("web", nil, measuring(nil)), labelManaged("web", true),
+			enableDeployment("worker", nil, nil), labelManaged("worker", true),
+		).Build()
+		var out bytes.Buffer
+
+		require.NoError(t, enableNamespace(context.Background(), c, "dev", enableOptions{all: true}, &out))
+
+		value, _ := namespaceDryRun(t, c)
+		assert.Equal(t, "true", value, "the namespace is left alone")
+		for _, name := range []string{"web", "worker"} {
+			value, _ := dryRunOf(t, c, name)
+			assert.Equal(t, "false", value, name)
+		}
+		assert.Equal(t, "namespace dev: your access doesn't allow changing its hybernate.io/dry-run annotation, so "+
+			"it was left alone; each workload gets its own \"false\" instead, which wins over it\n"+
+			"2 workloads in dev: dry-run ended, Hybernate will pause them while idle\n", out.String())
+	})
+
+	t.Run("only the namespace to change", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(denied).WithObjects(
+			enableNamespaceObj(optedIn, measuringNamespace),
+			enableDeployment("web", nil, map[string]string{v1alpha1.AnnotationDryRun: "false"}),
+			labelManaged("web", false),
+		).Build()
+
+		err := enableNamespace(context.Background(), c, "dev", enableOptions{all: true}, &bytes.Buffer{})
+
+		assert.True(t, apierrors.IsForbidden(err), "%v", err)
+	})
 }
 
 func TestWorkloadArg(t *testing.T) {

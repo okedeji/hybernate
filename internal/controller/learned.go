@@ -38,6 +38,7 @@ import (
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/discovery"
+	"github.com/okedeji/hybernate/internal/gitops"
 )
 
 // relearnAfter is how long learned dependencies stand before they're
@@ -60,13 +61,17 @@ const (
 
 // learnDependencies finds the workloads this one's environment points at,
 // the same way the scan does, and records them, so they're held and woken
-// like dependsOn without anyone writing it.
+// like dependsOn without anyone writing it. A paused workload isn't
+// relearned until its pod template or ignore list changes: nothing it
+// runs reads a changed ConfigMap meanwhile, and it's learned again once
+// it wakes.
 func (r *Reconciler) learnDependencies(ctx context.Context, workload *v1alpha1.ManagedWorkload,
 	target client.Object) error {
 	ignored := ignoredDependencies(workload, target)
-	from := learnedFrom(target, ignored)
+	from := learnedFrom(r.templateHashes.of(workload.UID, target), ignored)
 	now := r.clockTime()
-	if l := workload.Status.LearnedDependencies; l != nil && l.From == from && now.Sub(l.At.Time) < relearnAfter {
+	if l := workload.Status.LearnedDependencies; l != nil && l.From == from &&
+		(workload.Status.Phase == v1alpha1.PhasePaused || now.Sub(l.At.Time) < relearnAfter) {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, dependencyTimeout)
@@ -314,13 +319,13 @@ func ignoredDependencies(workload *v1alpha1.ManagedWorkload, target client.Objec
 
 // learnedFrom identifies the pod template and ignore list dependencies are
 // learned from.
-func learnedFrom(target client.Object, ignored map[string]bool) string {
+func learnedFrom(template string, ignored map[string]bool) string {
 	names := make([]string, 0, len(ignored))
 	for name := range ignored {
 		names = append(names, name)
 	}
 	slices.Sort(names)
-	sum := sha256.Sum256([]byte(podTemplateHash(target) + "\n" + strings.Join(names, ",")))
+	sum := sha256.Sum256([]byte(template + "\n" + strings.Join(names, ",")))
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -381,16 +386,25 @@ const wakeLearnTimeout = 2 * time.Second
 // learnFromWake learns that the workload whose request woke this one
 // depends on it. Only a workload Hybernate manages counts: a request through
 // an ingress controller comes from the controller's pod, which depends on
-// nothing.
+// nothing. Only an address the doorman stamped counts, and only a sender in
+// a namespace this workload's allows dependents from.
 func (r *Reconciler) learnFromWake(ctx context.Context, workload *v1alpha1.ManagedWorkload) error {
-	ip := workload.Annotations[v1alpha1.AnnotationLastRequestFrom]
-	if ip == "" || wakeSource(workload) != v1alpha1.ActivitySourceRequest {
+	if workload.Annotations[v1alpha1.AnnotationLastRequestFrom] == "" ||
+		wakeSource(workload) != v1alpha1.ActivitySourceRequest {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, wakeLearnTimeout)
 	defer cancel()
 
-	pod, found, err := r.podAt(ctx, ip)
+	ip, err := r.stampedByDoorman(ctx, workload)
+	if err != nil || ip == "" {
+		return err
+	}
+	namespaces, err := r.senderNamespaces(ctx, workload.Namespace)
+	if err != nil {
+		return err
+	}
+	pod, found, err := r.podAt(ctx, ip, namespaces)
 	if err != nil || !found {
 		return err
 	}
@@ -449,19 +463,66 @@ func learnedList(l *v1alpha1.LearnedDependencies) []v1alpha1.LearnedDependency {
 	return l.Dependencies
 }
 
-// podAt is the pod with the IP, and false for none, or for pods on the
-// node's network, which share the node's IP and so can't be told apart.
-func (r *Reconciler) podAt(ctx context.Context, ip string) (*corev1.Pod, bool, error) {
+// stampedByDoorman is the workload's last-request-from when the doorman set
+// it, or "". Anyone who can patch a ManagedWorkload can set the annotation
+// too, and a forged address would have Hybernate write a dependency into
+// the ManagedWorkload of whatever pod has it. The doorman writes under
+// Hybernate's field manager, which the API server records; the cache drops
+// managed fields, so the workload is read past it.
+func (r *Reconciler) stampedByDoorman(ctx context.Context, workload *v1alpha1.ManagedWorkload) (string, error) {
 	reader := r.PodReader
 	if reader == nil {
 		reader = r.Client
 	}
-	// Listing pods across namespaces needs a ClusterRole, which a
-	// namespaced install doesn't have; the watched namespaces are searched
-	// one by one instead.
-	namespaces := r.WatchNamespaces
+	var live v1alpha1.ManagedWorkload
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(workload), &live); err != nil {
+		return "", fmt.Errorf("reading who set %s: %w", v1alpha1.AnnotationLastRequestFrom, err)
+	}
+	writer, ok := gitops.FieldWriter(live.ManagedFields, "metadata", "annotations", v1alpha1.AnnotationLastRequestFrom)
+	if !ok || writer.Manager != v1alpha1.FieldManager {
+		return "", nil
+	}
+	return live.Annotations[v1alpha1.AnnotationLastRequestFrom], nil
+}
+
+// senderNamespaces are the namespaces a workload depending on one in
+// namespace can be in: namespace itself, and those its
+// hybernate.io/dependents-from allows, as far as Hybernate watches them.
+// A search of every namespace is metav1.NamespaceAll.
+func (r *Reconciler) senderNamespaces(ctx context.Context, namespace string) ([]string, error) {
+	value, err := r.dependentsFromOf(ctx, namespace)
+	if err != nil {
+		return nil, err
+	}
+	allowed := []string{namespace}
+	for entry := range strings.SplitSeq(value, ",") {
+		switch entry = strings.TrimSpace(entry); entry {
+		case "*":
+			if len(r.WatchNamespaces) > 0 {
+				return r.WatchNamespaces, nil
+			}
+			return []string{metav1.NamespaceAll}, nil
+		case "", namespace:
+		default:
+			allowed = append(allowed, entry)
+		}
+	}
+	if len(r.WatchNamespaces) > 0 {
+		allowed = slices.DeleteFunc(allowed, func(ns string) bool { return !slices.Contains(r.WatchNamespaces, ns) })
+	}
+	return allowed, nil
+}
+
+// podAt is the pod with the IP in one of namespaces, and false for none,
+// or for pods on the node's network, which share the node's IP and so
+// can't be told apart.
+func (r *Reconciler) podAt(ctx context.Context, ip string, namespaces []string) (*corev1.Pod, bool, error) {
+	reader := r.PodReader
+	if reader == nil {
+		reader = r.Client
+	}
 	if len(namespaces) == 0 {
-		namespaces = []string{metav1.NamespaceAll}
+		return nil, false, nil
 	}
 	for _, ns := range namespaces {
 		var pods corev1.PodList
@@ -513,7 +574,7 @@ func (r *Reconciler) podAt(ctx context.Context, ip string) (*corev1.Pod, bool, e
 // maxPodPages pages.
 const (
 	podPageSize = 500
-	maxPodPages = 20
+	maxPodPages = 4
 )
 
 // ipSamplePods is how many pods are read to tell how pods' addresses are

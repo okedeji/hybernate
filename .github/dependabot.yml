@@ -33,3 +33,11 @@ updates:
     groups:
       images:
         patterns: ["*"]
+    # Go is bumped by hand, in the Dockerfile, go.mod's toolchain and the
+    # devcontainer together, which make verify-go-version holds to.
+    ignore:
+      - dependency-name: golang
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+          - version-update:semver-patch

@@ -11,6 +11,7 @@ jobs:
   test-e2e:
     name: E2E (Kubernetes ${{ matrix.kubernetes }})
     runs-on: ubuntu-latest
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -21,21 +22,27 @@ jobs:
             kind: v0.29.0
             kind-sha256: c72eda46430f065fb45c5f70e7c957cc9209402ef309294821978677c8fb3284
             node-image: kindest/node:v1.30.13@sha256:397209b3d947d154f6641f2d0ce8d473732bd91c87d9575ade99049aa33cd648
+            kubectl: v1.30.13
+            kubectl-sha256: b92bd89b27386b671841d5970b926b645c2ae44e5ca0663cff0f1c836a1530ee
           - kubernetes: "1.37"
             kind: v0.33.0
             kind-sha256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
             node-image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+            kubectl: v1.37.0
+            kubectl-sha256: 6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
     steps:
       - name: Clone the code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - uses: ./.github/actions/setup-kind
         with:
           version: ${{ matrix.kind }}
           sha256: ${{ matrix.kind-sha256 }}
+          kubectl-version: ${{ matrix.kubectl }}
+          kubectl-sha256: ${{ matrix.kubectl-sha256 }}
       - name: Running Test e2e
         run: make test-e2e KIND_NODE_IMAGE=${{ matrix.node-image }}
 
@@ -47,6 +54,7 @@ jobs:
     needs: [test-e2e]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - env:
           RESULT: ${{ needs.test-e2e.result }}

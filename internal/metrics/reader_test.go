@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/cost"
@@ -125,11 +127,12 @@ func TestReader_InjectedSidecar(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("activity counts only the app", func(t *testing.T) {
-		used, err := r.WorkloadCPUMillis(ctx, workload)
+		used, pods, err := r.WorkloadCPUMillis(ctx, workload)
 		require.NoError(t, err)
 		requested, err := r.CPURequestPerReplica(ctx, workload)
 		require.NoError(t, err)
 		assert.InDelta(t, 0.1, used/requested, 0.001, "10% of the app's own request, not 40%")
+		assert.Equal(t, 1, pods)
 	})
 
 	t.Run("pausing frees the whole pod's requests", func(t *testing.T) {
@@ -298,13 +301,74 @@ func TestReader_CountsOnlyTheTargetsPods(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	used, err := r.WorkloadCPUMillis(ctx, workload)
+	used, pods, err := r.WorkloadCPUMillis(ctx, workload)
 	require.NoError(t, err)
 	assert.InDelta(t, 100, used, 0.001, "only the stable pod's usage")
+	assert.Equal(t, 1, pods, "measured over the stable pod alone")
 
 	cpu, _, err := r.PodRequestsPerReplica(ctx, workload)
 	require.NoError(t, err)
 	assert.InDelta(t, 100, cpu, 0.001, "requests read from the stable pod")
+}
+
+// A Metrics API that fails isn't read again for a minute: every awake
+// workload reads it each minute, and each would otherwise wait out a
+// timeout to learn of the outage, holding a reconcile worker.
+func TestReader_BacksOffAFailingMetricsAPI(t *testing.T) {
+	web := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop"},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "web"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{container("web", "100m")}},
+			},
+		},
+	}
+	pod, used := podOf("web-5d8f9-x2kqp", "5d8f9", "100m")
+	var lists int
+	down := true
+	c := fake.NewClientBuilder().WithScheme(readerScheme(t)).WithObjects(web, pod, used).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*metricsv1beta1.PodMetricsList); ok {
+					lists++
+					if down {
+						return errors.New("the server is currently unable to handle the request")
+					}
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).Build()
+	r := NewReader(c, c)
+	now := time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	workload := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop"},
+		Spec:       v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindDeployment, Name: "web"}},
+	}
+	ctx := context.Background()
+	read := func() error {
+		_, _, err := r.WorkloadCPUMillis(ctx, workload)
+		return err
+	}
+
+	require.Error(t, read())
+	now = now.Add(metricsAPIBackoff - time.Second)
+	err := read()
+	require.ErrorIs(t, err, ErrMetricsAPIBackingOff)
+	assert.Contains(t, err.Error(), "unable to handle the request", "says what failed")
+	assert.Equal(t, 1, lists, "not read again within the backoff")
+
+	now = now.Add(time.Second)
+	require.Error(t, read())
+	assert.Equal(t, 2, lists, "read again once it's up")
+
+	down = false
+	now = now.Add(metricsAPIBackoff)
+	require.NoError(t, read())
+	require.NoError(t, read())
+	assert.Equal(t, 4, lists, "back, it's read every time")
 }
 
 func TestRunBy(t *testing.T) {

@@ -1,6 +1,6 @@
 # Wake on Request
 
-A paused workload has no pods, so nothing answers its Service. With wake on request, the first request wakes it instead: the connection is held while the workload starts, then passed to one of its Ready pods. The caller sees one slow response, not an error.
+A paused workload has no pods, so nothing answers its Service. With wake on request, the first request wakes it instead: the connection is held while the workload starts, then passed to one of its Ready pods. The caller usually sees one slow response, not an error; [What the caller sees](#what-the-caller-sees) lists when it doesn't.
 
 It's on by default for every workload Hybernate pauses on its own. There's nothing to configure.
 
@@ -103,6 +103,8 @@ spec:
     page: false
 ```
 
+For a workload opted in with the label, set the annotation `hybernate.io/wake-page: "false"` on it instead.
+
 ## How long a connection is held
 
 The doorman holds each connection for up to `wake.maxWait`, 2 minutes by default and at most 1 hour, which is the most the ManagedWorkload accepts. If no pod is Ready by then, it closes the connection. The wake carries on, so a retry a little later succeeds.
@@ -112,6 +114,8 @@ spec:
   wake:
     maxWait: 5m     # a slow starter, such as a database replaying its log
 ```
+
+For a workload opted in with the label, set the annotation `hybernate.io/wake-max-wait: "5m"` on it instead.
 
 Callers have their own timeouts. Most HTTP clients wait at least 30 seconds, and browsers wait minutes. A proxy in front of the Service can give up sooner: ingress-nginx closes an upstream request after 60 seconds by default. For a workload that takes longer than that to start, raise the Ingress timeout to match `maxWait`:
 
@@ -126,12 +130,13 @@ metadata:
 So that a flood of connections can't exhaust the doorman, or wake workloads faster than the cluster can start them:
 
 - Each doorman pod holds at most 2048 connections: at most 256 for one workload, at most 1024 from one source IP, and at most 128 from one source IP for one workload. A connection over these caps is closed at once, with nothing sent.
+- Each doorman pod passes through at most 1024 connections at once, at most 512 from one source IP. A connection over these caps is held, as if the workload weren't Ready yet, until a place frees or `maxWait` runs out. A passed-through connection that carries nothing either way for 10 minutes is closed, so a caller that vanished without closing doesn't keep its place; one whose client or server pings, as WebSockets and database pools do, stays open. Once the workload is awake and its route starts draining, connections still passing through the doorman are closed after 5 minutes, so long-lived callers reconnect to the pods directly.
 - Wakes are rate-limited per source IP (a burst of 30, then one every 2 seconds) and overall (a burst of 200, then 10 a second). Only a request that would actually wake a paused workload counts, and one refused overall doesn't use up its source's allowance. A caller whose wake is over the limit isn't turned away: a browser gets the waking-up page, anything else is held, and the wake is retried every 2 seconds until the allowance lets it through or `maxWait` runs out.
-- While a connection is held, the doorman reads what the caller sends, so that a caller who gives up is let go at once: up to 1MiB per connection, and 32MiB across all of them. A larger request body waits in the network until the workload is up, and a caller who leaves partway through one is let go only at `maxWait`. A caller that closes its connection has left, whatever its protocol, and is never passed to the workload: over TCP, closing and shutting down only the sending side look the same, and nearly every caller that does either has given up. So a client that sends its request and then shuts down its side to wait for the answer, as `nc -N` does, is dropped while the workload is asleep; leave the connection open instead.
+- While a connection is held, the doorman reads what the caller sends, so that a caller who gives up is let go at once: up to 1MiB per connection, and 32MiB across all of them. The first 8KiB of each doesn't count towards the 32MiB, so a caller who sent an ordinary request and left is let go at once even while large uploads have used it up. A larger request body waits in the network until the workload is up, or until other held connections free some of the 32MiB, and a caller who leaves partway through one is let go only then. A caller that closes its connection has left, whatever its protocol, and is never passed to the workload: over TCP, closing and shutting down only the sending side look the same, and nearly every caller that does either has given up. So a client that sends its request and then shuts down its side to wait for the answer, as `nc -N` does, is dropped while the workload is asleep; leave the connection open instead.
 
 The source IP is the address the doorman sees, which for traffic through an ingress controller is the controller's pod. That's why the caps are per workload as well as per source: every user behind one ingress pod shares its address, and a burst to one environment mustn't crowd out the others. The cap on one workload, whatever the source, keeps one that never becomes Ready from taking every place.
 
-When a doorman pod shuts down, it reports itself not Ready at once, so the operator moves paused workloads' EndpointSlices to the other doorman pods. Only the operator can move them, and when it's being upgraded or restarted at the same time it takes a few seconds to take over, so the stopping pod goes on holding and passing through new connections for 15 seconds. Then it stops accepting them, and gives those it holds or passes through the rest of 25 seconds to finish. The chart gives the pod 40 seconds in all, after a 5-second sleep that lets kube-proxy and load balancers stop sending it new connections.
+When a doorman pod shuts down, it reports itself not Ready at once, so the operator moves paused workloads' EndpointSlices to the other doorman pods: it rewrites only their endpoints, many at once, so a thousand paused Services move in about ten seconds. A rollout of the doorman starts each new pod, and waits 5 seconds after it's Ready, before stopping an old one. Only the operator can move them, and when it's being upgraded or restarted at the same time it takes a few seconds to take over, so the stopping pod goes on holding and passing through new connections for 15 seconds. Then it stops accepting them, and gives those it holds or passes through the rest of 25 seconds to finish. The chart gives the pod 40 seconds in all, after a 5-second sleep that lets kube-proxy and load balancers stop sending it new connections.
 
 When a workload stops being routed, the doorman goes on serving its port for 30 seconds, so a browser's last refresh of the waking-up page doesn't land on a closed port, and the operator gives that port to no other workload for a minute. The operator records the minute in the ManagedWorkload's status, so a newly elected leader honours it too, and a deleted ManagedWorkload stays until it's over, up to a minute after its routing is removed.
 
@@ -160,7 +165,8 @@ Requests to the paused workload then fail, as they would without Hybernate. With
 | The Deployment or StatefulSet is deleted | Routing is removed, since nothing would start the pods a held request waits for. `TargetAvailable=False`, reason `TargetNotFound`; requests fail as they would without Hybernate |
 | No doorman pod is Ready | `WakeOnRequest=False`, reason `DoormanUnavailable`, and routing is removed. Requests fail until a doorman pod is back |
 | All doorman ports are in use | `WakeOnRequest=False`, reason `NoFreePort`. The doorman has 10,000 ports, one per paused Service port in the cluster |
-| Routing failed, such as an EndpointSlice write being refused | `WakeOnRequest=False`, reason `RoutingFailed`, with a warning event. It's retried with backoff, from 5 seconds up to 5 minutes. Routing problems never hold up a pause or a wake |
+| The workload would hold more than 32 doorman ports, or its namespace more than 256 | `WakeOnRequest=False`, reason `TooManyPorts`, so one tenant can't use up the ports every namespace shares. Set the caps with the Helm values `doorman.portsPerWorkload` and `doorman.portsPerNamespace` |
+| Routing failed, such as an EndpointSlice write being refused, or an EndpointSlice that isn't the doorman's already having the name the doorman's would take (`<service>-o<hash>`), which it never overwrites | `WakeOnRequest=False`, reason `RoutingFailed`, with a warning event. It's retried with backoff, from 5 seconds up to 5 minutes. Routing problems never hold up a pause or a wake |
 
 ## Network policies
 
@@ -206,6 +212,8 @@ doorman:
 
 Each entry is a NetworkPolicy peer, so `podSelector` and `ipBlock` work too. Everyone else is refused before reaching the doorman. The chart's policy also keeps the doorman's metrics port open to namespaces labelled `metrics: enabled`. Setting `ingressFrom` without `networkPolicy.enabled` is refused at install, since it would create no policy and leave the doorman open. Don't add a policy of your own beside the chart's: NetworkPolicies add up, so the chart's open routing ports would still admit everyone.
 
+Traffic from outside the cluster through a NodePort or LoadBalancer Service usually arrives with a node's address, since kube-proxy rewrites the source of connections it forwards to another node. A namespace or pod selector doesn't match a node, so with `ingressFrom` set those callers are refused: add your nodes' CIDRs as an `ipBlock` entry, or the load balancer's addresses if it preserves the client's. A routed Service with `externalTrafficPolicy: Local` keeps the client's address, but kube-proxy then sends it only to endpoints on the node it arrived at, so external callers reach the doorman only through nodes that run a doorman pod.
+
 With kustomize, write the policy yourself:
 
 ```yaml
@@ -236,7 +244,7 @@ spec:
 
 The second rule keeps the doorman's metrics port reachable for Prometheus; leave it out if you don't scrape it.
 
-Limit the doorman's egress too. It only ever dials Pod-backed IP endpoints of EndpointSlices the EndpointSlice controller manages, and never loopback, link-local, or cloud metadata addresses (AWS's `fd00:ec2::254` and Alibaba Cloud's `100.100.100.200` included), but anyone who can write EndpointSlices in a namespace can forge those labels, and an egress policy bounds where that could send it. The chart can create one, allowing only your pod CIDRs and the API server:
+Limit the doorman's egress too. It only ever dials Pod-backed IP endpoints of EndpointSlices the EndpointSlice controller manages, never loopback, link-local, or cloud metadata addresses (AWS's `fd00:ec2::254` and Alibaba Cloud's `100.100.100.200` included), and only an address that the pod the endpoint names, in the Service's namespace, really has. Anyone who can write EndpointSlices in a namespace can forge the controller's label, but that sends the doorman only to the namespace's own pods. An egress policy enforces the same bounds in the network. The chart can create one, allowing only your pod CIDRs and the API server:
 
 ```yaml
 doorman:
@@ -250,12 +258,12 @@ doorman:
 
 List every IP family your cluster uses, and the node CIDRs too if a routed workload uses `hostNetwork`. `apiServer` is the API server's endpoint addresses, not the `kubernetes` Service's ClusterIP, since policies apply after the Service is resolved.
 
-The doorman's ServiceAccount can patch ManagedWorkloads, to set `hybernate.io/last-request`. A ValidatingAdmissionPolicy that lets that ServiceAccount change only the `hybernate.io/last-request` and `hybernate.io/last-request-from` annotations would narrow that further; the chart doesn't ship one.
+The doorman's ServiceAccount can patch ManagedWorkloads, to set `hybernate.io/last-request`. The chart's ValidatingAdmissionPolicy (`doorman.admissionPolicy.enabled`, on by default, and in the kustomize manifests too) narrows that: it lets the ServiceAccount change only the `hybernate.io/last-request` and `hybernate.io/last-request-from` annotations. See [Security](../reference/security.md#the-doorman-is-a-way-in-to-paused-workloads).
 
 ## What the caller sees
 
 - **A browser**: the waking-up page at once, then the app on the first reload after one of its pods is Ready.
-- **Anything else, from a pod in the cluster or through an Ingress**: one slow response while the workload starts, then a normal one.
+- **Anything else, from a pod in the cluster or through an Ingress**: usually one slow response while the workload starts, then a normal one. Not when something between the caller and the workload gives up first: behind ingress-nginx, a workload that takes longer than its 60-second default `proxy-read-timeout` gets the caller a 504 (see [How long a connection is held](#how-long-a-connection-is-held)); with Istio's STRICT mTLS, the woken pod's sidecar refuses the doorman and the caller gets a 503 (see [Compatibility](../reference/compatibility.md#service-meshes)). The cases below are the others.
 - **The client's source IP**: the woken pod sees the doorman's IP for held connections, not the caller's. Only the connections that arrive while the workload is paused or waking go through the doorman. The doorman records the caller's address on the ManagedWorkload as `hybernate.io/last-request-from`, so Hybernate can [learn](dependencies.md#learned-dependencies) which workload sent it.
 - **Right after the pause**: for a few seconds, until kube-proxy, ingress controllers and the doorman itself pick up the new route, a request can be refused or get a 502 from an ingress, as after any scale-down. A retry is held.
 - **A connection held past `maxWait`, or one whose woken pods can't be reached**: it's closed with no response, which most clients report as an empty reply or a connection reset. A `RequestNotServed` warning event on the ManagedWorkload names the Service, how long the request waited and why; each doorman pod emits it at most once a minute per workload.

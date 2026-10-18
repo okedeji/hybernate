@@ -143,7 +143,7 @@ In dry-run the phase goes `Running` → `Idle` when the clock runs out, or a pau
     kubectl hybernate enable --all -n staging   # every workload in the namespace
     ```
 
-    For a labelled workload, `enable` sets its own `hybernate.io/dry-run` annotation to `"false"`, which wins over its namespace's and the cluster default. With `--all` it sets the namespace's annotation to `"false"` instead and drops the workloads' own. For a ManagedWorkload you wrote, it sets `spec.dryRun: false`. If Argo CD or Flux applies the object, it changes nothing and prints the change to make in Git instead. See [`kubectl hybernate enable`](../getting-started/kubectl-plugin.md#enable-a-workload).
+    For a labelled workload, `enable` sets its own `hybernate.io/dry-run` annotation to `"false"`, which wins over its namespace's and the cluster default. With `--all`, when the namespace's annotation or the cluster default keeps any workload in dry-run, it sets the namespace's annotation to `"false"` instead and drops the workloads' own, or, when your access doesn't allow changing the namespace, sets each workload's own; when each is in dry-run by its own annotation, it sets each to `"false"`. For a ManagedWorkload you wrote, it sets `spec.dryRun: false`. If a GitOps tool (Argo CD, Flux, Fleet, kapp or Kluctl) applies the setting, it changes nothing and prints the change to make in Git instead. See [`kubectl hybernate enable`](../getting-started/kubectl-plugin.md#enable-a-workload).
 
 ## When to Use Dry Run
 

@@ -21,6 +21,11 @@ spec:
           annotations:
             summary: "Hybernate reconcile error rate is high"
             description: "Controller {{ "{{" }} $labels.controller {{ "}}" }} is seeing >0.1 errors/sec for 10 minutes."
+        {{- /*
+        These match the scrape jobs the chart's ServiceMonitors make, and
+        would fire forever without them.
+        */}}
+        {{- if .Values.metrics.serviceMonitor.enabled }}
         - alert: HybernateDown
           expr: absent(up{job="{{ include "hybernate.fullname" . }}-metrics"} == 1)
           for: 5m
@@ -38,6 +43,7 @@ spec:
           annotations:
             summary: "Hybernate doorman is down"
             description: "No healthy doorman target has been scraped for 5 minutes, so requests to paused workloads fail instead of waking them."
+        {{- end }}
         {{- end }}
     - name: hybernate.warning
       rules:

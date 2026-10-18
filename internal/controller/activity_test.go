@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,6 +43,7 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/forecast"
 	opmetrics "github.com/okedeji/hybernate/internal/metrics"
+	"github.com/okedeji/hybernate/internal/signal"
 )
 
 // idleCPU is usage well under the 10% default threshold: 5m of 1000m.
@@ -147,6 +150,14 @@ func TestActivityClock_StaysAwake(t *testing.T) {
 			wantSource: v1alpha1.ActivitySourceCPU,
 		},
 		{
+			name:     "one pod of three serving while the others are Pending",
+			target:   clockTarget("app:v1", nil),
+			workload: func(d *appsv1.Deployment) *v1alpha1.ManagedWorkload { return clockWorkload(stale, d) },
+			// 25% of the one pod's request; 8% of all three replicas'.
+			metrics:    stubMetrics{cpuMillis: 250, cpuPerReplica: 1000, replicas: 3, measuredPods: 1},
+			wantSource: v1alpha1.ActivitySourceCPU,
+		},
+		{
 			name:   "rollout changed the pod template",
 			target: clockTarget("app:v2", nil),
 			workload: func(_ *appsv1.Deployment) *v1alpha1.ManagedWorkload {
@@ -236,6 +247,33 @@ func TestActivityClock_MalformedAnnotationIsIgnored(t *testing.T) {
 	assert.Equal(t, 1, pauser.pauseCalls)
 }
 
+// A value that isn't an RFC 3339 time, such as epoch seconds from a portal,
+// never counts as activity, so the workload pauses while the tool thinks
+// it's keeping it awake. It's reported once per value, not every check.
+func TestActivityClock_MalformedAnnotationIsReportedOnce(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-30*time.Minute), target)
+	workload.Annotations = map[string]string{v1alpha1.AnnotationLastActivity: "1773489600"}
+	metrics := idleCPU
+	r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics})
+	check := func() {
+		t.Helper()
+		_, err := r.reconcileAutomation(context.Background(), workload, target)
+		require.NoError(t, err)
+	}
+
+	check()
+	check()
+	emitted := drainEvents(t, r)
+	assert.Equal(t, 1, strings.Count(emitted, ReasonInvalidActivityAnnotation), "reported once: %s", emitted)
+	assert.Contains(t, emitted, `"1773489600"`)
+	assert.Contains(t, emitted, "ManagedWorkload api")
+
+	workload.Annotations[v1alpha1.AnnotationLastActivity] = "2026-03-14 11:59:00"
+	check()
+	assert.Contains(t, drainEvents(t, r), ReasonInvalidActivityAnnotation, "and again for a new value")
+}
+
 func TestActivityClock_DoesNotActWithoutCPUData(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -258,6 +296,200 @@ func TestActivityClock_DoesNotActWithoutCPUData(t *testing.T) {
 			require.NotNil(t, cond)
 			assert.Equal(t, metav1.ConditionFalse, cond.Status)
 			assert.Equal(t, tt.wantReason, cond.Reason)
+		})
+	}
+}
+
+// A source that can't be read hides whatever use it would have shown, so
+// the time it's out isn't idle time: back, and seeing nothing, it doesn't
+// find the outage idle and pause at once, but only once it has seen
+// idleAfter of nothing.
+func TestActivityClock_AnOutageIsNotIdleTime(t *testing.T) {
+	const outage = 40 * time.Minute
+	tests := []struct {
+		name    string
+		promQL  bool
+		breakIt func(m *stubMetrics, promDown *atomic.Bool)
+		fixIt   func(m *stubMetrics, promDown *atomic.Bool)
+	}{
+		{
+			name:    "Prometheus down",
+			promQL:  true,
+			breakIt: func(_ *stubMetrics, promDown *atomic.Bool) { promDown.Store(true) },
+			fixIt:   func(_ *stubMetrics, promDown *atomic.Bool) { promDown.Store(false) },
+		},
+		{
+			name:    "metrics API down",
+			breakIt: func(m *stubMetrics, _ *atomic.Bool) { m.err = errors.New("metrics API unavailable") },
+			fixIt:   func(m *stubMetrics, _ *atomic.Bool) { m.err = nil },
+		},
+		{
+			name:    "CPU requests unreadable",
+			breakIt: func(m *stubMetrics, _ *atomic.Bool) { m.noCPURequests = true },
+			fixIt:   func(m *stubMetrics, _ *atomic.Bool) { m.noCPURequests = false },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var promDown atomic.Bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if promDown.Load() {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+			}))
+			t.Cleanup(srv.Close)
+
+			target := clockTarget("app:v1", nil)
+			workload := clockWorkload(fixedTime.Add(-50*time.Minute), target)
+			if tt.promQL {
+				workload.Spec.IdlePolicy.Activity = &v1alpha1.ActivitySpec{
+					Prometheus: []v1alpha1.PrometheusActivity{{PromQL: `sum(rate(http_requests_total[5m]))`}},
+				}
+			}
+			metrics := idleCPU
+			pauser := &stubPauser{pauseDone: true}
+			r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics, pauser: pauser})
+			r.prometheus = signal.NewPrometheus(srv.URL)
+			now := fixedTime
+			r.clock = func() time.Time { return now }
+			check := func() {
+				t.Helper()
+				_, err := r.reconcileAutomation(context.Background(), workload, target)
+				require.NoError(t, err)
+			}
+
+			tt.breakIt(&metrics, &promDown)
+			for ; now.Before(fixedTime.Add(outage)); now = now.Add(activityCheckInterval) {
+				check()
+			}
+			require.Zero(t, pauser.pauseCalls, "nothing is paused while a source is out")
+			assert.Equal(t, v1alpha1.ActivitySourceUnobserved, workload.Status.Activity.LastActivitySource)
+
+			tt.fixIt(&metrics, &promDown)
+			// The client backs off a failed endpoint by the wall clock, which
+			// this test's clock doesn't move.
+			r.prometheus = signal.NewPrometheus(srv.URL)
+			// The first check that reads every source finds nothing evaluated
+			// since the outage began, so the clock starts over from it.
+			recovered := now
+			for ; now.Before(recovered.Add(time.Hour)); now = now.Add(activityCheckInterval) {
+				check()
+				require.Zero(t, pauser.pauseCalls, "paused at %s, within idleAfter of the outage ending",
+					now.Sub(fixedTime))
+			}
+			check()
+			assert.Equal(t, 1, pauser.pauseCalls, "paused once idleAfter has passed with every source seeing nothing")
+		})
+	}
+}
+
+// An activity annotation is stamped to the second, so one stamped in the
+// second a workload went Idle ends the would-be pause: it can't be told from
+// one just before, and keeping the workload awake is the safe mistake. The
+// operator's own times are exact, so activity it saw before a pause request
+// in the same second doesn't undo the request.
+func TestActiveSinceClockRanOut_CountsTheSecondItRanOut(t *testing.T) {
+	wentIdle := fixedTime.Add(400 * time.Millisecond)
+	tests := []struct {
+		name     string
+		source   v1alpha1.ActivitySource
+		activity time.Time
+		want     bool
+	}{
+		{name: "an annotation before the second it went Idle", source: v1alpha1.ActivitySourceAnnotation,
+			activity: fixedTime.Add(-time.Second)},
+		{name: "an annotation stamped in that second", source: v1alpha1.ActivitySourceAnnotation,
+			activity: fixedTime, want: true},
+		{name: "an annotation after it", source: v1alpha1.ActivitySourceAnnotation,
+			activity: fixedTime.Add(2 * time.Second), want: true},
+		{name: "CPU just before it, in the same second", source: v1alpha1.ActivitySourceCPU,
+			activity: fixedTime.Add(100 * time.Millisecond)},
+		{name: "CPU after it", source: v1alpha1.ActivitySourceCPU, activity: wentIdle.Add(time.Second), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := clockWorkload(tt.activity, clockTarget("app:v1", nil))
+			workload.Status.Activity.LastActivitySource = tt.source
+			workload.Status.Phase = v1alpha1.PhaseIdle
+			began := metav1.NewTime(wentIdle)
+			workload.Status.LastTransitionTime = &began
+
+			assert.Equal(t, tt.want, activeSinceClockRanOut(workload, wentIdle.Add(time.Minute), wentIdle))
+		})
+	}
+}
+
+// A woken workload's new pods have no metrics for the first scrape or so.
+// That blind minute mustn't replace what woke it as its last activity: the
+// wake by request is what status should show.
+func TestActivityClock_AShortBlindSpotKeepsWhatWokeIt(t *testing.T) {
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime, target)
+	workload.Status.Activity.LastActivitySource = v1alpha1.ActivitySourceRequest
+	evaluated := metav1.NewTime(fixedTime)
+	workload.Status.Activity.LastEvaluatedTime = &evaluated
+	metrics := idleCPU
+	metrics.err = errors.New("no pod metrics yet")
+	r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics, pauser: &stubPauser{}})
+	now := fixedTime
+	r.clock = func() time.Time { return now }
+
+	for range 2 {
+		now = now.Add(activityCheckInterval / 2)
+		_, err := r.reconcileAutomation(context.Background(), workload, target)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, v1alpha1.ActivitySourceRequest, workload.Status.Activity.LastActivitySource)
+	assert.Equal(t, fixedTime, workload.Status.Activity.LastActivityTime.UTC())
+}
+
+// A gap in watching is never counted as idle time once it could bring the
+// pause forward by much: a short idleAfter tolerates less of one, and after
+// a restart, when the gap's start is unknown, little at all.
+func TestActivityClock_AGapInWatchingRestartsTheClock(t *testing.T) {
+	tests := []struct {
+		name      string
+		idleAfter time.Duration
+		idleFor   time.Duration
+		gap       time.Duration
+		inMemory  bool
+		wantPause bool
+	}{
+		{name: "an outage longer than half a short idleAfter", idleAfter: 5 * time.Minute, idleFor: 6 * time.Minute,
+			gap: 3 * time.Minute, inMemory: true},
+		{name: "a delayed check within a long idleAfter", idleAfter: time.Hour, idleFor: 61 * time.Minute,
+			gap: 3 * time.Minute, inMemory: true, wantPause: true},
+		{name: "an outage beyond the cap on a long idleAfter", idleAfter: 2 * time.Hour, idleFor: 121 * time.Minute,
+			gap: unobservedGap + time.Minute, inMemory: true},
+		{name: "a restart with the written evaluation minutes old", idleAfter: time.Hour, idleFor: 61 * time.Minute,
+			gap: 3 * time.Minute},
+		{name: "a restart with the written evaluation moments old", idleAfter: time.Hour, idleFor: 61 * time.Minute,
+			gap: 30 * time.Second, wantPause: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := clockTarget("app:v1", nil)
+			workload := clockWorkload(fixedTime.Add(-tt.idleFor), target)
+			workload.Spec.IdlePolicy.IdleAfter = &metav1.Duration{Duration: tt.idleAfter}
+			evaluated := metav1.NewTime(fixedTime.Add(-tt.gap))
+			workload.Status.Activity.LastEvaluatedTime = &evaluated
+			metrics := idleCPU
+			pauser := &stubPauser{pauseDone: true}
+			r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics, pauser: pauser})
+			if tt.inMemory {
+				r.activityMemo.put(workload.UID, *workload.Status.Activity.DeepCopy())
+			}
+
+			_, err := r.reconcileAutomation(context.Background(), workload, target)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantPause, pauser.pauseCalls == 1)
+			if !tt.wantPause {
+				assert.Equal(t, v1alpha1.ActivitySourceUnobserved, workload.Status.Activity.LastActivitySource)
+			}
 		})
 	}
 }
@@ -586,6 +818,30 @@ func TestPodTemplateHash(t *testing.T) {
 	assert.NotEqual(t, podTemplateHash(base), podTemplateHash(clockTarget("app:v2", nil)))
 }
 
+// The hash is worked out once for each version of the target, not on each
+// of the checks that need it.
+func TestTemplateHashes(t *testing.T) {
+	var hashes templateHashes
+	target := clockTarget("app:v1", nil)
+	target.UID, target.ResourceVersion = "deploy-uid", "1"
+	v1 := hashes.of("workload-uid", target)
+	require.Equal(t, podTemplateHash(target), v1)
+
+	target.Spec.Template.Spec.Containers[0].Image = "app:v2"
+	assert.Equal(t, v1, hashes.of("workload-uid", target), "the same version isn't hashed again")
+
+	target.ResourceVersion = "2"
+	assert.Equal(t, podTemplateHash(target), hashes.of("workload-uid", target), "a new version is")
+	assert.NotEqual(t, v1, hashes.of("workload-uid", target))
+
+	recreated := clockTarget("app:v3", nil)
+	recreated.UID, recreated.ResourceVersion = "recreated-uid", "2"
+	assert.Equal(t, podTemplateHash(recreated), hashes.of("workload-uid", recreated), "and so is a new target")
+
+	unsaved := clockTarget("app:v4", nil)
+	assert.Equal(t, podTemplateHash(unsaved), hashes.of("workload-uid", unsaved))
+}
+
 func TestNextCheck(t *testing.T) {
 	now := fixedTime
 	assert.Equal(t, activityCheckInterval, nextCheck(now, now.Add(time.Hour), time.Time{}))
@@ -669,7 +925,7 @@ func TestActivityClock_PrometheusSource(t *testing.T) {
 			metrics := idleCPU
 			pauser := &stubPauser{pauseDone: true}
 			r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics, pauser: pauser})
-			r.prometheusURL = tt.endpoint(t)
+			r.prometheus = signal.NewPrometheus(tt.endpoint(t))
 
 			_, err := r.reconcileAutomation(context.Background(), workload, target)
 			require.NoError(t, err)
@@ -688,6 +944,123 @@ func TestActivityClock_PrometheusSource(t *testing.T) {
 			assert.Equal(t, tt.wantReason, cond.Reason)
 		})
 	}
+}
+
+func promQueries(n int) []v1alpha1.PrometheusActivity {
+	queries := make([]v1alpha1.PrometheusActivity, n)
+	for i := range queries {
+		queries[i] = v1alpha1.PrometheusActivity{PromQL: fmt.Sprintf(`sum(rate(http_requests_total{route="%d"}[5m]))`, i)}
+	}
+	return queries
+}
+
+// Prometheus failing for one check isn't asked again by the next: each
+// would wait out a timeout to learn of the outage, holding a reconcile
+// worker that wakes queue behind.
+func TestActivityClock_PrometheusOutageFailsFast(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	workload.Spec.IdlePolicy.Activity = &v1alpha1.ActivitySpec{Prometheus: promQueries(3)}
+	metrics := idleCPU
+	pauser := &stubPauser{pauseDone: true}
+	r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics, pauser: pauser})
+	r.prometheus = signal.NewPrometheus(srv.URL)
+
+	for range 3 {
+		_, err := r.reconcileAutomation(context.Background(), workload, target)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, int32(1), calls.Load(), "asked once, then not again until it has had time to recover")
+	assert.Zero(t, pauser.pauseCalls)
+	cond := meta.FindStatusCondition(workload.Status.Conditions, conditionPrometheusAvailable)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+}
+
+// A workload's queries share one time budget per check, so one with many
+// slow queries holds a reconcile worker for seconds, not a timeout each.
+func TestActivityClock_PrometheusQueriesShareABudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the budget")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(1200 * time.Millisecond):
+			_, _ = w.Write([]byte(promValue("0")))
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-61*time.Minute), target)
+	workload.Spec.IdlePolicy.Activity = &v1alpha1.ActivitySpec{Prometheus: promQueries(8)}
+	metrics := idleCPU
+	pauser := &stubPauser{pauseDone: true}
+	r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics, pauser: pauser})
+	r.prometheus = signal.NewPrometheus(srv.URL)
+
+	began := time.Now()
+	_, err := r.reconcileAutomation(context.Background(), workload, target)
+	require.NoError(t, err)
+
+	assert.Less(t, time.Since(began), prometheusBudget+time.Second, "8 queries of 1.2s each stopped at the budget")
+	assert.Zero(t, pauser.pauseCalls, "queries not evaluated leave the workload awake")
+	cond := meta.FindStatusCondition(workload.Status.Conditions, conditionPrometheusAvailable)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+}
+
+// A query that matches no series, such as one with a misspelt metric, looks
+// like a quiet workload, and would never keep it awake. It's pointed out
+// once, and the clock goes on as before.
+func TestActivityClock_QueryThatNeverMatchesIsPointedOut(t *testing.T) {
+	var matching atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if matching.Load() {
+			_, _ = w.Write([]byte(promValue("0")))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	t.Cleanup(srv.Close)
+	target := clockTarget("app:v1", nil)
+	workload := clockWorkload(fixedTime.Add(-30*time.Minute), target)
+	query := `sum(rate(nginx_ingress_controller_requets[5m]))`
+	workload.Spec.IdlePolicy.Activity = &v1alpha1.ActivitySpec{Prometheus: []v1alpha1.PrometheusActivity{{PromQL: query}}}
+	metrics := idleCPU
+	r := newAutomationReconciler(t, workload, &stubForecaster{}, automationOpts{metrics: &metrics})
+	r.prometheus = signal.NewPrometheus(srv.URL)
+	check := func() *metav1.Condition {
+		t.Helper()
+		_, err := r.reconcileAutomation(context.Background(), workload, target)
+		require.NoError(t, err)
+		return meta.FindStatusCondition(workload.Status.Conditions, conditionPrometheusQueryEmpty)
+	}
+
+	cond := check()
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Contains(t, cond.Message, query)
+	assert.True(t, meta.IsStatusConditionTrue(workload.Status.Conditions, conditionPrometheusAvailable),
+		"the query was evaluated: it isn't a failure")
+	check()
+	emitted := drainEvents(t, r)
+	assert.Equal(t, 1, strings.Count(emitted, ReasonPrometheusQueryEmpty), "pointed out once: %s", emitted)
+
+	matching.Store(true)
+	cond = check()
+	assert.Equal(t, metav1.ConditionFalse, cond.Status, "cleared once the query matches a series")
+	matching.Store(false)
+	cond = check()
+	assert.Equal(t, metav1.ConditionFalse, cond.Status, "a query that has matched may go quiet")
+	assert.Equal(t, v1alpha1.PhaseRunning, workload.Status.Phase)
 }
 
 func TestActivityClock_NoPrometheusConditionWithoutQueries(t *testing.T) {
@@ -723,6 +1096,9 @@ func TestWokenByActivity(t *testing.T) {
 			recorded:    &v1alpha1.WakeAnnotations{Workload: map[string]string{v1alpha1.AnnotationLastActivity: old}},
 			annotations: map[string]string{v1alpha1.AnnotationLastActivity: old}},
 		{name: "no annotations", pausedAt: pausedAt, recorded: &v1alpha1.WakeAnnotations{}},
+		{name: "a value that isn't a time, as an awake workload ignores it", pausedAt: pausedAt,
+			recorded:    &v1alpha1.WakeAnnotations{},
+			annotations: map[string]string{v1alpha1.AnnotationLastActivity: strconv.FormatInt(fixedTime.Unix(), 10)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

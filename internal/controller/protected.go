@@ -22,6 +22,7 @@ import (
 	"slices"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -32,7 +33,11 @@ import (
 	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 )
 
-const conditionProtected = "Protected"
+const (
+	conditionProtected = "Protected"
+
+	reasonPVCsDeletedOnScaleDown = "PVCsDeletedOnScaleDown"
+)
 
 // protectedRecheckInterval is how often a workload in a protected namespace
 // is looked at again, as a fallback to the watch on its namespace.
@@ -66,8 +71,22 @@ func (r *Reconciler) protectionOf(ctx context.Context, workload *v1alpha1.Manage
 	case r.isHybernate(target):
 		p := hybernateProtection(workload)
 		return &p, nil
+	case deletesClaimsOnScaleDown(target):
+		p := claimsProtection(workload)
+		return &p, nil
 	}
 	return nil, nil
+}
+
+// deletesClaimsOnScaleDown reports whether target is a StatefulSet whose
+// controller deletes its PersistentVolumeClaims as it scales down, so a
+// pause would delete its data.
+func deletesClaimsOnScaleDown(target client.Object) bool {
+	sts, ok := target.(*appsv1.StatefulSet)
+	if !ok || sts.Spec.PersistentVolumeClaimRetentionPolicy == nil {
+		return false
+	}
+	return sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenScaled == appsv1.DeletePersistentVolumeClaimRetentionPolicyType
 }
 
 // controlPlaneLabel marks the operator's and the doorman's Deployments.
@@ -105,8 +124,17 @@ func hybernateProtection(workload *v1alpha1.ManagedWorkload) protection {
 	return protection{reason: "HybernateComponent", why: why, message: why}
 }
 
+func claimsProtection(workload *v1alpha1.ManagedWorkload) protection {
+	why := fmt.Sprintf("StatefulSet %s deletes its PersistentVolumeClaims when scaled down "+
+		"(persistentVolumeClaimRetentionPolicy.whenScaled: Delete), so Hybernate doesn't pause it: "+
+		"pausing it would delete its data", workload.Spec.Target.Name)
+	return protection{reason: reasonPVCsDeletedOnScaleDown, why: why,
+		message: why + "; set whenScaled to Retain to let Hybernate pause it"}
+}
+
 // reconcileProtected keeps a protected workload running: Hybernate pauses
-// nothing in a protected namespace, nor its own components, and hands back
+// nothing in a protected namespace, nor its own components, nor a
+// StatefulSet that deletes its claims as it scales down, and hands back
 // what it had paused, or was pausing, before it was protected, so
 // protecting one never leaves a workload off.
 func (r *Reconciler) reconcileProtected(ctx context.Context, workload *v1alpha1.ManagedWorkload,

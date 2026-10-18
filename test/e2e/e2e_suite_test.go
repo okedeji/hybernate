@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026.
@@ -105,7 +104,8 @@ var _ = SynchronizedBeforeSuite(func() {
 	Expect(kubectlApply(preloaded(metricsServerManifest))).To(Succeed())
 	// kind's kubelets serve self-signed certificates.
 	_, err = utils.Run(exec.Command("kubectl", "patch", "deployment", "metrics-server", "-n", "kube-system",
-		"--type=json", "-p", `[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]`))
+		"--type=json", "-p",
+		`[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]`))
 	Expect(err).NotTo(HaveOccurred())
 
 	By("installing ingress-nginx")

@@ -4,6 +4,9 @@
 # Grants read-only access to hybernate.io resources.
 # This role is intended for users who need visibility into these resources
 # without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
+# It's aggregated into the built-in view, edit and admin roles, so whoever
+# can view a namespace can see its ManagedWorkloads, as kubectl hybernate
+# status and scan do.
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -11,6 +14,9 @@ metadata:
   labels:
     app.kubernetes.io/name: hybernate
     app.kubernetes.io/managed-by: kustomize
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
   name: managedworkload-viewer-role
 rules:
 - apiGroups:

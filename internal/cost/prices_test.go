@@ -57,6 +57,43 @@ func TestListPriceOf(t *testing.T) {
 	}
 }
 
+// An Azure constrained vCPU size is billed as its base size with fewer
+// vCPUs enabled, so it's priced at the base size's hourly price, spread
+// over the vCPUs it has.
+func TestListPriceOf_AzureConstrainedVCPUs(t *testing.T) {
+	base, ok := ListPriceOf(NodeTypeOf(nodeLabels("Standard_E4s_v5", "eastus")))
+	require.True(t, ok)
+	constrained, ok := ListPriceOf(NodeTypeOf(nodeLabels("Standard_E4-2s_v5", "eastus")))
+	require.True(t, ok, "found as its base size, not the default rates")
+
+	assert.Equal(t, "azure", constrained.Provider)
+	assert.InDelta(t, ComputeHourly(4, 32, base.Rates), ComputeHourly(2, 32, constrained.Rates), 1e-9,
+		"the same instance price, on 2 vCPUs")
+}
+
+func TestTableName(t *testing.T) {
+	tests := []struct {
+		instanceType string
+		want         string
+		vcpus        float64
+	}{
+		{instanceType: "m6i.large", want: "m6i.large"},
+		{instanceType: "n2-standard-4", want: "n2-standard-4"},
+		{instanceType: "Standard_D4s_v5", want: "d4sv5"},
+		{instanceType: "Standard_E4-2s_v5", want: "e4sv5", vcpus: 2},
+		{instanceType: "Standard_E64-16ds_v4", want: "e64dsv4", vcpus: 16},
+		{instanceType: "Standard_M8-2ms", want: "m8ms", vcpus: 2},
+		{instanceType: "Standard_DS11-1_v2", want: "ds11v2", vcpus: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.instanceType, func(t *testing.T) {
+			name, vcpus := tableName(tt.instanceType)
+			assert.Equal(t, tt.want, name)
+			assert.InDelta(t, tt.vcpus, vcpus, 0)
+		})
+	}
+}
+
 func TestListPriceOf_NotListed(t *testing.T) {
 	tests := map[string]map[string]string{
 		"unknown type":         nodeLabels("custom.metal", "us-east-1"),
@@ -122,7 +159,7 @@ func TestPriceTableParses(t *testing.T) {
 		for _, field := range fields[4:] {
 			_, price, ok := strings.Cut(field, "=")
 			require.True(t, ok, "line %d: %q", line, field)
-			p, err := parseListing(fields, price, line)
+			p, err := parseListing(fields, price, line, 0)
 			require.NoError(t, err)
 			require.Positive(t, p.Rates.CPUPerHour, "line %d", line)
 		}

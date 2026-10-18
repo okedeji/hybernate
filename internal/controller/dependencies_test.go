@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -37,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -82,7 +85,7 @@ func depReconciler(t *testing.T, pauser *stubPauser, objs ...client.Object) *Rec
 	scheme := testScheme(t)
 	metrics := idleCPU
 	return &Reconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).
+		Client: withWorkloadIndexes(fake.NewClientBuilder().WithScheme(scheme)).
 			WithStatusSubresource(&v1alpha1.ManagedWorkload{}).WithObjects(objs...).Build(),
 		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(20),
@@ -130,16 +133,40 @@ func TestDependencies_HoldWhileDependentsAwake(t *testing.T) {
 			wantHeldBy: "kept awake for default/worker",
 		},
 		{
-			name: "dependent in another namespace",
+			name: "dependent in another namespace, which postgres's doesn't allow",
 			dependents: []*v1alpha1.ManagedWorkload{depWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning,
 				v1alpha1.DependencyRef{Namespace: "default", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres"})},
-			wantHeldBy: "kept awake for preview-42/api",
+			wantPause: true,
 		},
 		{
 			name: "same name in another namespace is a different dependency",
 			dependents: []*v1alpha1.ManagedWorkload{
 				depWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, postgresRef()),
 			},
+			wantPause: true,
+		},
+		{
+			name: "a duplicate, whose target another ManagedWorkload manages, doesn't hold it",
+			dependents: []*v1alpha1.ManagedWorkload{withCondition(
+				depWorkload("default", "api-copy", v1alpha1.TargetKindDeployment, "", postgresRef()),
+				conditionDuplicateTarget, metav1.ConditionTrue, conditionDuplicateTarget)},
+			wantPause: true,
+		},
+		{
+			name: "a dependent whose target is gone doesn't hold it",
+			dependents: []*v1alpha1.ManagedWorkload{withCondition(
+				depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, postgresRef()),
+				conditionTargetAvailable, metav1.ConditionFalse, ReasonTargetNotFound)},
+			wantPause: true,
+		},
+		{
+			name: "a dependent being deleted doesn't hold it",
+			dependents: []*v1alpha1.ManagedWorkload{func() *v1alpha1.ManagedWorkload {
+				w := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning, postgresRef())
+				w.Finalizers = []string{finalizerName}
+				w.DeletionTimestamp = &metav1.Time{Time: fixedTime}
+				return w
+			}()},
 			wantPause: true,
 		},
 	}
@@ -169,6 +196,34 @@ func TestDependencies_HoldWhileDependentsAwake(t *testing.T) {
 			assert.Equal(t, tt.wantHeldBy, held.Message)
 		})
 	}
+}
+
+func withCondition(w *v1alpha1.ManagedWorkload, condType string, status metav1.ConditionStatus,
+	reason string) *v1alpha1.ManagedWorkload {
+	meta.SetStatusCondition(&w.Status.Conditions, metav1.Condition{Type: condType, Status: status, Reason: reason})
+	return w
+}
+
+// A condition's message over 32768 bytes fails the whole status write, so
+// a dependency with many dependents names only some.
+func TestDependencies_HoldersListIsBounded(t *testing.T) {
+	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhaseRunning)
+	objs := make([]client.Object, 0, 2001)
+	objs = append(objs, postgres)
+	for i := range 2000 {
+		objs = append(objs, depWorkload("default", fmt.Sprintf("api-%04d", i), v1alpha1.TargetKindDeployment,
+			v1alpha1.PhaseRunning, postgresRef()))
+	}
+	r := depReconciler(t, &stubPauser{pauseDone: true}, objs...)
+
+	_, err := r.reconcileAutomation(context.Background(), postgres, postgresTarget(1, 1))
+	require.NoError(t, err)
+
+	held := meta.FindStatusCondition(postgres.Status.Conditions, conditionHeldByDependents)
+	require.NotNil(t, held)
+	assert.Equal(t, "kept awake for default/api-0000, default/api-0001, default/api-0002, default/api-0003, "+
+		"default/api-0004, default/api-0005, default/api-0006, default/api-0007, default/api-0008, default/api-0009 "+
+		"and 1990 more", held.Message)
 }
 
 func TestDependencies_HoldAppliesInDryRun(t *testing.T) {
@@ -330,12 +385,12 @@ func TestDependencies_WaitForAPartlyReadyDependency(t *testing.T) {
 	}{
 		{name: "managed, its resume settled short", managed: v1alpha1.PhaseRunning, ready: 2},
 		{name: "managed and idle, its resume settled short", managed: v1alpha1.PhaseIdle, ready: 2},
-		{name: "managed, still resuming", managed: v1alpha1.PhaseResuming, ready: 2, resuming: time.Hour,
+		{name: "managed, still resuming", managed: v1alpha1.PhaseResuming, ready: 2, resuming: 5 * time.Minute,
 			wantWait: true},
 		{name: "managed and running, none Ready", managed: v1alpha1.PhaseRunning, wantWait: true},
 		{name: "unmanaged, given as long as a resume gives", ready: 2, resuming: lifecycle.ServingWait},
 		{name: "unmanaged, not yet given as long", ready: 2, resuming: time.Minute, wantWait: true},
-		{name: "unmanaged, none Ready", resuming: time.Hour, wantWait: true},
+		{name: "unmanaged, none Ready", resuming: 5 * time.Minute, wantWait: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -361,6 +416,101 @@ func TestDependencies_WaitForAPartlyReadyDependency(t *testing.T) {
 			}
 			assert.Equal(t, 1, pauser.resumeCalls, "it waited on a dependency serving with %d of 3 Ready", tt.ready)
 		})
+	}
+}
+
+// A waitForReady dependency that's up but never Ready, crash-looping or
+// unable to pull its image, would hold the dependent at zero for good. It's
+// waited for until its progress deadline, then the dependent starts anyway
+// and says why.
+func TestDependencies_WaitIsBounded(t *testing.T) {
+	deployment := func(deadline *int32) client.Object {
+		return &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "postgres", Namespace: "default"},
+			Spec:       appsv1.DeploymentSpec{Replicas: ptr.To[int32](1), ProgressDeadlineSeconds: deadline},
+		}
+	}
+	tests := []struct {
+		name     string
+		kind     v1alpha1.TargetKind
+		target   client.Object
+		managed  v1alpha1.WorkloadPhase
+		resuming time.Duration
+		wantWait bool
+		wantWhy  string
+	}{
+		{name: "a StatefulSet within its deadline", kind: v1alpha1.TargetKindStatefulSet,
+			target: postgresTarget(1, 0), resuming: 9 * time.Minute, wantWait: true},
+		{name: "a StatefulSet past its deadline", kind: v1alpha1.TargetKindStatefulSet,
+			target: postgresTarget(1, 0), resuming: 11 * time.Minute,
+			wantWhy: "not waiting for default/statefulset/postgres (it isn't Ready after 10m)"},
+		{name: "a managed dependency whose resume settled with none Ready", kind: v1alpha1.TargetKindStatefulSet,
+			target: postgresTarget(1, 0), managed: v1alpha1.PhaseRunning, resuming: 11 * time.Minute,
+			wantWhy: "not waiting for default/statefulset/postgres (it isn't Ready after 10m)"},
+		{name: "a Deployment within its progress deadline", kind: v1alpha1.TargetKindDeployment,
+			target: deployment(ptr.To[int32](120)), resuming: time.Minute, wantWait: true},
+		{name: "a Deployment past its progress deadline", kind: v1alpha1.TargetKindDeployment,
+			target: deployment(ptr.To[int32](120)), resuming: 3 * time.Minute,
+			wantWhy: "not waiting for default/deployment/postgres (it isn't Ready after 2m)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ref := v1alpha1.DependencyRef{Kind: tt.kind, Name: "postgres", WaitForReady: true}
+			api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseResuming, ref)
+			began := metav1.NewTime(fixedTime.Add(-tt.resuming))
+			api.Status.LastTransitionTime = &began
+			api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1}
+			objs := []client.Object{api, tt.target}
+			if tt.managed != "" {
+				objs = append(objs, depWorkload("default", "postgres", tt.kind, tt.managed))
+			}
+			pauser := &stubPauser{resumeDone: true}
+			r := depReconciler(t, pauser, objs...)
+
+			_, err := r.handleResume(context.Background(), fetch(t, r, "api"), nil)
+			require.NoError(t, err)
+
+			if tt.wantWait {
+				assert.Zero(t, pauser.resumeCalls)
+				return
+			}
+			assert.Equal(t, 1, pauser.resumeCalls, "the dependent starts without the dependency")
+			c := meta.FindStatusCondition(fetch(t, r, "api").Status.Conditions, conditionWaitingForDependencies)
+			require.NotNil(t, c)
+			assert.Equal(t, metav1.ConditionFalse, c.Status)
+			assert.Equal(t, reasonDependencyWontStart, c.Reason)
+			assert.Equal(t, tt.wantWhy, c.Message)
+			assert.Len(t, recorded(r.Recorder.(*events.FakeRecorder), reasonDependencyWontStart), 1,
+				"a Warning names the dependency")
+		})
+	}
+}
+
+// Two workloads that each waitForReady on the other would each wait for
+// the other to start first, forever.
+func TestDependencies_MutualWaitForReady(t *testing.T) {
+	a := depWorkload("default", "a", v1alpha1.TargetKindDeployment, v1alpha1.PhaseResuming,
+		v1alpha1.DependencyRef{Kind: v1alpha1.TargetKindDeployment, Name: "b", WaitForReady: true})
+	a.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1}
+	b := depWorkload("default", "b", v1alpha1.TargetKindDeployment, v1alpha1.PhaseResuming,
+		v1alpha1.DependencyRef{Kind: v1alpha1.TargetKindDeployment, Name: "a", WaitForReady: true})
+	b.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1}
+	zero := func(name string) *appsv1.Deployment {
+		return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: appsv1.DeploymentSpec{Replicas: ptr.To[int32](0)}}
+	}
+
+	for _, name := range []string{"a", "b"} {
+		pauser := &stubPauser{resumeDone: true}
+		r := depReconciler(t, pauser, a.DeepCopy(), b.DeepCopy(), zero("a"), zero("b"))
+
+		_, err := r.handleResume(context.Background(), fetch(t, r, name), nil)
+		require.NoError(t, err)
+
+		assert.Equal(t, 1, pauser.resumeCalls, "%s starts", name)
+		c := meta.FindStatusCondition(fetch(t, r, name).Status.Conditions, conditionWaitingForDependencies)
+		require.NotNil(t, c)
+		assert.Equal(t, conditionDependencyCycle, c.Reason)
 	}
 }
 
@@ -406,6 +556,96 @@ func TestDependencies_WaitForMissingDependencyDoesNotBlock(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, pauser.resumeCalls)
+}
+
+// A dependency in another namespace is only held, woken and waited for
+// when its namespace allows dependents from the dependent's. Otherwise a
+// user of one namespace could keep another's workloads awake, or tell
+// from the conditions what's in it.
+func TestDependencies_CrossNamespaceNeedsTheNamespacesConsent(t *testing.T) {
+	shared := v1alpha1.DependencyRef{Namespace: "default", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres",
+		WaitForReady: true}
+	tests := []struct {
+		name           string
+		dependentsFrom *string
+		learn          bool
+		wantAllowed    bool
+	}{
+		{name: "no annotation"},
+		{name: "another namespace listed", dependentsFrom: ptr.To("preview-1, preview-2")},
+		{name: "listed", dependentsFrom: ptr.To("preview-1, preview-42"), wantAllowed: true},
+		{name: "any namespace", dependentsFrom: ptr.To("*"), wantAllowed: true},
+		{name: "learned, no annotation", learn: true},
+		{name: "learned, listed", dependentsFrom: ptr.To("preview-42"), learn: true, wantAllowed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+			if tt.dependentsFrom != nil {
+				ns.Annotations = map[string]string{v1alpha1.AnnotationDependentsFrom: *tt.dependentsFrom}
+			}
+			dependent := func(phase v1alpha1.WorkloadPhase) *v1alpha1.ManagedWorkload {
+				w := depWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, phase)
+				if tt.learn {
+					w.Status.LearnedDependencies = &v1alpha1.LearnedDependencies{Dependencies: []v1alpha1.LearnedDependency{
+						{Namespace: "default", Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres",
+							Source: v1alpha1.LearnedFromEnvironment, Via: "PGHOST"}}}
+				} else {
+					w.Spec.DependsOn = []v1alpha1.DependencyRef{shared}
+				}
+				return w
+			}
+
+			t.Run("held", func(t *testing.T) {
+				postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhaseRunning)
+				pauser := &stubPauser{pauseDone: true}
+				r := depReconciler(t, pauser, ns.DeepCopy(), postgres, dependent(v1alpha1.PhaseRunning))
+
+				_, err := r.reconcileAutomation(context.Background(), postgres, postgresTarget(1, 1))
+				require.NoError(t, err)
+
+				assert.Equal(t, tt.wantAllowed, pauser.pauseCalls == 0)
+			})
+			t.Run("woken and waited for", func(t *testing.T) {
+				pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
+				api := dependent(v1alpha1.PhasePaused)
+				api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1, PausedAt: &pausedAt}
+				postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
+				target := postgresTarget(0, 0)
+				target.Namespace = "default"
+				pauser := &stubPauser{resumeDone: true}
+				r := depReconciler(t, pauser, ns.DeepCopy(), api, postgres, target)
+
+				_, err := r.handleResume(context.Background(), api, nil)
+				require.NoError(t, err)
+
+				woken := fetch(t, r, "postgres").Annotations[v1alpha1.AnnotationLastActivity] != ""
+				assert.Equal(t, tt.wantAllowed, woken)
+				if !tt.learn {
+					assert.Equal(t, !tt.wantAllowed, pauser.resumeCalls == 1, "only an allowed dependency is waited for")
+				}
+			})
+			t.Run("reported", func(t *testing.T) {
+				api := dependent(v1alpha1.PhaseRunning)
+				r := depReconciler(t, &stubPauser{}, ns.DeepCopy(), api)
+
+				require.NoError(t, r.checkDependenciesExist(context.Background(), api))
+
+				c := meta.FindStatusCondition(api.Status.Conditions, conditionDependencyNotAllowed)
+				if tt.wantAllowed {
+					assert.Nil(t, c)
+					assert.True(t, meta.IsStatusConditionTrue(api.Status.Conditions, conditionDependencyNotFound) == !tt.learn,
+						"an allowed one is looked for")
+					return
+				}
+				require.NotNil(t, c)
+				assert.Equal(t, "not in a namespace that allows dependents from preview-42 with hybernate.io/dependents-from, "+
+					"so not held or woken: default/statefulset/postgres", c.Message)
+				assert.Nil(t, meta.FindStatusCondition(api.Status.Conditions, conditionDependencyNotFound),
+					"one not allowed isn't looked for, so whether it exists isn't told")
+			})
+		})
+	}
 }
 
 func TestDependencies_NotFoundCondition(t *testing.T) {
@@ -456,6 +696,103 @@ func TestFindRelatedWorkloads_Dependencies(t *testing.T) {
 		"a dependency's readiness changing re-checks dependents waiting for it")
 }
 
+// rejectingPatches makes every patch of the ManagedWorkload named fail, as
+// a policy engine rejecting Hybernate's writes there would.
+func rejectingPatches(r *Reconciler, name string) {
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			if _, ok := obj.(*v1alpha1.ManagedWorkload); ok && obj.GetName() == name {
+				return apierrors.NewForbidden(v1alpha1.GroupVersion.WithResource("managedworkloads").GroupResource(),
+					name, errors.New("denied by policy"))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+}
+
+// A dependency that can't be woken, such as one in a namespace whose
+// policies reject Hybernate's writes, never keeps its dependent from
+// waking or being handed back.
+func TestDependencies_WakeIsBestEffort(t *testing.T) {
+	paused := func() *v1alpha1.ManagedWorkload {
+		pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
+		api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhasePaused, postgresRef())
+		api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1, PausedAt: &pausedAt}
+		return api
+	}
+	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
+
+	t.Run("waking", func(t *testing.T) {
+		pauser := &stubPauser{resumeDone: true}
+		r := depReconciler(t, pauser, paused(), postgres.DeepCopy(), postgresTarget(1, 1))
+		rejectingPatches(r, "postgres")
+		api := fetch(t, r, "api")
+
+		_, err := r.handleResume(context.Background(), api, nil)
+		require.NoError(t, err)
+
+		assert.Equal(t, v1alpha1.PhaseRunning, api.Status.Phase)
+		assert.Equal(t, 1, pauser.resumeCalls)
+		assert.Len(t, recorded(r.Recorder.(*events.FakeRecorder), ReasonDependencyWakeFailed), 1)
+	})
+	t.Run("handed back", func(t *testing.T) {
+		pauser := &stubPauser{}
+		r := depReconciler(t, pauser, paused(), postgres.DeepCopy())
+		rejectingPatches(r, "postgres")
+
+		released, replicas, err := r.releaseTarget(context.Background(), fetch(t, r, "api"))
+		require.NoError(t, err)
+
+		assert.True(t, released)
+		assert.Equal(t, int32(1), replicas)
+		assert.Len(t, recorded(r.Recorder.(*events.FakeRecorder), ReasonDependencyWakeFailed), 1)
+	})
+}
+
+// A ManagedWorkload in a namespace being deleted lets go of a target it
+// can't hand back, once it has tried for a while, so it can't hold the
+// namespace's deletion forever.
+func TestReconcileDelete_GivesUpInATerminatingNamespace(t *testing.T) {
+	tests := []struct {
+		name        string
+		terminating bool
+		deletedAgo  time.Duration
+		wantGone    bool
+	}{
+		{name: "terminating, tried for long enough", terminating: true, deletedAgo: 6 * time.Minute, wantGone: true},
+		{name: "terminating, only just deleted", terminating: true, deletedAgo: time.Minute},
+		{name: "namespace staying", deletedAgo: time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+			if tt.terminating {
+				ns.Status.Phase = corev1.NamespaceTerminating
+			}
+			api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhasePaused)
+			api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1}
+			api.Finalizers = []string{finalizerName}
+			api.DeletionTimestamp = &metav1.Time{Time: fixedTime.Add(-tt.deletedAgo)}
+			r := depReconciler(t, &stubPauser{restoreErr: errors.New("admission webhook keda is unavailable")}, ns, api)
+
+			_, err := r.reconcileDelete(context.Background(), fetch(t, r, "api"))
+
+			var w v1alpha1.ManagedWorkload
+			gone := apierrors.IsNotFound(r.Get(context.Background(), client.ObjectKeyFromObject(api), &w))
+			assert.Equal(t, tt.wantGone, gone)
+			abandoned := recorded(r.Recorder.(*events.FakeRecorder), ReasonHandBackAbandoned)
+			if tt.wantGone {
+				require.NoError(t, err)
+				assert.Len(t, abandoned, 1)
+				return
+			}
+			require.Error(t, err, "the hand-back is retried")
+			assert.Empty(t, abandoned)
+		})
+	}
+}
+
 // A workload woken by a scale-up wakes its dependencies, as any wake does.
 func TestDependencies_ScaleUpWakesDependencies(t *testing.T) {
 	pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
@@ -464,7 +801,7 @@ func TestDependencies_ScaleUpWakesDependencies(t *testing.T) {
 	postgres := depWorkload("default", "postgres", v1alpha1.TargetKindStatefulSet, v1alpha1.PhasePaused)
 	r := depReconciler(t, &stubPauser{}, api, postgres, targetDeploymentWithReplicas("api", "default", 1))
 
-	require.NoError(t, r.wakeOnScaleUp(context.Background(), api, scaledBy("kubectl-scale", 1)))
+	require.NoError(t, r.wakeOnScaleUp(context.Background(), api, scaledBy("kubectl-edit", 1)))
 
 	assert.Equal(t, fixedTime.UTC().Format(time.RFC3339),
 		fetch(t, r, "postgres").Annotations[v1alpha1.AnnotationLastActivity])
@@ -535,7 +872,8 @@ func TestDependencies_UnwatchedNamespaceDoesNotBlock(t *testing.T) {
 	direct, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
 
-	require.NoError(t, direct.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shared"}}))
+	require.NoError(t, direct.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shared",
+		Annotations: map[string]string{v1alpha1.AnnotationDependentsFrom: "default"}}}))
 	require.NoError(t, direct.Create(ctx, postgresStatefulSet("shared")))
 	api := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},

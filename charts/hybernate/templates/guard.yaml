@@ -1,0 +1,139 @@
+{{- /*
+Hook Jobs that refuse what would leave ManagedWorkloads with no operator:
+their finalizers would never run, their workloads would stay at 0
+replicas, and their Services would keep routing to the doorman. The
+uninstall guard runs before helm uninstall removes anything. The upgrade
+guard runs before an upgrade or rollback to a watchNamespaces that leaves
+out namespaces the running operator may manage workloads in. Both run the
+operator image with --guard, which waits for ManagedWorkloads being
+deleted, then prints what's left and fails; Helm prints that when the hook
+fails. They read ManagedWorkloads' metadata cluster-wide, even with
+watchNamespaces, since the ones they look for are those outside it. Their
+ServiceAccounts and RBAC are hooks too, so exist only while the hook runs.
+*/}}
+{{- $guards := list }}
+{{- if .Values.guard.uninstall }}
+{{- $guards = append $guards (dict "op" "uninstall" "hook" "pre-delete") }}
+{{- end }}
+{{- if and .Values.guard.upgrade .Values.watchNamespaces }}
+{{- $guards = append $guards (dict "op" "upgrade" "hook" "pre-upgrade,pre-rollback") }}
+{{- end }}
+{{- range $guards }}
+{{- $ctx := dict "root" $ "op" .op }}
+{{- $name := include "hybernate.guardName" $ctx }}
+{{- $hook := .hook }}
+{{- $rbacHook := dict "helm.sh/hook" $hook "helm.sh/hook-weight" "-1" "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded,hook-failed" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "hybernate.guardLabels" $ctx | nindent 4 }}
+  annotations:
+    {{- toYaml $rbacHook | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "hybernate.guardLabels" $ctx | nindent 4 }}
+  annotations:
+    {{- toYaml $rbacHook | nindent 4 }}
+rules:
+  - apiGroups: [hybernate.io]
+    resources: [managedworkloads]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "hybernate.guardLabels" $ctx | nindent 4 }}
+  annotations:
+    {{- toYaml $rbacHook | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $.Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "hybernate.guardLabels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-output-log-policy: hook-failed
+spec:
+  backoffLimit: 0
+  {{- /* The guard's two and a half minutes' wait, with room to start. */}}
+  activeDeadlineSeconds: 240
+  # A refusal leaves the Job for kubectl logs, until then.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      {{- /*
+      A meshed sidecar would keep running after the guard exits, so the
+      Job would never finish.
+      */}}
+      annotations:
+        {{- merge (dict) $.Values.guard.podAnnotations (dict "sidecar.istio.io/inject" "false" "linkerd.io/inject" "disabled") | toYaml | nindent 8 }}
+      labels:
+        {{- merge (include "hybernate.guardLabels" $ctx | fromYaml) $.Values.guard.podLabels (dict "sidecar.istio.io/inject" "false") | toYaml | nindent 8 }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ $name }}
+      restartPolicy: Never
+      {{- with $.Values.guard.priorityClassName | default $.Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: guard
+          image: {{ include "hybernate.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: [/manager]
+          args:
+            - --guard={{ .op }}
+            {{- with $.Values.watchNamespaces }}
+            - {{ printf "--watch-namespaces=%s" (join "," .) | quote }}
+            {{- end }}
+            - {{ printf "--zap-log-level=%v" $.Values.logLevel | quote }}
+            - --zap-encoder=console
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml $.Values.guard.resources | nindent 12 }}
+      {{- with $.Values.guard.nodeSelector | default $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.guard.affinity | default $.Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.guard.tolerations | default $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

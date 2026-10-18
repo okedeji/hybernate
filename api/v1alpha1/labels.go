@@ -97,10 +97,26 @@ const (
 	AnnotationWakeMaxWait   = "hybernate.io/wake-max-wait"
 	AnnotationWakePage      = "hybernate.io/wake-page"
 
+	// AnnotationPausedFrom is set by Hybernate on a Deployment or
+	// StatefulSet it has paused, before scaling it to zero, and removed when
+	// it hands it back: a JSON copy of what the pause changed (the replicas,
+	// and the KEDA ScaledObject with its own paused-replicas value), so the
+	// pause is undone exactly even if the ManagedWorkload's status is lost,
+	// as to a backup restored without it. Don't set or edit it.
+	AnnotationPausedFrom = "hybernate.io/paused-from"
+
 	// AnnotationIgnoreDependencies lists dependencies Hybernate shouldn't
 	// learn for a workload, comma-separated, as namespace/name or a name in
 	// its own namespace. Set on the workload or its ManagedWorkload.
 	AnnotationIgnoreDependencies = "hybernate.io/ignore-dependencies"
+
+	// AnnotationDependentsFrom, on a namespace, lists the other namespaces,
+	// comma-separated, whose workloads may depend on its workloads, or "*"
+	// for any. A dependency in another namespace, declared or learned, is
+	// only held awake and woken for its dependents when its namespace lists
+	// theirs: anyone who can write a ManagedWorkload in one namespace could
+	// otherwise keep another namespace's workloads awake.
+	AnnotationDependentsFrom = "hybernate.io/dependents-from"
 
 	// FinalizerCleanup is the finalizer added to ManagedWorkloads, so deleting
 	// one scales its paused workload back up first.

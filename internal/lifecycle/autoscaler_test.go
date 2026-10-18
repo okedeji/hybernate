@@ -50,14 +50,14 @@ func TestPauseAndResume_KEDA(t *testing.T) {
 			if tt.previous != nil {
 				so.SetAnnotations(map[string]string{autoscaler.PausedReplicasAnnotation: *tt.previous})
 			}
-			c := newClient(t, deployment(3, 3), so)
+			c := newClient(t, deployment(3, 0), so)
 			p := newTestPauser(c)
 			workload := apiWorkload()
 
 			require.NoError(t, p.Prepare(context.Background(), workload))
-			done, err := p.Pause(context.Background(), workload)
+			paused, err := p.Pause(context.Background(), workload)
 			require.NoError(t, err)
-			require.True(t, done)
+			require.True(t, paused.Done)
 
 			assert.Equal(t, scaledObjectName, workload.Status.Pause.ScaledObject)
 			assert.Equal(t, tt.previous, workload.Status.Pause.ScaledObjectPausedReplicas)
@@ -67,7 +67,7 @@ func TestPauseAndResume_KEDA(t *testing.T) {
 			assert.Equal(t, int32(0), replicas(t, c))
 
 			settle(t, c, 0)
-			done, err = resume(p, workload)
+			done, err := resume(p, workload)
 			require.NoError(t, err)
 			require.False(t, done)
 			v, _ = pausedAnnotation(t, c)
@@ -135,15 +135,15 @@ func TestPause_HPAIsntHeld(t *testing.T) {
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{MaxReplicas: 4,
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: "Deployment", Name: "api"}},
 	}
-	c := newClient(t, deployment(3, 3), hpa)
+	c := newClient(t, deployment(3, 0), hpa)
 	workload := apiWorkload()
 
 	p := newTestPauser(c)
 	require.NoError(t, p.Prepare(context.Background(), workload))
-	done, err := p.Pause(context.Background(), workload)
+	paused, err := p.Pause(context.Background(), workload)
 
 	require.NoError(t, err)
-	require.True(t, done)
+	require.True(t, paused.Done)
 	assert.Empty(t, workload.Status.Pause.ScaledObject)
 }
 

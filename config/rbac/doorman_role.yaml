@@ -1,5 +1,6 @@
 # The doorman reads its routes from ManagedWorkload status, reads the woken
-# workload's endpoints, and wakes it by patching an annotation. Nothing else.
+# workload's endpoints and the pods they name, and wakes it by patching an
+# annotation. Nothing else.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -14,6 +15,9 @@ rules:
 - apiGroups: [discovery.k8s.io]
   resources: [endpointslices]
   verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get]
 - apiGroups: ["", events.k8s.io]
   resources: [events]
   verbs: [create, patch]

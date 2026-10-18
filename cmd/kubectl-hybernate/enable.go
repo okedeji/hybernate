@@ -66,6 +66,8 @@ With --all, it ends dry-run for every workload in the namespace. When the
 namespace's annotation or the cluster's default keeps any of them in
 dry-run, it sets the namespace's annotation to "false" and drops the
 workloads' own; otherwise it sets each workload's annotation to "false".
+When your access doesn't allow changing the namespace, it leaves the
+namespace alone and sets each workload's annotation to "false" instead.
 ManagedWorkloads written by hand get spec.dryRun false.
 
 It changes nothing, and fails, for a workload Hybernate won't manage: one in
@@ -443,6 +445,9 @@ type namespaceEnabler struct {
 	enabled  int
 	git      []inGit
 	warnings []string
+	// ownAnnotations says the user may not change the namespace's
+	// annotation, so every workload gets its own.
+	ownAnnotations bool
 }
 
 func enableNamespace(ctx context.Context, c client.Client, namespace string, opts enableOptions, out io.Writer) error {
@@ -475,7 +480,18 @@ func enableNamespace(ctx context.Context, c client.Client, namespace string, opt
 	e := &namespaceEnabler{c: c, opts: opts}
 	namespaceEnded := false
 	if !nsLive && (nsSet || found.inherits) {
-		if namespaceEnded, err = e.namespace(ctx, &ns); err != nil {
+		namespaceEnded, err = e.namespace(ctx, &ns)
+		switch {
+		case apierrors.IsForbidden(err) && len(found.labelled) == 0 && len(found.handWritten) == 0:
+			return fmt.Errorf("namespace %s's %s annotation is all that's in dry-run, for the workloads Hybernate "+
+				"picks up later, and your access doesn't allow changing it; ask an admin to set it to \"false\": %w",
+				namespace, v1alpha1.AnnotationDryRun, err)
+		case apierrors.IsForbidden(err):
+			e.ownAnnotations = true
+			_, _ = fmt.Fprintf(out, "namespace %s: your access doesn't allow changing its %s annotation, so it was "+
+				"left alone; each workload gets its own \"false\" instead, which wins over it\n", namespace,
+				v1alpha1.AnnotationDryRun)
+		case err != nil:
 			return err
 		}
 		nsLive = namespaceEnded
@@ -581,9 +597,10 @@ func (e *namespaceEnabler) namespace(ctx context.Context, ns *corev1.Namespace) 
 
 // labelled ends dry-run for a workload opted in with the label. With the
 // namespace live, the workload's own annotation is only in the way; without
-// it, the workload needs its own "false".
+// it, the workload needs its own "false". One that takes the namespace's
+// annotation is left to the namespace, unless the user may not change it.
 func (e *namespaceEnabler) labelled(ctx context.Context, obj client.Object, nsLive bool) error {
-	if _, own := obj.GetAnnotations()[v1alpha1.AnnotationDryRun]; !own {
+	if _, own := obj.GetAnnotations()[v1alpha1.AnnotationDryRun]; !own && (nsLive || !e.ownAnnotations) {
 		if nsLive {
 			e.enabled++
 		}
@@ -750,7 +767,7 @@ func appliedBy(obj client.Object, path []string) applier {
 	}
 	var found applier
 	for _, entry := range entries {
-		if entry.FieldsV1 == nil || !ownsField(entry.FieldsV1.Raw, path) {
+		if !ownsField(entry.FieldsV1.GetRawBytes(), path) {
 			continue
 		}
 		if tool := gitops.ToolOf(entry.Manager); tool != "" {

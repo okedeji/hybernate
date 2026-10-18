@@ -56,12 +56,14 @@ var fixedTime = time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
 
 type stubPauser struct {
 	pauseDone    bool
+	podsRunning  int32
 	pauseErr     error
 	resumeDone   bool
 	resumeErr    error
 	pauseCalls   int
 	resumeCalls  int
 	restoreCalls int
+	restoreErr   error
 	// waited is how long the last resume said it had waited for its
 	// replicas since it scaled them up.
 	waited time.Duration
@@ -72,9 +74,15 @@ func (s *stubPauser) Prepare(_ context.Context, workload *v1alpha1.ManagedWorklo
 	return nil
 }
 
-func (s *stubPauser) Pause(_ context.Context, _ *v1alpha1.ManagedWorkload) (bool, error) {
+func (s *stubPauser) Pause(_ context.Context, w *v1alpha1.ManagedWorkload) (lifecycle.Suspension, error) {
 	s.pauseCalls++
-	return s.pauseDone, s.pauseErr
+	if s.pauseErr != nil {
+		return lifecycle.Suspension{}, s.pauseErr
+	}
+	if w.Status.Pause.PausedAt == nil {
+		w.Status.Pause.PausedAt = ptr.To(metav1.NewTime(fixedTime))
+	}
+	return lifecycle.Suspension{Done: s.pauseDone, Running: s.podsRunning}, nil
 }
 
 func (s *stubPauser) Resume(_ context.Context, _ *v1alpha1.ManagedWorkload, waited lifecycle.Waited) (lifecycle.Resumption, error) {
@@ -88,6 +96,9 @@ func (s *stubPauser) Resume(_ context.Context, _ *v1alpha1.ManagedWorkload, wait
 
 func (s *stubPauser) Restore(_ context.Context, w *v1alpha1.ManagedWorkload) (int32, error) {
 	s.restoreCalls++
+	if s.restoreErr != nil {
+		return 0, s.restoreErr
+	}
 	return w.Status.Pause.PreviousReplicas, nil
 }
 
@@ -198,6 +209,35 @@ func TestReconcile_SetsInitialPhaseToRunning(t *testing.T) {
 	assert.True(t, len(w.Finalizers) > 0, "finalizer should be set")
 }
 
+// A ManagedWorkload deleted without its finalizer running, such as one
+// whose finalizer was removed by hand, leaves nothing behind in memory: its
+// forecast, activity clock, routing backoff and doorman ports.
+func TestReconcile_DeletedWithoutItsFinalizerIsForgotten(t *testing.T) {
+	workload := lifecycleWorkload("api", v1alpha1.PhaseRunning)
+	workload.UID = "api-uid"
+	r := newTestReconciler(t, workload, &stubPauser{})
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+	r.forecastEngine(getWorkload(t, r, "api"))
+	r.activityMemo.put("api-uid", v1alpha1.ActivityStatus{})
+	r.doormanFailures.next("api-uid")
+	r.doormanPorts.claims = map[int32]portClaim{30001: {owner: "api-uid", at: fixedTime}}
+
+	gone := getWorkload(t, r, "api")
+	gone.Finalizers = nil
+	require.NoError(t, r.Update(context.Background(), gone))
+	require.NoError(t, r.Delete(context.Background(), gone))
+	_, err = r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	assert.NotContains(t, r.engines.engines, types.UID("api-uid"))
+	_, remembered := r.activityMemo.get("api-uid")
+	assert.False(t, remembered)
+	assert.NotContains(t, r.doormanFailures.failures, types.UID("api-uid"))
+	assert.Empty(t, r.doormanPorts.claims)
+	assert.Contains(t, r.doormanPorts.draining, int32(30001), "its port drains before another workload may have it")
+}
+
 func TestReconcile_NotFoundIsNoOp(t *testing.T) {
 	r := newTestReconciler(t, nil, &stubPauser{})
 	result, err := r.Reconcile(context.Background(), reconcileFor("missing"))
@@ -231,7 +271,7 @@ func TestReconcile_PauseNotDoneRequeues(t *testing.T) {
 }
 
 func TestReconcile_AlreadyPausedIsNoOp(t *testing.T) {
-	workload := withPauseRequested(lifecycleWorkload("api", v1alpha1.PhasePaused))
+	workload := withPauseRequested(pausedWorkload(v1alpha1.PhasePaused))
 
 	pauser := &stubPauser{}
 	r := newTestReconciler(t, workload, pauser)
@@ -242,7 +282,7 @@ func TestReconcile_AlreadyPausedIsNoOp(t *testing.T) {
 }
 
 func TestReconcile_ResumeTransitions(t *testing.T) {
-	workload := wokenByActivity(lifecycleWorkload("api", v1alpha1.PhasePaused))
+	workload := wokenByActivity(pausedWorkload(v1alpha1.PhasePaused))
 
 	pauser := &stubPauser{resumeDone: true}
 	r := newTestReconciler(t, workload, pauser)
@@ -256,7 +296,7 @@ func TestReconcile_ResumeTransitions(t *testing.T) {
 }
 
 func TestReconcile_ResumeNotReadyRequeues(t *testing.T) {
-	workload := wokenByActivity(lifecycleWorkload("api", v1alpha1.PhasePaused))
+	workload := wokenByActivity(pausedWorkload(v1alpha1.PhasePaused))
 
 	pauser := &stubPauser{resumeDone: false}
 	r := newTestReconciler(t, workload, pauser)
@@ -381,6 +421,36 @@ func TestReconcileDelete_RestoresAPausedWorkload(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A deleted paused workload is handed back once, though its ManagedWorkload
+// stays while its doorman ports drain: the reconciles meanwhile don't scale
+// it up again, over someone who has since scaled it to zero, re-annotate
+// KEDA, or wake its dependencies again.
+func TestReconcileDelete_HandsBackOnceWhileItsPortsDrain(t *testing.T) {
+	r, pauser := pausedRouted(t)
+	now := fixedTime
+	r.clock = func() time.Time { return now }
+	require.NoError(t, r.Delete(context.Background(), fetch(t, r, "api")))
+
+	for range 3 {
+		result, err := r.Reconcile(context.Background(), reconcileFor("api"))
+		require.NoError(t, err)
+		require.Positive(t, result.RequeueAfter, "still draining")
+		now = now.Add(portDrain / 4)
+	}
+
+	assert.Equal(t, 1, pauser.restoreCalls)
+	assert.Nil(t, fetch(t, r, "api").Status.Pause, "handed back")
+	assert.Equal(t, 1, strings.Count(drainEvents(t, r), "restored to 2 replicas: no longer managed"),
+		"announced once, when it's handed back")
+
+	now = now.Add(portDrain)
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+	var gone v1alpha1.ManagedWorkload
+	assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), reconcileFor("api").NamespacedName, &gone)))
+	assert.Equal(t, 1, pauser.restoreCalls)
 }
 
 func TestReconcile_TargetNotFoundSetsConditionAndRequeues(t *testing.T) {
@@ -551,6 +621,31 @@ func TestReconcile_DuplicateTargetBlocksNewer(t *testing.T) {
 	}
 }
 
+// A ManagedWorkload that becomes the duplicate while it holds the target
+// paused, as when an older one for it appears, hands the target back, or
+// it would stay at zero with nothing to wake it.
+func TestReconcile_BecomingTheDuplicateHandsBackAPause(t *testing.T) {
+	paused := pausedWorkload(v1alpha1.PhasePaused)
+	paused.UID, paused.CreationTimestamp = "bbb", metav1.NewTime(fixedTime)
+	paused.Status.Pause.ScaledObject = apiScaler
+	older := lifecycleWorkload("owner", v1alpha1.PhaseRunning)
+	older.Spec.Target = paused.Spec.Target
+	older.UID, older.CreationTimestamp = "aaa", metav1.NewTime(fixedTime.Add(-time.Hour))
+	r := lifecycleReconciler(t, paused, 0, interceptor.Funcs{}, older, apiScaledObject("0"))
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	got := getWorkload(t, r, "api")
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, conditionDuplicateTarget))
+	assert.Equal(t, v1alpha1.PhaseRunning, got.Status.Phase)
+	assert.Nil(t, got.Status.Pause)
+	assert.Equal(t, int32(3), targetReplicas(t, r), "handed back at the replicas it had")
+	_, held := pausedScaledObject(t, r)
+	assert.False(t, held, "KEDA is released")
+	assert.Contains(t, drainEvents(t, r), "restored to 3 replicas: Deployment/api is already managed by owner")
+}
+
 func TestReconcile_DuplicateTargetAllowsOlder(t *testing.T) {
 	older := &v1alpha1.ManagedWorkload{
 		ObjectMeta: metav1.ObjectMeta{
@@ -682,8 +777,7 @@ func newSharedTargetReconciler(t *testing.T, objs ...client.Object) (*Reconciler
 	t.Helper()
 	scheme := testScheme(t)
 	recorder := events.NewFakeRecorder(10)
-	k := fake.NewClientBuilder().
-		WithScheme(scheme).
+	k := withWorkloadIndexes(fake.NewClientBuilder().WithScheme(scheme)).
 		WithStatusSubresource(&v1alpha1.ManagedWorkload{}).
 		WithObjects(append(objs, targetDeployment("idle-app", "default"))...).
 		Build()
@@ -1072,6 +1166,7 @@ func TestReconcile_ResumesInterruptedTransition(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			workload := lifecycleWorkload("stuck-app", tt.phase)
+			workload.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1}
 			pauser := &stubPauser{pauseDone: true, resumeDone: true}
 			r := newTestReconciler(t, workload, pauser)
 
@@ -1331,6 +1426,7 @@ func TestLifecycle_InterruptedTransitionsComplete(t *testing.T) {
 		pause        *v1alpha1.PauseStatus
 		requested    bool
 		woken        bool
+		copied       bool
 		dryRun       bool
 		idlePolicy   *v1alpha1.IdlePolicySpec
 		replicas     int32
@@ -1340,16 +1436,20 @@ func TestLifecycle_InterruptedTransitionsComplete(t *testing.T) {
 		{name: "pausing, to pause", phase: v1alpha1.PhasePausing, pause: recorded(), wantPhase: v1alpha1.PhasePaused},
 		{name: "pausing on idle, to pause", phase: v1alpha1.PhasePausing, pause: recorded(), idlePolicy: idlePolicy,
 			wantPhase: v1alpha1.PhasePaused},
-		{name: "pausing, record from an earlier version missing", phase: v1alpha1.PhasePausing, replicas: 3,
-			wantPhase: v1alpha1.PhasePaused},
+		{name: "pausing, record lost before anything was scaled", phase: v1alpha1.PhasePausing, replicas: 3,
+			wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
 		{name: "pausing, but now in dry-run", phase: v1alpha1.PhasePausing, pause: recorded(), dryRun: true,
 			idlePolicy: idlePolicy, wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
 		{name: "paused, then dry-run switched on", phase: v1alpha1.PhasePaused, pause: recorded(), dryRun: true,
 			idlePolicy: idlePolicy, wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
 		{name: "paused, woken", phase: v1alpha1.PhasePaused, pause: recorded(), woken: true,
 			wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
-		{name: "paused, record from an earlier version missing, woken", phase: v1alpha1.PhasePaused, woken: true,
-			wantPhase: v1alpha1.PhaseRunning, wantReplicas: 1},
+		{name: "paused, record lost, its copy on the target", phase: v1alpha1.PhasePaused, copied: true,
+			wantPhase: v1alpha1.PhasePaused},
+		{name: "paused, record lost, no copy on the target", phase: v1alpha1.PhasePaused,
+			wantPhase: v1alpha1.PhaseRunning},
+		{name: "resuming, record lost, scaled up, its copy on the target", phase: v1alpha1.PhaseResuming,
+			replicas: 3, copied: true, wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
 		{name: "resuming", phase: v1alpha1.PhaseResuming, pause: recorded(), wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
 		{name: "resumed, but Running wasn't recorded", phase: v1alpha1.PhaseResuming, replicas: 3,
 			wantPhase: v1alpha1.PhaseRunning, wantReplicas: 3},
@@ -1397,12 +1497,17 @@ func TestLifecycle_InterruptedTransitionsComplete(t *testing.T) {
 					}
 				}
 				r := lifecycleReconciler(t, workload, tt.replicas, funcs)
+				if tt.copied {
+					copyPauseRecord(t, r, `{"replicas":3}`)
+				}
 
 				reconcileUntilSettled(t, r)
 
 				got := getWorkload(t, r, "api")
 				assert.Equal(t, tt.wantPhase, got.Status.Phase)
 				assert.Equal(t, tt.wantReplicas, targetReplicas(t, r))
+				_, copied := targetDeploymentOf(t, r).Annotations[v1alpha1.AnnotationPausedFrom]
+				assert.Equal(t, tt.wantPhase == v1alpha1.PhasePaused, copied, "the target carries a copy while paused")
 				if tt.wantPhase == v1alpha1.PhasePaused {
 					require.NotNil(t, got.Status.Pause)
 					assert.Equal(t, int32(3), got.Status.Pause.PreviousReplicas, "what it resumes to")

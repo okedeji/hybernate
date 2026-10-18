@@ -108,7 +108,13 @@ func TestValidateOptInDefaults(t *testing.T) {
 		{name: "threshold of 0, which the CRD turns into 10",
 			mutate: func(d *controller.OptInDefaults) { d.CPUThreshold = 0 }, wantErr: true},
 		{name: "negative threshold", mutate: func(d *controller.OptInDefaults) { d.CPUThreshold = -5 }, wantErr: true},
+		{name: "idleAfter of a minute", mutate: func(d *controller.OptInDefaults) { d.IdleAfter = time.Minute }},
+		{name: "idleAfter under a minute, below the CRD's minimum",
+			mutate: func(d *controller.OptInDefaults) { d.IdleAfter = 59 * time.Second }, wantErr: true},
 		{name: "zero idleAfter", mutate: func(d *controller.OptInDefaults) { d.IdleAfter = 0 }, wantErr: true},
+		{name: "idleAfter of a minute", mutate: func(d *controller.OptInDefaults) { d.IdleAfter = time.Minute }},
+		{name: "idleAfter under the CRD's minute, which would pause and wake in a loop",
+			mutate: func(d *controller.OptInDefaults) { d.IdleAfter = 30 * time.Second }, wantErr: true},
 		{name: "negative idleAfter", mutate: func(d *controller.OptInDefaults) { d.IdleAfter = -time.Minute },
 			wantErr: true},
 	}
@@ -159,13 +165,11 @@ func managedFields(t *testing.T) []metav1.ManagedFieldsEntry {
 	}
 	return []metav1.ManagedFieldsEntry{
 		{Manager: "argocd-controller", Operation: metav1.ManagedFieldsOperationApply, Time: at(1),
-			FieldsV1: &metav1.FieldsV1{
-				Raw: []byte(`{"f:metadata":{"f:labels":{}},"f:spec":{"f:replicas":{},"f:template":{}}}`),
-			}},
+			FieldsV1: metav1.NewFieldsV1(`{"f:metadata":{"f:labels":{}},"f:spec":{"f:replicas":{},"f:template":{}}}`)},
 		{Manager: "kube-controller-manager", Operation: metav1.ManagedFieldsOperationUpdate, Time: at(5),
-			FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{"f:replicas":{},"f:readyReplicas":{}}}`)}},
+			FieldsV1: metav1.NewFieldsV1(`{"f:status":{"f:replicas":{},"f:readyReplicas":{}}}`)},
 		{Manager: "kubectl-edit", Operation: metav1.ManagedFieldsOperationUpdate, Time: at(3),
-			FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:spec":{"f:template":{"f:spec":{}}}}`)}},
+			FieldsV1: metav1.NewFieldsV1(`{"f:spec":{"f:template":{"f:spec":{}}}}`)},
 	}
 }
 

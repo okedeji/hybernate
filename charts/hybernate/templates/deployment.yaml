@@ -7,6 +7,14 @@ metadata:
     {{- include "hybernate.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if not .Values.leaderElection.enabled }}
+  {{- /*
+  Without a lease, a rolling update's surge pod would act alongside the
+  old one.
+  */}}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "hybernate.selectorLabels" . | nindent 6 }}
@@ -25,7 +33,11 @@ spec:
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
-      terminationGracePeriodSeconds: 10
+      {{- /*
+      The manager's 30s for running reconciles to finish, which then
+      releases the lease, with room to exit before SIGKILL.
+      */}}
+      terminationGracePeriodSeconds: 40
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -41,26 +53,28 @@ spec:
             {{- end }}
             - --health-probe-bind-address=:8081
             {{- if .Values.metrics.enabled }}
-            - --metrics-bind-address=:{{ .Values.metrics.port }}
-            - --metrics-secure={{ .Values.metrics.secure }}
+            - {{ printf "--metrics-bind-address=:%v" .Values.metrics.port | quote }}
+            - {{ printf "--metrics-secure=%v" .Values.metrics.secure | quote }}
             {{- end }}
-            - --zap-log-level={{ .Values.logLevel }}
-            - --zap-encoder={{ .Values.logEncoder }}
-            - --max-concurrent-reconciles={{ .Values.maxConcurrentReconciles }}
-            - --timezone={{ .Values.timezone }}
+            - {{ printf "--zap-log-level=%v" .Values.logLevel | quote }}
+            - {{ printf "--zap-encoder=%v" .Values.logEncoder | quote }}
+            - {{ printf "--max-concurrent-reconciles=%v" .Values.maxConcurrentReconciles | quote }}
+            - {{ printf "--timezone=%v" .Values.timezone | quote }}
             {{- with .Values.watchNamespaces }}
-            - --watch-namespaces={{ join "," . }}
+            - {{ printf "--watch-namespaces=%s" (join "," .) | quote }}
             {{- end }}
             {{- with .Values.protectedNamespaces }}
-            - --protected-namespaces={{ join "," . }}
+            - {{ printf "--protected-namespaces=%s" (join "," .) | quote }}
             {{- end }}
             {{- with .Values.prometheus.url }}
-            - --prometheus-url={{ . }}
+            - {{ printf "--prometheus-url=%v" . | quote }}
             {{- end }}
-            - --default-idle-after={{ .Values.defaults.idleAfter }}
-            - --default-cpu-threshold={{ .Values.defaults.cpuThreshold }}
-            - --default-dry-run={{ .Values.defaults.dryRun }}
-            - --doorman-service={{ if .Values.doorman.enabled }}{{ include "hybernate.doormanName" . }}{{ end }}
+            - {{ printf "--default-idle-after=%v" .Values.defaults.idleAfter | quote }}
+            - {{ printf "--default-cpu-threshold=%v" .Values.defaults.cpuThreshold | quote }}
+            - {{ printf "--default-dry-run=%v" .Values.defaults.dryRun | quote }}
+            - {{ printf "--doorman-service=%s" (ternary (include "hybernate.doormanName" .) "" .Values.doorman.enabled) | quote }}
+            - {{ printf "--doorman-ports-per-workload=%v" .Values.doorman.portsPerWorkload | quote }}
+            - {{ printf "--doorman-ports-per-namespace=%v" .Values.doorman.portsPerNamespace | quote }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

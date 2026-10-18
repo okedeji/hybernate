@@ -39,10 +39,10 @@ Set on an opted-in Deployment or StatefulSet, or on its Namespace to apply to ev
 | Annotation | Accepted values | Default | Description |
 |------------|-----------------|---------|-------------|
 | `hybernate.io/dry-run` | exactly `"true"` or `"false"` | `"false"` | Measure without pausing |
-| `hybernate.io/idle-after` | a Go duration above zero, such as `"90m"` or `"2h"` | `1h` | How long without activity before pausing |
+| `hybernate.io/idle-after` | a Go duration of at least `1m`, such as `"90m"` or `"2h"` | `1h` | How long without activity before pausing |
 | `hybernate.io/cpu-threshold` | a whole number, `"1"` to `"100"` | `10` | CPU use, as a percentage of requests, above which the workload counts as active |
 | `hybernate.io/auto-resume` | exactly `"true"` or `"false"` | `"false"` | Wake ahead of forecast demand |
-| `hybernate.io/depends-on` | comma-separated `kind/name` or `namespace/kind/name`, kind `deployment` or `statefulset` | none | Workloads this one needs. An empty value declares none, so a workload can drop its namespace's. On a namespace, it leaves out the workload it names, which doesn't depend on itself |
+| `hybernate.io/depends-on` | comma-separated `kind/name` or `namespace/kind/name`, kind `deployment` or `statefulset` | none | Workloads this one needs. An empty value declares none, so a workload can drop its namespace's. On a namespace, it leaves out the workloads it names, and those they depend on by their own `depends-on`, which are dependencies rather than dependents. One in another namespace needs that namespace's `hybernate.io/dependents-from` |
 | `hybernate.io/wake-on-request` | exactly `"true"` or `"false"` | `"true"` | Wake when a request reaches the workload's Service |
 | `hybernate.io/wake-max-wait` | a Go duration above zero, at most `1h` | `2m` | How long a request is held while the workload wakes |
 | `hybernate.io/wake-page` | exactly `"true"` or `"false"` | `"true"` | Show browsers a waking-up page |
@@ -61,7 +61,7 @@ A value that can't be read, such as `"True"`, `"yes"`, `"soon"` or `"0"`, is rep
 | `hybernate.io/last-request` | RFC 3339 time | ManagedWorkloads | Set by the doorman when it holds a request for a paused workload. Wakes it like `last-activity`, and the clock records the wake as `request`. See [Wake on Request](../concepts/wake-on-request.md) |
 | `hybernate.io/last-request-from` | IP address | ManagedWorkloads | Set by the doorman with `last-request`: where the request that woke the workload came from, so the operator can [learn](../concepts/dependencies.md#learned-dependencies) which workload depends on it |
 
-A value that isn't an RFC 3339 time is ignored and logged.
+A value that isn't an RFC 3339 time, such as epoch seconds, is ignored: it neither keeps the workload awake nor wakes it, and an `InvalidActivityAnnotation` warning event on the ManagedWorkload says so, once per value.
 
 ## Other Annotations
 
@@ -69,6 +69,8 @@ A value that isn't an RFC 3339 time is ignored and logged.
 |------------|-------|-----------|-------------|
 | `hybernate.io/pause-requested` | any value that differs from the last request's, such as the time | ManagedWorkloads | Asks Hybernate to pause the workload now, as if its idle clock had run out; set by `kubectl hybernate pause`. Each value is acted on once and recorded in `status.lastPauseRequest`. An annotation, so a GitOps tool that owns the spec leaves it alone. See [Pause Now](../guides/pause.md#pause-now) |
 | `hybernate.io/pause-overrides-forecast` | `"true"` | ManagedWorkloads | With a pause request, pauses the workload even when a confident forecast expects demand within the hour; without it, such a request is declined, saying when. It applies to the request it comes with, so set or remove it with every request; `kubectl hybernate pause --yes` sets it. See [Pause Now](../guides/pause.md#pause-now) |
+| `hybernate.io/dependents-from` | comma-separated namespace names, or `"*"` for any | Namespaces | Lets workloads in those namespaces depend on this namespace's workloads. A dependency in another namespace, declared or learned, is only held awake, woken and waited for when its namespace lists the dependent's; otherwise the dependent reports `DependencyNotAllowed=True`. See [Across namespaces](../concepts/dependencies.md#across-namespaces) |
+| `hybernate.io/paused-from` | JSON, set by Hybernate | Deployments, StatefulSets | Written by Hybernate on a workload it pauses, before scaling it to zero, and removed when it's handed back: a copy of what the pause changed (the replicas, and the KEDA ScaledObject with its own `paused-replicas` value). If the ManagedWorkload's status is lost while the workload is paused, such as to a backup restored without status, Hybernate takes the pause up again from it, so the workload still wakes to the replicas it had. Don't set or edit it |
 | `hybernate.io/ignore-dependencies` | comma-separated `namespace/name`, or a name in the workload's own namespace | Deployments, StatefulSets, ManagedWorkloads | Dependencies Hybernate shouldn't learn for this workload. See [Learned dependencies](../concepts/dependencies.md#learned-dependencies) |
 | `hybernate.io/doorman-ignore-ports` | comma-separated port names or numbers | Services | Ports the doorman never routes, such as a metrics port something else scrapes. They fail while the workload is paused. See [Wake on Request](../concepts/wake-on-request.md#what-wakes-a-workload-and-what-doesnt) |
 
@@ -79,4 +81,4 @@ A value that isn't an RFC 3339 time is ignored and logged.
 | `hybernate.io/cleanup` | ManagedWorkloads | Added automatically by the operator. Ensures a paused workload is scaled back up, and its Services stop routing to the doorman, before the ManagedWorkload can be deleted. The operator removes it once that's done. |
 
 !!! note
-    Do not remove the `hybernate.io/cleanup` finalizer by hand. A ManagedWorkload deleted without it leaves a paused workload at zero replicas, and its KEDA ScaledObject held there.
+    Do not remove the `hybernate.io/cleanup` finalizer by hand. A ManagedWorkload deleted without it leaves a paused workload at zero replicas, and its KEDA ScaledObject held there, until a ManagedWorkload for the workload is created again and takes the pause up from its `hybernate.io/paused-from` annotation.

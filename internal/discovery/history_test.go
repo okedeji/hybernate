@@ -21,6 +21,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -513,6 +515,51 @@ func TestScanCluster_SlowAPIServerSpendsTheHistoryBudget(t *testing.T) {
 	notes := strings.Join(report.Notes, "\n")
 	assert.Contains(t, notes, "the scan ran out of the time it gives CPU history")
 	assert.NotContains(t, notes, "Prometheus didn't")
+}
+
+// A history query gets the time the scan gives history, not a fixed limit,
+// so a Prometheus slower than that limit still answers within a longer
+// --timeout.
+func TestPrometheus_HistoryQueryGetsTheTimeHistoryHas(t *testing.T) {
+	var deadline time.Time
+	p := &Prometheus{Source: "thanos", get: func(ctx context.Context, _ string, _ url.Values) ([]byte, error) {
+		deadline, _ = ctx.Deadline()
+		return []byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`), nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	want, _ := ctx.Deadline()
+
+	_, err := p.namespaceCPU(ctx, testNamespace, scanTime.Add(-time.Hour), scanTime, minStep)
+
+	require.NoError(t, err)
+	assert.Equal(t, want, deadline)
+}
+
+// When Prometheus, or the API server's proxy in front of it, gives up on a
+// query on its own with time left, it's the query that was too big: the
+// notes say so, and don't blame --timeout, which more of wouldn't help.
+func TestScanCluster_PrometheusGivesUpOnItsOwn(t *testing.T) {
+	prom := &Prometheus{Source: "monitoring/prometheus", get: func(context.Context, string, url.Values) ([]byte, error) {
+		return nil, apierrors.NewTimeoutError("the proxy timed out", 0)
+	}}
+	objs := deploymentWithRollout("api", testNamespace, 1, 30*24*time.Hour)
+	objs = append(objs, makePodMetrics("api", testNamespace, "1m", "20Mi"))
+	opts := scanOptions(testNamespace)
+	opts.History, opts.Window, opts.IdleAfter = prom, 7*24*time.Hour, time.Hour
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(objs...).Build()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	report, err := NewScanner(c, c).ScanCluster(ctx, opts)
+
+	require.NoError(t, err)
+	assert.Equal(t, StateIdle, byName(report)["api"].State, "judged from CPU right now")
+	notes := strings.Join(report.Notes, "\n")
+	assert.Contains(t, notes, "gave up on the CPU history of 1 namespace after up to 0s, with time left, so "+
+		"workloads there are judged from CPU right now: "+testNamespace+". A shorter --window asks it for less")
+	assert.NotContains(t, notes, "--timeout")
+	assert.Nil(t, report.Incomplete)
 }
 
 func TestJudgeFromHistory(t *testing.T) {

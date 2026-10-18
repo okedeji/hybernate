@@ -364,9 +364,10 @@ func (s *Scanner) readHistory(ctx context.Context, namespace string, opts Cluste
 // That's its first sample rather than its creation time because a
 // workload deleted and created again with the same pod template, as a
 // reinstall does, runs the same pods, whose history is its own. Its
-// requests and prices are today's, since the history only records CPU.
-func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, podsOf podNames, since time.Time,
-	rollouts []time.Time, threshold int, idleAfter time.Duration, opts ClusterOptions) *History {
+// requests and prices are today's, since the history only records CPU:
+// ownCPU is what one of its pods requests now for its own containers.
+func replayWorkload(w Workload, spec corev1.PodSpec, ownCPU int64, history []containerCPU, podsOf podNames,
+	since time.Time, rollouts []time.Time, threshold int, idleAfter time.Duration, opts ClusterOptions) *History {
 	containers := make([]string, 0, len(spec.Containers))
 	for _, c := range metrics.WorkloadContainers(spec) {
 		containers = append(containers, c.Name)
@@ -381,7 +382,6 @@ func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, pod
 		}
 	}
 
-	ownCPU, _ := metrics.Requests(metrics.WorkloadContainers(spec))
 	step := historyStep(opts.Window)
 	h := replay{
 		start:        since,
@@ -402,11 +402,11 @@ func replayWorkload(w Workload, spec corev1.PodSpec, history []containerCPU, pod
 // CouldSave is what pausing a workload Hybernate doesn't pause yet would
 // free a month: measured, for one in dry-run, or estimated from history,
 // for one Hybernate doesn't manage. It's 0 for a live workload, whose
-// saving is already happening, and for one already scaled to zero, which
-// pausing can't free any more of.
+// saving is already happening, for one already scaled to zero, which
+// pausing can't free any more of, and for one Hybernate refuses to pause.
 func CouldSave(w Workload) float64 {
 	switch {
-	case w.ScaledByHand:
+	case w.ScaledByHand || w.WontPause != "":
 		return 0
 	case w.Measured != nil:
 		return w.Measured.MonthlyFreed

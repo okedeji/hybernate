@@ -131,7 +131,11 @@ func accruePaused(c *v1alpha1.CostStatus, pause *v1alpha1.PauseStatus, elapsed t
 }
 
 // accrueAwake counts an awake interval at what the workload runs now: its
-// replicas from the target, what each one requests, and its claims.
+// replicas from the target, what each one requests, and its claims. With
+// the replicas unreadable, it's counted at what was last read. A transition
+// settles the interval before the phase changes, and an interval left
+// unsettled would be counted in the next phase: up to a flush interval of
+// running priced as saved.
 func (r *Reconciler) accrueAwake(ctx context.Context, workload *v1alpha1.ManagedWorkload, elapsed time.Duration, now time.Time) error {
 	logger := log.FromContext(ctx)
 	c := workload.Status.Cost
@@ -140,11 +144,15 @@ func (r *Reconciler) accrueAwake(ctx context.Context, workload *v1alpha1.Managed
 		*running = *c.Running
 	}
 
-	replicas, err := r.metrics.Replicas(ctx, workload)
-	if err != nil {
+	switch replicas, err := r.metrics.Replicas(ctx, workload); {
+	case err == nil:
+		running.Replicas = replicas
+	case c.Running == nil:
 		return fmt.Errorf("reading replicas: %w", err)
+	default:
+		logger.V(1).Info("keeping the last replicas read", "workload", workload.Name,
+			"namespace", workload.Namespace, "error", err.Error())
 	}
-	running.Replicas = replicas
 
 	if storage, err := r.metrics.TotalPVCBytes(ctx, workload); err != nil {
 		logger.V(1).Info("keeping the last storage read", "workload", workload.Name,
@@ -290,9 +298,15 @@ func (r *Reconciler) captureResourceSnapshot(ctx context.Context, workload *v1al
 
 	// Savings are priced on requests, not live usage: requests are what a
 	// pod reserves on a node, and what discovery estimates are based on.
-	if replicas, err := r.metrics.Replicas(ctx, workload); err != nil {
+	// A pause records the replicas it will scale from. One resumed from
+	// Pausing without its record finds the target at zero already, which
+	// is what the pause did, not what it saves.
+	pause := workload.Status.Pause
+	if pause != nil && pause.PreviousReplicas > 0 {
+		snap.Replicas = pause.PreviousReplicas
+	} else if replicas, err := r.metrics.Replicas(ctx, workload); err != nil {
 		fellBack("replicas", err)
-	} else {
+	} else if replicas > 0 || pause == nil {
 		snap.Replicas = replicas
 	}
 

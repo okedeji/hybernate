@@ -64,16 +64,17 @@ control-plane: doorman
 {{- end }}
 
 {{/*
-Uninstall guard labels. Distinct from the operator's, so the operator's
-metrics Service and NetworkPolicy don't select the hook's pod.
+A guard hook's labels, given the root context and the operation it
+guards. Distinct from the operator's, so the operator's metrics Service
+and NetworkPolicy don't select the hook's pod.
 */}}
-{{- define "hybernate.uninstallGuardLabels" -}}
-helm.sh/chart: {{ include "hybernate.chart" . }}
-app.kubernetes.io/name: {{ include "hybernate.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
-control-plane: uninstall-guard
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- define "hybernate.guardLabels" -}}
+helm.sh/chart: {{ include "hybernate.chart" .root }}
+app.kubernetes.io/name: {{ include "hybernate.name" .root }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+control-plane: {{ .op }}-guard
+app.kubernetes.io/version: {{ .root.Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .root.Release.Service }}
 {{- end }}
 
 {{- define "hybernate.doormanLabels" -}}
@@ -83,14 +84,8 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
-{{- define "hybernate.uninstallGuardName" -}}
-{{- printf "%s-uninstall-guard" (include "hybernate.fullname" .) }}
-{{- end }}
-
-{{- define "hybernate.uninstallGuardImage" -}}
-{{- with .Values.uninstallGuard.image }}
-{{- .repository }}:{{ .tag }}{{ with .digest }}@{{ . }}{{ end }}
-{{- end }}
+{{- define "hybernate.guardName" -}}
+{{- printf "%s-%s-guard" (include "hybernate.fullname" .root) .op }}
 {{- end }}
 
 {{/*
@@ -140,7 +135,7 @@ watchNamespaces, a Role's in each of them.
   verbs: [get, list, watch]
 - apiGroups: [apps]
   resources: [deployments, statefulsets]
-  verbs: [get, list, watch]
+  verbs: [get, list, patch, watch]
 - apiGroups: [apps]
   resources: [deployments/scale, statefulsets/scale]
   verbs: [get, update]
@@ -185,6 +180,9 @@ The doorman's rules, all on namespaced resources.
 - apiGroups: [discovery.k8s.io]
   resources: [endpointslices]
   verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get]
 - apiGroups: ["", events.k8s.io]
   resources: [events]
   verbs: [create, patch]

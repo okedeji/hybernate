@@ -1,6 +1,7 @@
-// Package doormanpolicy tests the chart's ValidatingAdmissionPolicy for the
-// doorman against a real API server. make test-doorman-policy renders the
-// chart and runs it; without CHART_MANIFEST it's skipped.
+// Package doormanpolicy tests the doorman's ValidatingAdmissionPolicy, as
+// the chart and the kustomize manifests install it, against a real API
+// server. make test-doorman-policy renders both and runs it; with neither
+// CHART_MANIFEST nor KUSTOMIZE_MANIFEST set it's skipped.
 package doormanpolicy
 
 import (
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,11 +31,7 @@ import (
 	"github.com/okedeji/hybernate/api/v1alpha1"
 )
 
-const (
-	releaseNamespace = "hybernate-system"
-	doormanUser      = "system:serviceaccount:" + releaseNamespace + ":hybernate-doorman"
-	workloadNS       = "shop"
-)
+const workloadNS = "shop"
 
 var appliedKinds = map[string]bool{
 	"ClusterRole":                      true,
@@ -43,11 +41,25 @@ var appliedKinds = map[string]bool{
 }
 
 func TestDoormanMayOnlyStampRequests(t *testing.T) {
-	manifest := os.Getenv("CHART_MANIFEST")
-	if manifest == "" {
-		t.Skip("CHART_MANIFEST isn't set; run make test-doorman-policy")
+	manifests := []struct{ name, env string }{
+		{name: "chart", env: "CHART_MANIFEST"},
+		{name: "kustomize", env: "KUSTOMIZE_MANIFEST"},
 	}
+	ran := false
+	for _, m := range manifests {
+		path := os.Getenv(m.env)
+		if path == "" {
+			continue
+		}
+		ran = true
+		t.Run(m.name, func(t *testing.T) { testPolicy(t, path) })
+	}
+	if !ran {
+		t.Skip("neither CHART_MANIFEST nor KUSTOMIZE_MANIFEST is set; run make test-doorman-policy")
+	}
+}
 
+func testPolicy(t *testing.T, manifest string) {
 	env := &envtest.Environment{CRDDirectoryPaths: []string{filepath.Join("..", "..", "config", "crd", "bases")}}
 	cfg, err := env.Start()
 	require.NoError(t, err)
@@ -59,7 +71,7 @@ func TestDoormanMayOnlyStampRequests(t *testing.T) {
 	scheme := clientScheme(t)
 	admin, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
-	applyChart(ctx, t, admin, manifest)
+	doormanUser := apply(ctx, t, admin, manifest)
 
 	require.NoError(t, admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workloadNS}}))
 	workload := &v1alpha1.ManagedWorkload{
@@ -132,12 +144,16 @@ func clientScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func applyChart(ctx context.Context, t *testing.T, c client.Client, path string) {
+// apply creates the manifest's cluster-wide RBAC and admission policy, and
+// returns the username of the doorman's ServiceAccount, wherever and
+// whatever the manifest named it.
+func apply(ctx context.Context, t *testing.T, c client.Client, path string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	decoder := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096)
 	applied := 0
+	var doormanUser string
 	for {
 		var obj unstructured.Unstructured
 		err := decoder.Decode(&obj.Object)
@@ -145,11 +161,18 @@ func applyChart(ctx context.Context, t *testing.T, c client.Client, path string)
 			break
 		}
 		require.NoError(t, err)
+		if obj.GetKind() == "ServiceAccount" && strings.HasSuffix(obj.GetName(), "doorman") {
+			doormanUser = "system:serviceaccount:" + obj.GetNamespace() + ":" + obj.GetName()
+		}
 		if !appliedKinds[obj.GetKind()] {
 			continue
 		}
+		// Kustomize gives cluster-scoped objects its namespace too.
+		obj.SetNamespace("")
 		require.NoError(t, c.Create(ctx, &obj), "creating %s %s", obj.GetKind(), obj.GetName())
 		applied++
 	}
-	require.Positive(t, applied, "the chart rendered nothing to apply")
+	require.Positive(t, applied, "the manifest has nothing to apply")
+	require.NotEmpty(t, doormanUser, "the manifest has no doorman ServiceAccount")
+	return doormanUser
 }

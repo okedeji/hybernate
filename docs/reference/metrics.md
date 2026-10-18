@@ -8,8 +8,9 @@ These metrics show whether the operator is healthy and what phase each workload 
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
+| `hybernate_build_info` | Gauge | `version` | Always 1, labelled with the release the pod runs, such as `v0.2.0`. Served by the doorman too |
 | `hybernate_workload_phase` | Gauge | `namespace`, `workload`, `phase` | 1 for each workload's current lifecycle phase |
-| `hybernate_reconcile_errors_total` | Counter | `controller` | Reconciliation errors by controller |
+| `hybernate_reconcile_errors_total` | Counter | `controller` | Reconciles that returned an error, by `controller`: `managedworkload`, or `optin` for the controller that creates ManagedWorkloads from the `hybernate.io/managed` label |
 | `hybernate_lifecycle_transitions_total` | Counter | `from`, `to` | Phase transitions |
 | `hybernate_lifecycle_action_duration_seconds` | Histogram | `action` | Duration of lifecycle actions (pause, resume) |
 
@@ -48,6 +49,7 @@ Served by the doorman pods, on the same port and path as the operator's metrics.
 | `hybernate_doorman_held_connections` | Gauge | | Connections held right now, waiting for their workload to wake |
 | `hybernate_doorman_proxied_connections` | Gauge | | Connections passed to a woken workload and still being carried |
 | `hybernate_doorman_port_conflicts` | Gauge | | Doorman ports claimed by more than one route, which the doorman refuses to serve. Should be 0 |
+| `hybernate_doorman_listen_failures` | Gauge | | Routed doorman ports this pod can't listen on, which refuse every connection. Should be 0; a pod that can't listen on one for 30 seconds reports itself not Ready |
 
 | `result` | Meaning |
 |----------|---------|

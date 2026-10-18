@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -186,15 +187,40 @@ func (k *kubeFlags) client(ctx context.Context) (client.Client, cluster, error) 
 
 // cancelWith ends every request to the API server when ctx ends. The
 // client's API discovery doesn't take a context, so without it a command
-// past its deadline still waits out each discovery request in turn.
+// past its deadline still waits out each discovery request in turn. Each
+// request's hook on ctx is let go once its response body is closed, or it
+// fails, so a command's thousands of requests don't keep theirs.
 func cancelWith(ctx context.Context) func(http.RoundTripper) http.RoundTripper {
 	return func(rt http.RoundTripper) http.RoundTripper {
 		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 			reqCtx, cancel := context.WithCancelCause(r.Context())
-			context.AfterFunc(ctx, func() { cancel(context.Cause(ctx)) })
-			return rt.RoundTrip(r.WithContext(reqCtx))
+			stop := context.AfterFunc(ctx, func() { cancel(context.Cause(ctx)) })
+			release := func() {
+				stop()
+				cancel(nil)
+			}
+			resp, err := rt.RoundTrip(r.WithContext(reqCtx))
+			if err != nil {
+				release()
+				return nil, err
+			}
+			resp.Body = &releasingBody{ReadCloser: resp.Body, release: release}
+			return resp, nil
 		})
 	}
+}
+
+// releasingBody is a response body that lets go of its request's hooks
+// once it's closed.
+type releasingBody struct {
+	io.ReadCloser
+	release func()
+}
+
+func (b *releasingBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.release()
+	return err
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -286,8 +312,16 @@ func writeOutput(w io.Writer, output string, v any, table func() error) error {
 	return table()
 }
 
-// oneLine keeps a message from a condition or event on one table row: a
-// tab or newline in it would break the columns.
+// oneLine keeps a message from a condition, an event or another server on
+// one table row: a tab or newline in it would break the columns. What can't
+// be printed, such as a terminal escape sequence's ESC, is dropped, so the
+// message can't restyle or rewrite the terminal.
 func oneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	printable := strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) || unicode.IsSpace(r) {
+			return r
+		}
+		return -1
+	}, s)
+	return strings.Join(strings.Fields(printable), " ")
 }

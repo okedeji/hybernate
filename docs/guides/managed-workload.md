@@ -18,7 +18,7 @@ spec:
 
 This is the absolute minimum: only `target` is required, and everything else takes its default. The operator will watch the Deployment, track its cost and learn its forecast, but won't pause it on its own until you add an idle policy; [`kubectl hybernate pause`](pause.md#pause-now) pauses it when you ask.
 
-For most workloads you don't need to write one: the `hybernate.io/managed` label creates one from annotations; see [Opting In](opt-in.md). Write one yourself for settings annotations don't cover, such as Prometheus queries, `waitForReady`, or cost rates. A ManagedWorkload you write for a workload wins over the label.
+For most workloads you don't need to write one: the `hybernate.io/managed` label creates one from annotations; see [Opting In](opt-in.md). Settings annotations don't cover, such as Prometheus queries, `waitForReady`, or cost rates, can be set on the ManagedWorkload the label creates, which keeps them, or in one you write yourself. A ManagedWorkload you write for a workload wins over the label.
 
 ## Full Example
 
@@ -75,16 +75,16 @@ See [Idle Detection](../concepts/idle-detection.md) for how the activity clock w
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `idleAfter` | duration | `1h` | How long without any activity before pausing |
+| `idleAfter` | duration, at least `1m` | `1h` | How long without any activity before pausing |
 | `activity.cpuThreshold` | int (percent) | `10` | CPU utilization, as % of requests, above which the workload counts as active (1-100) |
-| `activity.prometheus[].promQL` | string | _(none)_ | PromQL query; a result above zero counts as activity. See the [Prometheus Activity Guide](prometheus-signals.md) |
+| `activity.prometheus[].promQL` | string | _(none)_ | PromQL query; a result above zero counts as activity. At most 10. See the [Prometheus Activity Guide](prometheus-signals.md) |
 | `autoResume` | bool | `false` | Wake ahead of the demand a confident forecast predicts |
 
 Deploys and the `hybernate.io/last-activity` and `hybernate.io/active-until` annotations always count as activity; see [Idle Detection](../concepts/idle-detection.md#activity-annotations).
 
 ### `dependsOn`
 
-Workloads this one needs. A dependency isn't paused while this workload is awake, and waking this workload wakes it. See [Dependencies](../concepts/dependencies.md).
+Workloads this one needs, at most 20. A dependency isn't paused while this workload is awake, and waking this workload wakes it. See [Dependencies](../concepts/dependencies.md).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -120,6 +120,8 @@ Cost tracking is always on, priced at the list price of the nodes the workload r
 | `rates.cpuPerHour` | quantity | `0.031` | $/vCPU-hour |
 | `rates.memoryPerHour` | quantity | `0.004` | $/GiB-hour |
 | `rates.storagePerMonth` | quantity | `0.08` | $/GiB-month |
+
+None of the rates may be negative.
 
 ### Scaled up outside Hybernate
 

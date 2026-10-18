@@ -4,6 +4,9 @@
 # Grants permissions to create, update, and delete resources within the hybernate.io.
 # This role is intended for users who need to manage these resources
 # but should not control RBAC or manage permissions for others.
+# It's aggregated into the built-in edit and admin roles, so whoever can
+# edit a namespace can pause, wake and configure its ManagedWorkloads, as
+# kubectl hybernate pause, wake and enable do.
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -11,6 +14,8 @@ metadata:
   labels:
     app.kubernetes.io/name: hybernate
     app.kubernetes.io/managed-by: kustomize
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
   name: managedworkload-editor-role
 rules:
 - apiGroups:

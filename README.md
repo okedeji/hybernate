@@ -16,7 +16,7 @@ Hybernate fixes this by:
 
 - **Detecting idle workloads** with a per-workload activity clock: CPU, deploys, Prometheus queries, and activity annotations from your own tooling, with no learning period
 - **Learning demand patterns** via a per-workload Holt-Winters forecasting model that tracks daily and weekly seasonality
-- **Acting automatically** by pausing idle workloads and resuming proactively before users arrive
+- **Acting automatically** by pausing idle workloads, waking them on the first request, and, with `autoResume`, resuming them before users arrive
 - **Tracking savings** with per-workload cost accounting on what pods request, the resources each pause frees, and a cluster-wide total in `kubectl hybernate status`
 
 ## How It Works
@@ -34,7 +34,7 @@ flowchart TD
 2. The operator tracks when the workload was last active: CPU, deploys, activity annotations, and any Prometheus query you give it
 3. A per-workload forecast model learns when the workload is typically busy
 4. When nothing has been active for `idleAfter` (default 1 hour), the workload is paused
-5. Before the next busy period, the forecast triggers an automatic resume
+5. A request to its Service wakes it, and with `autoResume` the forecast wakes it ahead of the next busy period
 
 ## Quick Start
 
@@ -84,8 +84,8 @@ kubectl hybernate enable my-api -n staging
 
 - **Activity-based idle detection**: any sign of use (CPU, a deploy, a Prometheus query such as request rate, an activity annotation) keeps a workload awake; it pauses after `idleAfter` with none
 - **Demand forecasting** via a Holt-Winters double seasonal model that learns daily and weekly patterns per workload, with confidence scoring and anomaly detection
-- **Works with HPA, KEDA, Argo CD, and Flux**: an HPA leaves a paused workload at zero, a KEDA one is held there through KEDA, and a GitOps tool undoing a pause is reported with the fix rather than fought
-- **Wake on request**: a request to a paused workload's Service wakes it and is held until the workload is Ready, so callers see a slow response instead of an error. Browsers get a waking-up page that reloads until the app is up
+- **Works with HPA, KEDA, and GitOps tools** (Argo CD, Flux, Fleet, kapp, Kluctl): an HPA leaves a paused workload at zero, a KEDA one is held there through KEDA, and a GitOps tool undoing a pause is reported with the fix rather than fought
+- **Wake on request**: a request to a paused workload's Service wakes it and is held until the workload is Ready, so callers usually see a slow response instead of an error ([when they don't](https://okedeji.io/hybernate/concepts/wake-on-request/#what-the-caller-sees)). Browsers get a waking-up page that reloads until the app is up
 - **Pause and resume** with scale to zero and forecast-driven resume. Hybernate never deletes a workload or its storage
 
 ### Operations
@@ -95,7 +95,7 @@ kubectl hybernate enable my-api -n staging
 - **`kubectl hybernate status`** shows what Hybernate is doing in a cluster on one screen: each workload's state, when it pauses next or what holds it awake, what needs attention, what it has saved, and the latest pauses and wakes with what caused them
 - **`kubectl hybernate pause`** pauses a workload now, such as a preview environment at the end of the day, to wake on its next request
 - **`kubectl hybernate wake`** wakes a paused workload from the terminal and waits until it's Running
-- **`kubectl hybernate enable`** ends dry-run once you trust what you've measured, and says what to change in Git when Argo CD or Flux applies the workload
+- **`kubectl hybernate enable`** ends dry-run once you trust what you've measured, and says what to change in Git when a GitOps tool applies the workload
 - **Cost tracking** per workload, for the current month: what it cost, what pausing saved, and a projection for the month, priced at the list price of the nodes it runs on
 - **Dry-run mode** to see every pause the operator would make, and what it would save, without it pausing anything
 

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -286,6 +287,22 @@ func TestWriteHTMLFile_Temporary(t *testing.T) {
 // The report opens where the user sits: not on a Mac or Windows machine
 // they've reached over SSH, nor on Linux without a display, which X
 // forwarding gives an SSH session.
+// An opener that runs the browser in the foreground, as xdg-open does
+// without a desktop environment, has opened the report, not failed: it's
+// left running rather than killed and reported as a failure. One that
+// exits with an error has failed.
+func TestStartOpener(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("uses sleep, true and false")
+	}
+	start := time.Now()
+	assert.NoError(t, startOpener(exec.Command("sleep", "10"), 50*time.Millisecond), "the browser, still open")
+	assert.Less(t, time.Since(start), 5*time.Second, "not waited for")
+	assert.NoError(t, startOpener(exec.Command("true"), 5*time.Second))
+	assert.Error(t, startOpener(exec.Command("false"), 5*time.Second))
+	assert.Error(t, startOpener(exec.Command("no-such-opener-anywhere"), 5*time.Second))
+}
+
 func TestCanBrowseOn(t *testing.T) {
 	tests := []struct {
 		name string

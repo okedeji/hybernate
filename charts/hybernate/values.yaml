@@ -22,15 +22,16 @@ leaderElection:
 
 # How many ManagedWorkloads the operator reconciles at once, so one slow
 # metrics or Prometheus query doesn't hold up waking another workload.
-maxConcurrentReconciles: 4
+maxConcurrentReconciles: 8
 
 # IANA time zone, such as Europe/London, whose hours and weekdays forecasts
 # learn. Use your users' zone, so forecasts follow daylight saving.
 timezone: UTC
 
-# The operator caches the cluster's Deployments, StatefulSets, Services,
-# PVCs, HPAs, nodes and namespaces (or only the watched namespaces'), so its
-# memory grows with the cluster. Raise the limit on clusters with many
+# The operator caches the cluster's ManagedWorkloads, Deployments,
+# StatefulSets, Services, PVCs, HPAs, nodes and namespaces, or only the
+# watched namespaces', and the EndpointSlices it writes and the doorman's,
+# so its memory grows with the cluster. Raise the limit on clusters with many
 # thousands of workloads. The garbage collector aims at 90% of the limit,
 # leaving the rest for memory outside its heap, and works harder near it
 # rather than letting the operator be OOM-killed.
@@ -116,6 +117,13 @@ doorman:
   # NewRelicPinger/, Uptime-Kuma/, Gatus/ and others. For example, an
   # in-house uptime monitor's: ["MyCorpMonitor/"].
   healthCheckUserAgents: []
+  # The most doorman ports one workload, and one namespace, may hold. Each
+  # TCP port of each Service selecting a paused workload takes one of the
+  # 10,000 the cluster shares, so these keep one tenant from using them
+  # all. A workload over either is left unrouted, WakeOnRequest=False with
+  # reason TooManyPorts.
+  portsPerWorkload: 32
+  portsPerNamespace: 256
   # A ValidatingAdmissionPolicy that lets the doorman's ServiceAccount set
   # only the two annotations recording a request on ManagedWorkloads,
   # though its role may patch them.
@@ -133,7 +141,7 @@ doorman:
   priorityClassName: ""
   # The doorman's own, not the operator's extraEnv.
   extraEnv: []
-  # Empty spreads the replicas across nodes, where it can.
+  # Empty spreads the replicas across nodes and zones, where it can.
   topologySpreadConstraints: []
   # The doorman caches ManagedWorkloads, and the Services' EndpointSlices
   # in the watched namespaces, cut down to about 300 bytes per pod and
@@ -174,22 +182,32 @@ doorman:
 networkPolicy:
   enabled: false
 
-# Refuses helm uninstall while ManagedWorkloads remain, since without the
-# operator their workloads stay paused at 0 replicas. A pre-delete hook Job
-# lists them and fails, unless they're deleted within two and a half
-# minutes. Argo CD 3.3 and later runs it as a PreDelete hook, blocking the
-# Application's deletion; earlier versions, and helm uninstall --no-hooks,
-# skip it.
-uninstallGuard:
-  enabled: true
-  image:
-    repository: registry.k8s.io/kubectl
-    tag: v1.35.9
-    digest: sha256:436cbaa8a019152063d638f412cf9d73ec29e56061529d28cbc231c6ab1b37a4
+# Hook Jobs, running the operator image, that refuse what would leave
+# ManagedWorkloads with no operator, so their workloads would stay paused at
+# 0 replicas. Each waits two and a half minutes for any being deleted, then
+# lists those left and fails. helm uninstall --no-hooks, or upgrade
+# --no-hooks, skips them.
+guard:
+  # Refuses helm uninstall while ManagedWorkloads remain. Argo CD 3.3 and
+  # later runs it as a PreDelete hook, blocking the Application's deletion.
+  uninstall: true
+  # Refuses helm upgrade or rollback to a watchNamespaces that leaves out a
+  # namespace where the operator manages workloads. Argo CD runs it as a
+  # PreSync hook, before every sync.
+  upgrade: true
+  # Empty uses the operator's settings above. Istio's and Linkerd's sidecar
+  # injection are off for the hooks' pods, whose Jobs would otherwise never
+  # finish, unless these annotations or labels say otherwise.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
   resources:
     limits:
       cpu: 100m
-      memory: 256Mi
+      memory: 128Mi
     requests:
       cpu: 10m
       memory: 64Mi

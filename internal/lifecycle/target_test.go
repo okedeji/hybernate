@@ -36,15 +36,15 @@ var errAPIServer = errors.New("the API server is unavailable")
 // A StatefulSet, such as a database, is paused and resumed as a Deployment
 // is, and its resume waits for its own status to show the replicas Ready.
 func TestPauseAndResume_StatefulSet(t *testing.T) {
-	c := newClient(t, statefulSet(2))
+	c := newClient(t, statefulSet(0))
 	p := newTestPauser(c)
 	workload := apiWorkload()
 	workload.Spec.Target.Kind = v1alpha1.TargetKindStatefulSet
 
 	require.NoError(t, p.Prepare(context.Background(), workload))
-	done, err := p.Pause(context.Background(), workload)
+	paused, err := p.Pause(context.Background(), workload)
 	require.NoError(t, err)
-	require.True(t, done)
+	require.True(t, paused.Done)
 	ready := func(n int32) *appsv1.StatefulSet {
 		var sts appsv1.StatefulSet
 		require.NoError(t, c.Get(context.Background(), apiKey, &sts))

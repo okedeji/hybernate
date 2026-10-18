@@ -1,15 +1,16 @@
 # Pause and Resume
 
-Hybernate's one action is to **pause**: scale a workload to zero replicas. The Deployment or StatefulSet stays, and so do its PVCs and their data; only the pods are removed. Hybernate never deletes a workload or its storage.
+Hybernate's one action is to **pause**: scale a workload to zero replicas. The Deployment or StatefulSet stays, and so do its PVCs and their data; only the pods are removed. Hybernate never deletes a workload or its storage. A StatefulSet whose `persistentVolumeClaimRetentionPolicy.whenScaled` is `Delete` has its own controller delete its PVCs as it scales down, so Hybernate never pauses one: it reports `Protected=True`, reason `PVCsDeletedOnScaleDown`, until `whenScaled` is `Retain`.
 
 ## Pause
 
 ### What Happens When a Workload Is Paused
 
 1. What the pause will change is recorded in `status.pause`, in the same status write that moves the phase to `Pausing`, before anything is scaled: the replica count (`previousReplicas`), the KEDA ScaledObject and its own `autoscaling.keda.sh/paused-replicas` value if it has one, what each replica requests (for [cost tracking](../concepts/cost-tracking.md)), and the activity annotations as they stand
-2. A KEDA ScaledObject, if the workload has one, is held at zero with `autoscaling.keda.sh/paused-replicas: "0"`
-3. The workload is scaled to 0 through its scale subresource, under the field manager `hybernate`
-4. `status.pause.pausedAt` is set and the phase moves to `Paused`, with a `Paused` event
+2. A copy of what undoing the pause needs, the replica count and the KEDA ScaledObject with its own `paused-replicas` value, is written to the workload's `hybernate.io/paused-from` annotation, where it stays until the workload is handed back. Should the ManagedWorkload lose its status while the workload is paused, such as to a Velero restore without status, or being deleted without its finalizer and created again, Hybernate takes the pause up again from it, with a `PauseRecovered` event, and the workload wakes as it would have
+3. A KEDA ScaledObject, if the workload has one, is held at zero with `autoscaling.keda.sh/paused-replicas: "0"`
+4. The workload is scaled to 0 through its scale subresource. The API server records no field manager for a write that way, so the replicas show as no one's rather than Hybernate's
+5. `status.pause.pausedAt` is set. Once its pods have stopped, the phase moves to `Paused`, with a `Paused` event. Pods that don't stop, such as a StatefulSet's under `OrderedReady` pod management waiting on one that isn't Ready, are waited for as long as their termination grace period and a minute more (one pod after another for a StatefulSet); then it's `Paused` anyway, with `PauseIncomplete=True` and a `PauseIncomplete` warning event in place of `Paused`, until they've gone
 
 Because the record is written first, a pause interrupted at any point, by an operator restart or a conflicting write, is finished or undone from the record, and a resume always goes back to the replica count the workload had.
 
@@ -82,7 +83,7 @@ A paused workload is looked at again at least every 5 minutes, 15 minutes before
 kubectl hybernate wake my-api -n staging
 ```
 
-`wake` marks the workload active, which wakes it and restarts its idle clock, so it pauses again once it's had no activity for `idleAfter`. `--for 2h` keeps it awake for at least that long, as for a demo. To keep a workload running for good, remove its `idlePolicy`, or label it `hybernate.io/ignore: "true"`. See [kubectl Plugin](../getting-started/kubectl-plugin.md#wake-a-workload).
+`wake` marks the workload active, which wakes it and restarts its idle clock, so it pauses again once it's had no activity for `idleAfter`. `--for 2h` keeps it awake for at least that long, as for a demo. To keep a workload running for good, remove the `idlePolicy` of a ManagedWorkload you wrote. One created from the `hybernate.io/managed` label always has an `idlePolicy`, rewritten from its annotations, so label the workload `hybernate.io/ignore: "true"` instead: Hybernate stops managing it, and wakes it first if it's paused. See [kubectl Plugin](../getting-started/kubectl-plugin.md#wake-a-workload).
 
 ## When Hybernate Lets Go
 
@@ -90,7 +91,8 @@ Hybernate hands a paused workload back, scaled to the replicas it had and releas
 
 - The ManagedWorkload is deleted, or the `hybernate.io/managed` label that created it is removed
 - The workload is labelled `hybernate.io/ignore: "true"`
-- Its namespace becomes [protected](opt-in.md#protected-namespaces), or it's Hybernate's own operator or doorman Deployment (labelled `control-plane: controller-manager` or `doorman` in Hybernate's namespace), which is never paused whatever its namespace allows
+- Its namespace becomes [protected](opt-in.md#protected-namespaces), or it's Hybernate's own operator or doorman Deployment (labelled `control-plane: controller-manager` or `doorman` in Hybernate's namespace), which is never paused whatever its namespace allows; or it's a StatefulSet that deletes its PVCs when scaled down
+- Another, older ManagedWorkload for the same workload takes it over, and this one becomes the `DuplicateTarget`
 
 Each of these emits a `Resumed` event saying why and how many replicas it has. No longer managing a workload never leaves it switched off.
 
@@ -118,4 +120,4 @@ A paused workload costs only its storage. To remove one for good, delete it the 
 
 ## Finalizer
 
-The `hybernate.io/cleanup` finalizer is added to every ManagedWorkload, so that deleting one while its workload is paused scales the workload back to the replicas it had first.
+The `hybernate.io/cleanup` finalizer is added to every ManagedWorkload, so that deleting one while its workload is paused scales the workload back to the replicas it had first. A hand-back that fails is retried, except when the namespace itself is being deleted: there the workload goes with it, so after 5 minutes of failures, such as a KEDA webhook that's down rejecting the release of its ScaledObject, the ManagedWorkload lets go with a `HandBackAbandoned` Warning event rather than hold the namespace's deletion forever.

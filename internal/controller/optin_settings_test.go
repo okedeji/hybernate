@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +113,12 @@ func TestOptInSpec_InvalidValues(t *testing.T) {
 		}},
 		{v1alpha1.AnnotationIdleAfter, "-5m", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
 			assert.Equal(t, time.Hour, s.IdlePolicy.IdleAfter.Duration)
+		}},
+		{v1alpha1.AnnotationIdleAfter, "30s", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
+			assert.Equal(t, time.Hour, s.IdlePolicy.IdleAfter.Duration, "under the CRD's minute")
+		}},
+		{v1alpha1.AnnotationDependsOn, strings.Repeat("deployment/db,", 21), func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
+			assert.Len(t, s.DependsOn, v1alpha1.MaxDependsOn, "the first as many as the CRD takes")
 		}},
 		{v1alpha1.AnnotationCPUThreshold, "0", func(t *testing.T, s v1alpha1.ManagedWorkloadSpec) {
 			assert.Equal(t, 10, s.IdlePolicy.Activity.CPUThreshold)
@@ -247,8 +254,8 @@ func TestOptInSpec_WorkloadValueShadowsNamespaceProblem(t *testing.T) {
 	assert.False(t, spec.DryRun)
 }
 
-// A namespace's depends-on reaches the dependency it names too, which
-// mustn't depend on itself.
+// A workload's depends-on naming the workload itself declares nothing for
+// it; another entry still applies.
 func TestOptInSpec_DependsOnNeverNamesItself(t *testing.T) {
 	postgres := v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres"}
 	tests := []struct {
@@ -266,8 +273,8 @@ func TestOptInSpec_DependsOnNeverNamesItself(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.value, func(t *testing.T) {
-			spec, problems := optInSpec("dev", postgres, nil,
-				map[string]string{v1alpha1.AnnotationDependsOn: tt.value}, DefaultOptInDefaults)
+			spec, problems := optInSpec("dev", postgres,
+				map[string]string{v1alpha1.AnnotationDependsOn: tt.value}, nil, DefaultOptInDefaults)
 
 			assert.Empty(t, problems)
 			assert.Equal(t, len(tt.want), len(spec.DependsOn))
@@ -286,4 +293,25 @@ func TestOptInSpec_EmptyDependsOnDropsTheNamespaces(t *testing.T) {
 
 	assert.Empty(t, problems)
 	assert.Empty(t, spec.DependsOn)
+}
+
+// A YAML block scalar, as in `idle-after: |`, leaves a trailing newline in
+// the value.
+func TestOptInSpec_TrimsWhitespace(t *testing.T) {
+	workload := map[string]string{
+		v1alpha1.AnnotationIdleAfter:    "2h\n",
+		v1alpha1.AnnotationCPUThreshold: " 15 ",
+		v1alpha1.AnnotationDryRun:       "true\n",
+		v1alpha1.AnnotationWakeMaxWait:  "\t90s\n",
+		v1alpha1.AnnotationAutoResume:   "true\n",
+	}
+
+	spec, problems := optInSpec("dev", apiTarget, workload, nil, DefaultOptInDefaults)
+
+	require.Empty(t, problems)
+	assert.Equal(t, 2*time.Hour, spec.IdlePolicy.IdleAfter.Duration)
+	assert.Equal(t, 15, spec.IdlePolicy.Activity.CPUThreshold)
+	assert.True(t, spec.DryRun)
+	assert.Equal(t, 90*time.Second, spec.Wake.MaxWait.Duration)
+	assert.True(t, spec.IdlePolicy.AutoResume)
 }

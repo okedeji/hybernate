@@ -7,7 +7,7 @@ Everything the Hybernate operator and its doorman read, write, and send, for a s
 | Resource | Why | How |
 |---|---|---|
 | Deployments, StatefulSets | The workloads it manages: replicas, pod template, labels, and annotations | Watched |
-| Pods | What a workload's running pods request: the app containers', at most every 5 minutes, to judge CPU activity against, and all containers', sidecars included, to price it; and which pod sent a request that woke a workload | Read when needed, not cached |
+| Pods | What a workload's running pods request: the app containers', at most every 5 minutes, to judge CPU activity against, and all containers', sidecars included, to price it; and which pod sent a request that woke a workload. The doorman reads the pod each of a woken workload's endpoints names, to check the endpoint's address is that pod's | Read when needed, not cached; the doorman keeps a pod's addresses for 30 seconds |
 | Pod metrics (`metrics.k8s.io`) | CPU use, the activity clock's main signal | Read when needed, not cached |
 | Services | Which Services to route a paused workload's requests through, and which workload an address in an environment names | Watched |
 | EndpointSlices | Its own, routing paused workloads to the doorman, and the doorman Service's, to find the doorman's pods. The doorman reads every slice in the watched namespaces, to find a woken workload's Ready pods | Watched |
@@ -24,10 +24,10 @@ Everything the Hybernate operator and its doorman read, write, and send, for a s
 
 | Resource | What |
 |---|---|
-| Deployments, StatefulSets | Their replica count, through the scale subresource, and nothing else: no other field, and never a delete |
+| Deployments, StatefulSets | Their replica count, through the scale subresource, and, while one is paused, the `hybernate.io/paused-from` annotation: a copy of what the pause changed, removed when it's handed back. No other field, and never a delete |
 | KEDA ScaledObjects | The `autoscaling.keda.sh/paused-replicas` annotation, while their workload is paused or resuming; afterwards the value it had before, or none |
 | EndpointSlices | Its own, routing a paused workload's Services to the doorman; deleted when the workload wakes |
-| ManagedWorkloads | Its own status, including each workload's forecast state; the ones it creates for labelled workloads; `hybernate.io/last-activity` on a dependency it wakes; and, from the doorman, `hybernate.io/last-request` and `hybernate.io/last-request-from` (the caller's IP address) on one a request wakes |
+| ManagedWorkloads | Its own status, including each workload's forecast state; the ones it creates for labelled workloads; the `hybernate.io/cleanup` finalizer, added to each so that deleting it restores its workload first, and removed once it has; `hybernate.io/last-activity` on a dependency it wakes; and, from the doorman, `hybernate.io/last-request` and `hybernate.io/last-request-from` (the caller's IP address) on one a request wakes |
 | Events | On ManagedWorkloads and workloads, to say what it did and why |
 | Leases | Leader election, in its own namespace |
 
@@ -60,7 +60,7 @@ What the Helm chart grants, for a release named `hybernate`; resource names star
 | `""` | `pods` | `get`, `list` | namespaced |
 | `""` | `persistentvolumeclaims` | `get`, `list`, `watch` | namespaced |
 | `discovery.k8s.io` | `endpointslices` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` | namespaced |
-| `apps` | `deployments`, `statefulsets` | `get`, `list`, `watch` | namespaced |
+| `apps` | `deployments`, `statefulsets` | `get`, `list`, `watch`, `patch` | namespaced |
 | `apps` | `deployments/scale`, `statefulsets/scale` | `get`, `update` | namespaced |
 | `autoscaling` | `horizontalpodautoscalers` | `get`, `list`, `watch` | namespaced |
 | `keda.sh` | `scaledobjects` | `get`, `list`, `watch`, `patch` | namespaced |
@@ -79,13 +79,16 @@ With leader election, a Role `hybernate-leader-election` in the release namespac
 |---|---|---|
 | `hybernate.io` | `managedworkloads` | `get`, `list`, `watch`, `patch` |
 | `discovery.k8s.io` | `endpointslices` | `get`, `list`, `watch` |
+| `""` | `pods` | `get` |
 | `""`, `events.k8s.io` | `events` | `create`, `patch` |
 
-**Uninstall guard**, with `uninstallGuard.enabled` (the default): a ServiceAccount `hybernate-uninstall-guard`, and a ClusterRole and ClusterRoleBinding of the same name, or a Role and RoleBinding in each watched namespace, allowing `get`, `list` and `watch` on `hybernate.io` `managedworkloads`. They exist only while `helm uninstall` runs its pre-delete hook, which refuses the uninstall while ManagedWorkloads are left.
+**Guards**, with `guard.uninstall` and, with `watchNamespaces`, `guard.upgrade` (the defaults): a ServiceAccount `hybernate-uninstall-guard`, and a ClusterRole and ClusterRoleBinding of the same name, allowing `list` on `hybernate.io` `managedworkloads`, cluster-wide even with `watchNamespaces`; and the same named `hybernate-upgrade-guard`. They're Helm hooks, like the Jobs that use them: they exist only while `helm uninstall` runs its pre-delete hook, or `helm upgrade` or `helm rollback` its pre-upgrade or pre-rollback hook, which refuse to leave ManagedWorkloads without an operator.
+
+**People**: ClusterRoles `hybernate-view` and `hybernate-edit`, which grant nothing to Hybernate itself. They're aggregated into Kubernetes' built-in roles: `view`, `edit` and `admin` gain `get`, `list` and `watch` on `hybernate.io` `managedworkloads`, and `get` on their status; `edit` and `admin` gain `create`, `update`, `patch` and `delete`.
 
 **Admission policy**, with `doorman.admissionPolicy.enabled` (the default): a ValidatingAdmissionPolicy and binding `hybernate-doorman`, cluster-scoped, which refuse any change the doorman's ServiceAccount makes to a ManagedWorkload other than to its `hybernate.io/last-request` and `last-request-from` annotations.
 
-**Metrics**, with `metrics.secure` (the default): ClusterRoleBindings `hybernate-auth-delegator` and `hybernate-doorman-auth-delegator` to the built-in `system:auth-delegator` ClusterRole, so the operator and the doorman can check the tokens of whoever scrapes them; and, with `metrics.enabled`, a ClusterRole `hybernate-metrics-reader` allowing `get` on the `/metrics` URL, bound to `metrics.readerSubjects` by a ClusterRoleBinding of the same name.
+**Metrics**, with `metrics.enabled` and `metrics.secure` (the defaults): ClusterRoleBindings `hybernate-auth-delegator` and `hybernate-doorman-auth-delegator` to the built-in `system:auth-delegator` ClusterRole, so the operator and the doorman can check the tokens of whoever scrapes them; and a ClusterRole `hybernate-metrics-reader` allowing `get` on the `/metrics` URL, bound to `metrics.readerSubjects` by a ClusterRoleBinding of the same name.
 
 ## The plugin
 

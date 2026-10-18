@@ -487,6 +487,12 @@ func TestPauseRequest_AcrossARestart(t *testing.T) {
 	assert.Equal(t, int32(3), replicas())
 
 	annotate(v1alpha1.AnnotationPauseRequested, "a-new-request")
+	require.Eventually(t, func() bool { return get().Status.Phase == v1alpha1.PhasePausing && replicas() == 0 },
+		30*time.Second, 100*time.Millisecond, "a new request scales it to zero, and waits for its pods to stop")
+	require.NoError(t, c.Get(ctx, key, &d))
+	d.Status.ObservedGeneration = d.Generation
+	d.Status.Replicas, d.Status.ReadyReplicas = 0, 0
+	require.NoError(t, c.Status().Update(ctx, &d))
 	assert.Eventually(t, func() bool {
 		w := get()
 		return w.Status.Phase == v1alpha1.PhasePaused && replicas() == 0 && w.Status.LastPauseRequest == "a-new-request"

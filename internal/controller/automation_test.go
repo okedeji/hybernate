@@ -96,11 +96,17 @@ type stubMetrics struct {
 	memoryPerReplica float64
 	replicas         int32
 	pvcBytes         float64
-	err              error
+	// measuredPods is how many pods report usage; every replica unless set.
+	measuredPods int
+	err          error
 }
 
-func (m *stubMetrics) WorkloadCPUMillis(_ context.Context, _ *v1alpha1.ManagedWorkload) (float64, error) {
-	return m.cpuMillis, m.err
+func (m *stubMetrics) WorkloadCPUMillis(ctx context.Context, w *v1alpha1.ManagedWorkload) (float64, int, error) {
+	if m.measuredPods > 0 {
+		return m.cpuMillis, m.measuredPods, m.err
+	}
+	replicas, _ := m.Replicas(ctx, w)
+	return m.cpuMillis, int(replicas), m.err
 }
 
 // CPURequestPerReplica is 100m unless cpuPerReplica says otherwise, so that

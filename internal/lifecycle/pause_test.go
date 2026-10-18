@@ -26,7 +26,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	v1alpha1 "github.com/okedeji/hybernate/api/v1alpha1"
 	"github.com/okedeji/hybernate/internal/autoscaler"
 )
 
@@ -39,12 +42,54 @@ func TestPause_ScalesToZero(t *testing.T) {
 	assert.Equal(t, int32(3), replicas(t, c), "preparing changes nothing")
 	assert.Nil(t, workload.Status.Pause.PausedAt)
 
-	done, err := p.Pause(context.Background(), workload)
+	paused, err := p.Pause(context.Background(), workload)
 	require.NoError(t, err)
-	assert.True(t, done)
+	assert.Equal(t, Suspension{Running: 3}, paused, "not done while its pods run")
 	assert.Equal(t, int32(3), workload.Status.Pause.PreviousReplicas)
-	assert.NotNil(t, workload.Status.Pause.PausedAt)
+	assert.NotNil(t, workload.Status.Pause.PausedAt, "scaled to zero")
 	assert.Equal(t, int32(0), replicas(t, c))
+
+	settle(t, c, 0)
+	paused, err = p.Pause(context.Background(), workload)
+	require.NoError(t, err)
+	assert.Equal(t, Suspension{Done: true}, paused, "done once they've stopped")
+}
+
+// Pods that don't stop, such as a StatefulSet's waiting on one that isn't
+// Ready under OrderedReady pod management, don't hold the pause for good:
+// it's done, saying how many still run, once each has had its grace period
+// and a minute more, one after another for a StatefulSet.
+func TestPause_StopsWaitingForPodsThatDontStop(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  client.Object
+		waited  time.Duration
+		pending bool
+	}{
+		{name: "a Deployment, within its grace", target: deployment(3, 3), waited: 89 * time.Second, pending: true},
+		{name: "a Deployment, past its grace", target: deployment(3, 3), waited: 90 * time.Second},
+		{name: "a StatefulSet, one pod after another", target: statefulSet(2), waited: 119 * time.Second, pending: true},
+		{name: "a StatefulSet, past every pod's grace", target: statefulSet(2), waited: 2 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newClient(t, tt.target)
+			p := newTestPauser(c)
+			workload := pausedWorkload(2)
+			if _, ok := tt.target.(*appsv1.StatefulSet); ok {
+				workload.Spec.Target.Kind = v1alpha1.TargetKindStatefulSet
+			}
+			pausedAt := metav1.NewTime(p.clock().Add(-tt.waited))
+			workload.Status.Pause.PausedAt = &pausedAt
+
+			paused, err := p.Pause(context.Background(), workload)
+
+			require.NoError(t, err)
+			assert.Equal(t, !tt.pending, paused.Done)
+			assert.Positive(t, paused.Running)
+			assert.Equal(t, &pausedAt, workload.Status.Pause.PausedAt, "timed from when it was first scaled to zero")
+		})
+	}
 }
 
 func TestPause_RequiresAPreparedRecord(t *testing.T) {
@@ -62,10 +107,10 @@ func TestPause_Idempotent(t *testing.T) {
 	workload := pausedWorkload(3)
 	workload.Status.Pause.PausedAt = &pausedAt
 
-	done, err := newTestPauser(c).Pause(context.Background(), workload)
+	paused, err := newTestPauser(c).Pause(context.Background(), workload)
 
 	require.NoError(t, err)
-	assert.True(t, done)
+	assert.True(t, paused.Done)
 	assert.Equal(t, int32(3), workload.Status.Pause.PreviousReplicas)
 	assert.Equal(t, &pausedAt, workload.Status.Pause.PausedAt)
 }
@@ -82,10 +127,9 @@ func TestPause_RetryKeepsTheRecordedReplicas(t *testing.T) {
 	require.NoError(t, err)
 	workload.Status.Pause.PausedAt = nil
 
-	done, err := p.Pause(context.Background(), workload)
+	_, err = p.Pause(context.Background(), workload)
 
 	require.NoError(t, err)
-	assert.True(t, done)
 	assert.Equal(t, int32(3), workload.Status.Pause.PreviousReplicas)
 }
 
@@ -274,4 +318,28 @@ func TestRestore_NoPauseIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, got)
 	assert.Zero(t, replicas(t, c), "nothing Hybernate paused is started")
+}
+
+// KEDA, still holding a ScaledObject that may scale to zero at zero, would
+// take the target straight back down if the scale-up came first, so Restore
+// holds it at the restored count before scaling, as a resume does.
+func TestRestore_HoldsKEDAAtTheRestoredCountWhileScaling(t *testing.T) {
+	var heldAt string
+	c := interceptor.NewClient(newClient(t, deployment(0, 0), scaledObjectFor(0)), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, inner client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			heldAt, _ = pausedAnnotation(t, inner)
+			return inner.SubResource(sub).Update(ctx, obj, opts...)
+		}})
+	workload := pausedWorkload(3)
+	workload.Status.Pause.ScaledObject = scaledObjectName
+	require.NoError(t, autoscaler.HoldKEDA(context.Background(), c, "default", scaledObjectName, 0))
+
+	got, err := newTestPauser(c).Restore(context.Background(), workload)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), got)
+	assert.Equal(t, "3", heldAt, "held at the restored count as it's scaled up")
+	_, held := pausedAnnotation(t, c)
+	assert.False(t, held, "then released")
 }

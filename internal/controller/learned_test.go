@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -191,13 +192,51 @@ func TestLearnDependencies_WhenToRelearn(t *testing.T) {
 
 	changed := target.DeepCopy()
 	changed.Spec.Template.Spec.Containers[0].Env[0].Value = "redis:6379"
+	changed.ResourceVersion += "1" // as the update that changed it would
 	require.NoError(t, r.learnDependencies(context.Background(), api, changed))
 	assert.Equal(t, []string{"default/redis DATABASE_URL"}, learnedNames(api), "the template changed")
 	relearnedAt := api.Status.LearnedDependencies.At
 
+	api.Status.Phase = v1alpha1.PhasePaused
 	r.clock = func() time.Time { return fixedTime.Add(2 * time.Hour) }
 	require.NoError(t, r.learnDependencies(context.Background(), api, changed))
+	assert.Equal(t, relearnedAt, api.Status.LearnedDependencies.At, "paused, nothing it runs reads the environment")
+
+	api.Status.Phase = v1alpha1.PhaseRunning
+	require.NoError(t, r.learnDependencies(context.Background(), api, changed))
 	assert.True(t, api.Status.LearnedDependencies.At.After(relearnedAt.Time), "an hour on")
+}
+
+// Learning dependencies reads ConfigMaps past the cache and lists Services
+// and workloads. However it fails, a paused workload a request woke still
+// wakes.
+func TestLearnDependencies_NeverHoldsUpAWake(t *testing.T) {
+	pausedAt := metav1.NewTime(fixedTime.Add(-time.Hour))
+	api := depWorkload("default", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhasePaused)
+	api.Finalizers = []string{finalizerName}
+	api.Status.Pause = &v1alpha1.PauseStatus{PreviousReplicas: 1, PausedAt: &pausedAt,
+		WakeAnnotations: &v1alpha1.WakeAnnotations{}}
+	api.Annotations = map[string]string{v1alpha1.AnnotationLastActivity: fixedTime.UTC().Format(time.RFC3339)}
+	target := apiWith(nil)
+	target.Spec.Replicas = ptr.To[int32](0)
+	target.Spec.Template.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{
+		{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "config"}}}}
+	pauser := &stubPauser{resumeDone: true}
+	r := depReconciler(t, pauser, api, target)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.ConfigMap); ok {
+				return errors.New("the API server is overloaded")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+
+	_, err := r.Reconcile(context.Background(), reconcileFor("api"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, pauser.resumeCalls, "the wake went ahead")
+	assert.Equal(t, v1alpha1.PhaseRunning, fetch(t, r, "api").Status.Phase)
 }
 
 // What's learned is announced once it's recorded, so a write that fails
@@ -292,7 +331,7 @@ func wakeReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	t.Helper()
 	r := depReconciler(t, &stubPauser{})
 	r.Client = fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithStatusSubresource(&v1alpha1.ManagedWorkload{}).WithObjects(objs...).
+		WithStatusSubresource(&v1alpha1.ManagedWorkload{}).WithObjects(objs...).WithReturnManagedFields().
 		WithIndex(&corev1.Pod{}, podIPField, func(o client.Object) []string {
 			return []string{o.(*corev1.Pod).Status.PodIP}
 		}).Build()
@@ -329,7 +368,17 @@ func wokenPostgres() *v1alpha1.ManagedWorkload {
 		v1alpha1.AnnotationLastRequest:     fixedTime.Add(-time.Second).UTC().Format(time.RFC3339),
 		v1alpha1.AnnotationLastRequestFrom: senderIP,
 	}
+	w.ManagedFields = []metav1.ManagedFieldsEntry{stampedBy(v1alpha1.FieldManager)}
 	return w
+}
+
+// stampedBy is the managed fields entry the API server records for a
+// manager that set the wake annotations, as the doorman does.
+func stampedBy(manager string) metav1.ManagedFieldsEntry {
+	return metav1.ManagedFieldsEntry{Manager: manager, Operation: metav1.ManagedFieldsOperationUpdate,
+		APIVersion: v1alpha1.GroupVersion.String(), Time: &metav1.Time{Time: fixedTime}, FieldsType: "FieldsV1",
+		FieldsV1: metav1.NewFieldsV1(`{"f:metadata":{"f:annotations":{` +
+			`"f:hybernate.io/last-request":{},"f:hybernate.io/last-request-from":{}}}}`)}
 }
 
 func TestLearnFromWake(t *testing.T) {
@@ -360,6 +409,11 @@ func TestLearnFromWake(t *testing.T) {
 			objs: []client.Object{podOf("postgres", false), selecting(v1alpha1.TargetKindDeployment, "api", nil)}},
 		{name: "from the node's network", postgres: wokenPostgres(),
 			objs: []client.Object{podOf("api", true), selecting(v1alpha1.TargetKindDeployment, "api", nil)}},
+		{name: "an address someone other than the doorman wrote", postgres: func() *v1alpha1.ManagedWorkload {
+			w := wokenPostgres()
+			w.ManagedFields = []metav1.ManagedFieldsEntry{stampedBy("kubectl-annotate")}
+			return w
+		}(), objs: []client.Object{podOf("api", false), selecting(v1alpha1.TargetKindDeployment, "api", nil)}},
 		{name: "not woken by a request", postgres: func() *v1alpha1.ManagedWorkload {
 			w := wokenPostgres()
 			w.Annotations[v1alpha1.AnnotationLastRequest] = fixedTime.Add(-2 * time.Hour).UTC().Format(time.RFC3339)
@@ -382,6 +436,48 @@ func TestLearnFromWake(t *testing.T) {
 			if tt.want != nil && tt.api == nil {
 				assert.Equal(t, v1alpha1.LearnedFromWake, got.Status.LearnedDependencies.Dependencies[0].Source)
 			}
+		})
+	}
+}
+
+// A request from another namespace teaches a dependency only when the
+// woken workload's namespace allows dependents from it, and the sender is
+// only looked for there.
+func TestLearnFromWake_AcrossNamespaces(t *testing.T) {
+	tests := []struct {
+		name           string
+		dependentsFrom string
+		wantLearned    bool
+	}{
+		{name: "not allowed"},
+		{name: "allowed", dependentsFrom: "preview-42", wantLearned: true},
+		{name: "any allowed", dependentsFrom: "*", wantLearned: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+			if tt.dependentsFrom != "" {
+				ns.Annotations = map[string]string{v1alpha1.AnnotationDependentsFrom: tt.dependentsFrom}
+			}
+			sender := podOf("api", false)
+			sender.Namespace = "preview-42"
+			api := selecting(v1alpha1.TargetKindDeployment, "api", nil)
+			api.SetNamespace("preview-42")
+			postgres := wokenPostgres()
+			var reads podReads
+			r := reads.reconciler(t, ns, sender, api, postgres, selecting(v1alpha1.TargetKindStatefulSet, "postgres", nil),
+				depWorkload("preview-42", "api", v1alpha1.TargetKindDeployment, v1alpha1.PhaseRunning))
+
+			require.NoError(t, r.learnFromWake(context.Background(), postgres))
+
+			var got v1alpha1.ManagedWorkload
+			require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "preview-42", Name: "api"}, &got))
+			if tt.wantLearned {
+				assert.Equal(t, []string{"default/postgres "}, learnedNames(&got))
+				return
+			}
+			assert.Empty(t, learnedNames(&got))
+			assert.Equal(t, 1, reads.lists, "only its own namespace is searched")
 		})
 	}
 }
@@ -568,7 +664,7 @@ func TestLearnFromWake_Bounded(t *testing.T) {
 
 	err := r.learnFromWake(context.Background(), postgres)
 
-	require.ErrorContains(t, err, "not among the first 10000 pods")
+	require.ErrorContains(t, err, "not among the first 2000 pods")
 	assert.Equal(t, maxPodPages, reads.pages)
 	assert.LessOrEqual(t, reads.deadline, wakeLearnTimeout)
 }
@@ -618,9 +714,29 @@ func TestLearnFromWake_FirstLearnedIsValid(t *testing.T) {
 			Prediction: v1alpha1.PredictionSpec{Confidence: 85}},
 	}
 	require.NoError(t, c.Create(ctx, api))
-
+	postgres := &v1alpha1.ManagedWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "postgres", Namespace: "default"},
+		Spec: v1alpha1.ManagedWorkloadSpec{Target: v1alpha1.WorkloadRef{Kind: v1alpha1.TargetKindStatefulSet, Name: "postgres"},
+			Prediction: v1alpha1.PredictionSpec{Confidence: 85}},
+	}
+	require.NoError(t, c.Create(ctx, postgres))
+	stamp := func(manager string) {
+		t.Helper()
+		patch := client.MergeFrom(postgres.DeepCopy())
+		postgres.Annotations = wokenPostgres().Annotations
+		require.NoError(t, c.Patch(ctx, postgres, patch, client.FieldOwner(manager)))
+	}
 	r := &Reconciler{Client: c, PodReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(20),
 		clock: func() time.Time { return fixedTime }}
+
+	stamp("kubectl-annotate")
+	require.NoError(t, r.learnFromWake(ctx, wokenPostgres()))
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(api), api))
+	assert.Empty(t, learnedNames(api), "an address someone else wrote isn't the doorman's")
+
+	postgres.Annotations = nil
+	require.NoError(t, c.Update(ctx, postgres))
+	stamp(v1alpha1.FieldManager)
 	require.NoError(t, r.learnFromWake(ctx, wokenPostgres()))
 
 	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(api), api))

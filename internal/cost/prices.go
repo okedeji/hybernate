@@ -117,20 +117,48 @@ func splitHourly(hourly, vcpu, memoryGiB float64) Rates {
 // don't collide across providers, so the provider isn't needed to find one.
 // AKS labels nodes with the ARM size name, Standard_D4s_v5, which the
 // table has as d4sv5.
-func tableName(instanceType string) string {
+//
+// An Azure constrained vCPU size, such as Standard_E4-2s_v5, is its base
+// size, E4s_v5, with only some of the vCPUs, 2, enabled. Azure bills it as
+// the base size, and the table lists only base sizes, so it's found as the
+// base size and vcpus says how many of its vCPUs its price is spread over;
+// zero for any other instance type.
+func tableName(instanceType string) (name string, vcpus float64) {
 	t := strings.ToLower(instanceType)
-	if rest, ok := strings.CutPrefix(t, "standard_"); ok {
-		t = strings.ReplaceAll(rest, "_", "")
+	rest, ok := strings.CutPrefix(t, "standard_")
+	if !ok {
+		return t, 0
 	}
-	return t
+	return constrainedBase(strings.ReplaceAll(rest, "_", ""))
 }
+
+// constrainedBase splits a constrained vCPU size, e4-2sv5, into its base
+// size, e4sv5, and its enabled vCPUs, 2.
+func constrainedBase(size string) (base string, vcpus float64) {
+	head, tail, ok := strings.Cut(size, "-")
+	if !ok || head == "" || !isDigit(head[len(head)-1]) {
+		return size, 0
+	}
+	n := 0
+	for n < len(tail) && isDigit(tail[n]) {
+		n++
+	}
+	enabled, err := strconv.Atoi(tail[:n])
+	if err != nil || enabled == 0 {
+		return size, 0
+	}
+	return head + tail[n:], float64(enabled)
+}
+
+func isDigit(c byte) bool { return '0' <= c && c <= '9' }
 
 // lookUp finds an instance type's price in a region in the table.
 func lookUp(instanceType, region string) (ListPrice, bool, error) {
 	if instanceType == "" || region == "" {
 		return ListPrice{}, false, nil
 	}
-	name, region := tableName(instanceType), strings.ToLower(region)
+	name, vcpus := tableName(instanceType)
+	region = strings.ToLower(region)
 	gz, err := gzip.NewReader(bytes.NewReader(pricesFile))
 	if err != nil {
 		return ListPrice{}, false, fmt.Errorf("reading the price table: %w", err)
@@ -147,7 +175,7 @@ func lookUp(instanceType, region string) (ListPrice, bool, error) {
 			if r != region {
 				continue
 			}
-			p, err := parseListing(fields, price, line)
+			p, err := parseListing(fields, price, line, vcpus)
 			return p, err == nil, err
 		}
 		return ListPrice{}, false, nil
@@ -158,7 +186,9 @@ func lookUp(instanceType, region string) (ListPrice, bool, error) {
 	return ListPrice{}, false, nil
 }
 
-func parseListing(fields []string, price string, line int) (ListPrice, error) {
+// parseListing reads a table line's price in one region, spread over enabled
+// vCPUs when they're fewer than the instance type's.
+func parseListing(fields []string, price string, line int, enabled float64) (ListPrice, error) {
 	vcpu, err := strconv.ParseFloat(fields[2], 64)
 	if err != nil {
 		return ListPrice{}, fmt.Errorf("price table line %d: vCPUs: %w", line, err)
@@ -170,6 +200,9 @@ func parseListing(fields []string, price string, line int) (ListPrice, error) {
 	hourly, err := strconv.ParseFloat(price, 64)
 	if err != nil {
 		return ListPrice{}, fmt.Errorf("price table line %d: price: %w", line, err)
+	}
+	if enabled > 0 && enabled < vcpu {
+		vcpu = enabled
 	}
 	return ListPrice{Provider: fields[0], Rates: splitHourly(hourly, vcpu, memory)}, nil
 }

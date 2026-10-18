@@ -179,16 +179,19 @@ type happening struct {
 // raised as True, and the ones that report something working are a
 // problem when False.
 var troubles = map[string]metav1.ConditionStatus{
-	"GitOpsConflict":      metav1.ConditionTrue,
-	"DependencyCycle":     metav1.ConditionTrue,
-	"DependencyNotFound":  metav1.ConditionTrue,
-	"DuplicateTarget":     metav1.ConditionTrue,
-	"Protected":           metav1.ConditionTrue,
-	"TargetAvailable":     metav1.ConditionFalse,
-	"MetricsAvailable":    metav1.ConditionFalse,
-	"PrometheusAvailable": metav1.ConditionFalse,
-	"WakeOnRequest":       metav1.ConditionFalse,
-	"ResumeIncomplete":    metav1.ConditionTrue,
+	"GitOpsConflict":       metav1.ConditionTrue,
+	"DependencyCycle":      metav1.ConditionTrue,
+	"DependencyNotFound":   metav1.ConditionTrue,
+	"DependencyNotAllowed": metav1.ConditionTrue,
+	"DuplicateTarget":      metav1.ConditionTrue,
+	"Protected":            metav1.ConditionTrue,
+	"TargetAvailable":      metav1.ConditionFalse,
+	"MetricsAvailable":     metav1.ConditionFalse,
+	"PrometheusAvailable":  metav1.ConditionFalse,
+	"PrometheusQueryEmpty": metav1.ConditionTrue,
+	"WakeOnRequest":        metav1.ConditionFalse,
+	"ResumeIncomplete":     metav1.ConditionTrue,
+	"PauseIncomplete":      metav1.ConditionTrue,
 }
 
 // chosen are the reasons a trouble condition carries when it reports what
@@ -435,8 +438,11 @@ func nextFor(w *v1alpha1.ManagedWorkload, targetActiveUntil, now time.Time) stri
 	case meta.IsStatusConditionTrue(conditions, "DuplicateTarget"):
 		return "nothing: another ManagedWorkload has it"
 	case meta.IsStatusConditionTrue(conditions, "Protected"):
-		if c := meta.FindStatusCondition(conditions, "Protected"); c.Reason == "HybernateComponent" {
+		switch meta.FindStatusCondition(conditions, "Protected").Reason {
+		case "HybernateComponent":
 			return "never pauses: part of Hybernate"
+		case "PVCsDeletedOnScaleDown":
+			return "never pauses: PVCs deleted on scale-down"
 		}
 		return "never pauses: namespace protected"
 	}

@@ -20,15 +20,26 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
+
+// budgetRetry is how soon a held connection waiting for the shared buffer
+// budget looks again. Nothing tells it when another connection frees some.
+const budgetRetry = 100 * time.Millisecond
 
 // clientStream reads a caller in the background while its connection is
 // held, so a caller who sends a request body and leaves is noticed at once,
 // rather than when the workload is Ready or maxWait runs out. Reading to the
 // caller's EOF means buffering what it sent: up to the limits' per-connection
 // cap, and within their budget shared by every held connection. A caller
-// past either stops being read until its connection is passed on, as it
-// would without the doorman, and its leaving goes unnoticed until then.
+// past either stops being read until its connection is passed on, or the
+// budget frees, as it would without the doorman, and its leaving goes
+// unnoticed until then.
+//
+// What's buffered is kept in chunks of clientBufferSize, and the budget
+// counts whole chunks, the memory really held. A held connection's first
+// chunk isn't counted, since maxHeld already bounds it, so a caller who
+// sent less than a chunk and left is noticed even once the budget is spent.
 //
 // A caller's EOF means it left, whatever its protocol: over TCP, closing a
 // connection and shutting down its sending side are the same FIN, and
@@ -43,11 +54,17 @@ type clientStream struct {
 
 	mu      sync.Mutex
 	changed *sync.Cond
-	buf     []byte
+	// chunks hold what the caller sent and hasn't been passed on, from
+	// chunks[0][off:]. The caller is read into the last one's spare
+	// capacity; reading is set while that's under way.
+	chunks  [][]byte
+	off     int
+	reading bool
 	err     error
 	held    bool
 	counted int
 	closed  bool
+	retry   *time.Timer
 
 	// gone is closed when reading the caller ends: it left, or its
 	// connection failed.
@@ -63,23 +80,17 @@ func newClientStream(conn net.Conn, a *admission) *clientStream {
 // run reads the caller until it ends or the stream is closed.
 func (s *clientStream) run() {
 	defer close(s.gone)
-	chunk := make([]byte, clientBufferSize)
 	for {
-		reserved, ok := s.awaitRoom()
+		into, ok := s.awaitRoom()
 		if !ok {
 			return
 		}
-		n, err := s.conn.Read(chunk)
+		n, err := s.conn.Read(into)
 
 		s.mu.Lock()
-		if !s.closed {
-			s.buf = append(s.buf, chunk[:n]...)
-		}
-		if s.held {
-			s.counted += n
-			s.admission.releaseBuffer(reserved - n)
-		} else {
-			s.admission.releaseBuffer(reserved)
+		s.reading = false
+		if last := len(s.chunks) - 1; !s.closed {
+			s.chunks[last] = s.chunks[last][:len(s.chunks[last])+n]
 		}
 		if err != nil {
 			s.err = err
@@ -92,27 +103,85 @@ func (s *clientStream) run() {
 	}
 }
 
-// awaitRoom waits until another read fits, and returns how much of the
-// held connections' budget it reserved for it.
-func (s *clientStream) awaitRoom() (int, bool) {
+// awaitRoom waits until another read fits, and returns the spare capacity
+// to read it into.
+func (s *clientStream) awaitRoom() ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for !s.closed {
-		limit := clientBufferSize
-		if s.held {
-			limit = s.admission.limits.maxBufferedPerConn
-		}
-		if len(s.buf)+clientBufferSize <= limit {
-			if !s.held {
-				return 0, true
-			}
-			if s.admission.reserveBuffer(clientBufferSize) {
-				return clientBufferSize, true
-			}
+		if into, ok := s.room(); ok {
+			s.reading = true
+			return into, true
 		}
 		s.changed.Wait()
 	}
-	return 0, false
+	return nil, false
+}
+
+// room is the spare capacity of the last chunk, or of a new one when the
+// limits allow it. s.mu must be held.
+func (s *clientStream) room() ([]byte, bool) {
+	if !s.held && s.unread() > 0 {
+		return nil, false
+	}
+	s.compact()
+	if n := len(s.chunks); n > 0 {
+		if last := s.chunks[n-1]; len(last) < cap(last) {
+			return last[len(last):cap(last)], true
+		}
+	}
+	if s.held && len(s.chunks) > 0 {
+		if (len(s.chunks)+1)*clientBufferSize > s.admission.limits.maxBufferedPerConn {
+			return nil, false
+		}
+		if !s.admission.reserveBuffer(clientBufferSize) {
+			s.retryLater()
+			return nil, false
+		}
+		s.counted += clientBufferSize
+	}
+	chunk := make([]byte, 0, clientBufferSize)
+	s.chunks = append(s.chunks, chunk)
+	return chunk[:clientBufferSize], true
+}
+
+// retryLater wakes the stream after budgetRetry, to look for budget again.
+// s.mu must be held.
+func (s *clientStream) retryLater() {
+	if s.retry != nil {
+		s.retry.Reset(budgetRetry)
+		return
+	}
+	s.retry = time.AfterFunc(budgetRetry, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.changed.Broadcast()
+	})
+}
+
+// unread is how much has been read from the caller and not passed on.
+// s.mu must be held.
+func (s *clientStream) unread() int {
+	n := -s.off
+	for _, c := range s.chunks {
+		n += len(c)
+	}
+	return n
+}
+
+// compact drops the chunks passed on in full, and empties the last one for
+// reuse once it has been and nothing is being read into it. s.mu must be
+// held.
+func (s *clientStream) compact() {
+	for len(s.chunks) > 1 && s.off == len(s.chunks[0]) {
+		s.chunks[0] = nil
+		s.chunks = s.chunks[1:]
+		s.off = 0
+	}
+	if len(s.chunks) == 1 && s.off == len(s.chunks[0]) && !s.reading {
+		s.chunks[0] = s.chunks[0][:0]
+		s.off = 0
+	}
 }
 
 // Read returns what the caller sent, in order, and its EOF once it's all
@@ -121,20 +190,18 @@ func (s *clientStream) Read(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.passedOn()
-	for len(s.buf) == 0 && s.err == nil && !s.closed {
+	for s.unread() == 0 && s.err == nil && !s.closed {
 		s.changed.Wait()
 	}
-	if len(s.buf) == 0 {
+	if s.unread() == 0 {
 		if s.closed {
 			return 0, io.ErrClosedPipe
 		}
 		return 0, s.err
 	}
-	n := copy(p, s.buf)
-	s.buf = s.buf[n:]
-	if len(s.buf) == 0 {
-		s.buf = nil
-	}
+	s.compact()
+	n := copy(p, s.chunks[0][s.off:])
+	s.off += n
 	s.changed.Broadcast()
 	return n, nil
 }
@@ -158,6 +225,9 @@ func (s *clientStream) close() {
 	defer s.mu.Unlock()
 	s.passedOn()
 	s.closed = true
-	s.buf = nil
+	s.chunks, s.off = nil, 0
+	if s.retry != nil {
+		s.retry.Stop()
+	}
 	s.changed.Broadcast()
 }
